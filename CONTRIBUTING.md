@@ -1,65 +1,118 @@
 # Contributing
 
-Thank you for helping improve **matryca-logseq-llm-wiki**. This project bridges AI agents with **Logseq OG** using pure local Markdown and a block-oriented outliner model.
+Thank you for investing your time in **matryca-logseq-llm-wiki**.
 
-## Workflow
+This project exists so AI agents can collaborate on **Logseq OG** graphs the right way: **blocks**, **`id::`**, and **local Markdown** — not flattened blobs in someone else’s database. Whether you fix a typo, tighten a test, or add an MCP tool, you are helping keep that bar high. We are glad you are here.
 
-1. **Fork** the repository and create a branch for your change.
-2. **Open an issue** (or comment on an existing one) for larger features so design and scope stay aligned.
-3. **Keep pull requests focused**: one logical change per PR is easier to review and bisect.
+---
 
-## Local setup
+## What we are building (read once)
 
-1. Use **Python 3.12+** (see ``.python-version``).
-2. Install **[uv](https://docs.astral.sh/uv/)**. That is the only required toolchain besides a CPython interpreter compatible with the project.
+- **Atomic outliner paradigm** — Prefer nested bullets and stable `id::` lines; see [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md).
+- **No new system-of-record database** — In-memory indexes, filesystem scans, Logseq’s API, and optional git snapshots on the graph repo only.
+- **Parser boundary** — Spatial page structure comes from **`logseq_matryca_parser`**; targeted edits use **bounded** line/regex modules (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
+
+---
+
+## Local development with `uv`
+
+1. **Python 3.12+** (see `.python-version`).
+2. Install **[uv](https://docs.astral.sh/uv/)**.
 3. From the repository root, install dependencies and dev tools:
 
    ```bash
    make install
    ```
 
-   This runs ``uv sync --extra dev`` and lets **uv** manage the virtual environment (typically ``.venv/``).
+   This runs **`uv sync --extra dev`** and creates the virtual environment (typically **`.venv/`**).
 
-4. Optional: activate the environment for a classic shell, or keep using **uv** via ``uv run`` and **Make** targets:
+4. Optional: activate the venv, or invoke tools via **`uv run`** and the Makefile.
 
    ```bash
-   source .venv/bin/activate   # Windows: .venv\Scripts\activate
+   source .venv/bin/activate
    ```
 
-   Run ``make help`` for a short description of every target (format, lint, typecheck, test, check, clean).
-
-5. Copy the environment template and fill in values:
+5. For integration-style work or tests that need paths:
 
    ```bash
    cp .env.example .env
    ```
 
-   Set `LOGSEQ_API_TOKEN`, `LOGSEQ_API_URL`, and `LOGSEQ_GRAPH_PATH` for your machine.
+   Set **`LOGSEQ_API_TOKEN`**, **`LOGSEQ_API_URL`**, and **`LOGSEQ_GRAPH_PATH`** when you exercise live Logseq or graph-scoped tools.
 
-6. **Before you open a Pull Request**, run the full quality gate so formatting, linting, strict typing, and tests all pass:
+6. List all Make targets:
 
    ```bash
-   make check
+   make help
    ```
 
-   This applies Ruff fixes and formatting, runs Ruff lint, **mypy** on ``src/`` and ``tests/``, and **pytest**. Aligning with this step keeps reviews fast and matches what maintainers expect from a green contribution.
+### Makefile targets you will use
 
-## The “atomic block” paradigm
+| Target | What it does |
+|--------|----------------|
+| `make install` | `uv sync --extra dev` |
+| `make format` | Ruff auto-fix + format |
+| `make lint` | Ruff lint only |
+| `make typecheck` | `mypy src/ tests/` (strict) |
+| `make test` | `pytest -q` |
+| **`make check`** | **`format`** → **`lint`** → **`typecheck`** → **`test`** (full local gate) |
+| `make clean` | Remove `.venv`, caches |
 
-Logseq OG treats **indented bullets** as a tree of blocks. When agents (or humans) edit files:
+---
 
-- Prefer **nested bullets** over flattening ideas into prose paragraphs.
-- Preserve **`id:: <uuid>`** lines when moving or refactoring blocks so graph references stay stable.
-- Assume **human–AI co-editing** on the same `.md` files; avoid changes that only make sense inside a proprietary database.
+## Merge bar: green `make check`
 
-Code and tooling in this repo should reinforce block-grained read/write paths and clear validation at boundaries (e.g. Pydantic models for tool inputs).
+**No pull request is merged unless `make check` is 100% green.**
 
-## Pull request checklist
+That means, in order:
 
-- Explain **why** the change is needed and any trade-offs.
-- Keep types and docstrings accurate for public APIs.
-- Do not commit secrets (no `.env`, tokens, or private graph paths).
+1. **Ruff** — auto-fix and format the tree, then lint clean  
+2. **Mypy** — strict type-check on **`src/`** and **`tests/`**  
+3. **Pytest** — full suite (currently **72** tests)
+
+GitHub Actions on pushes and pull requests to **`main`** runs **ruff**, **mypy** on `src/`, and **pytest** (see `.github/workflows/ci.yml`). Locally, always run **`make check`** before you push: it matches maintainer expectations and catches formatting drift CI does not auto-fix.
+
+Never commit secrets (no `.env`, tokens, or private graph paths in git).
+
+---
+
+## Writing tests for new MCP tools
+
+### Stack conventions
+
+- **FastMCP** — Tools are plain async functions registered with **`@mcp.tool()`** in **`register_mcp_tools`** (`src/agent/mcp_server.py`). You usually **do not** need to spin up stdio MCP in tests; test the **logic** the tool calls.
+- **Pydantic** — **`OutlineNode`** and other models should be covered with **`model_validate`** / **`ValidationError`** where rules apply.
+- **pytest-asyncio** — The project sets **`asyncio_mode = auto`** in **`pyproject.toml`**. Use **`@pytest.mark.asyncio`** on async test functions when you await bridge methods.
+
+### Recommended patterns
+
+1. **Model-only tests** — Fast, no I/O. Example: outline schema rules in [`tests/test_mcp_server.py`](tests/test_mcp_server.py).
+
+2. **Stub `LogseqClient`** — Build a client with a dummy URL/token, then **`monkeypatch`** **`append_block`** (or other methods) to record arguments and return fake UUIDs. See **`test_write_logseq_outline_chains_parent_uuids`** in [`tests/test_mcp_server.py`](tests/test_mcp_server.py).
+
+3. **Filesystem fixtures** — Use pytest’s **`tmp_path`** to create minimal **`pages/`**, **`journals/`**, or **`templates/`** trees, set **`LOGSEQ_GRAPH_PATH`** via **`monkeypatch.setenv`**, and call **`src/graph/`** functions directly. Most graph tools are testable **without** Logseq running.
+
+4. **Thin MCP wrapper, fat module** — Prefer implementing behavior in **`src/graph/`** or **`src/agent/`** helpers, unit-testing those modules, and keeping **`@mcp.tool()`** bodies as short orchestration (parse args → call helper → return JSON).
+
+### Tool design checklist (keeps tests simple)
+
+- Prefer **explicit** typed parameters; use **`dict[str, Any]`** only where MCP JSON must stay flexible.
+- For mutators, default **`dry_run=true`** when behavior could touch many files; return stable keys (`ok`, `code`, `hint`, `dry_run`, `git_snapshot`, byte counts) consistent with existing tools.
+- **`src/`** must satisfy **strict mypy**; tests may relax annotations per Ruff **`per-file-ignores`** for **`tests/**`**.
+
+When you add or change a tool, **extend or add tests under [`tests/`](tests/)** so the behavior is pinned before review.
+
+---
+
+## Pull request workflow
+
+1. **Fork** the repository and use a **focused** branch per change.
+2. **Open or reference an issue** for larger features so design stays aligned.
+3. Describe **why** the change exists and any trade-offs in the PR body.
+4. Confirm **`make check`** passes on your machine.
+
+---
 
 ## Code of conduct
 
-Be respectful and constructive. Report problems privately if needed; we aim for a welcoming environment for contributors of all backgrounds.
+Be respectful, assume good intent, and keep feedback actionable. We want contributors of all backgrounds to feel welcome.

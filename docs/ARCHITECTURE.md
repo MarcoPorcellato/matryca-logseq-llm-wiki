@@ -1,151 +1,237 @@
-# System Architecture
+# Architecture
 
-This document describes how **matryca-logseq-llm-wiki** connects an LLM agent to Logseq OG through the Model Context Protocol (MCP), the local Logseq HTTP JSON-RPC API, and the on-disk Markdown graph.
+**matryca-logseq-llm-wiki** connects an LLM agent to **Logseq OG** (pure local Markdown) through **FastMCP**, **Pydantic**, and a thin async **Logseq HTTP JSON-RPC** client. This document is the engineering contract: *why* there is no second database, *where* spatial parsing lives, and *how* the agentic pipeline is supposed to run.
+
+---
+
+## Core philosophy
+
+### No external database (defended)
+
+The **only** durable system of record is the tree under **`LOGSEQ_GRAPH_PATH`**: `pages/`, `journals/`, `templates/`, and the rest of your Logseq graph on disk.
+
+We deliberately **do not** add Postgres, SQLite, Redis, an embedding index, or a document store that could fork truth away from Logseq’s files.
+
+**Why this matters:**
+
+1. **One artifact for humans and agents** — Diffs, `git blame`, full-text search, and backup tools see exactly what Logseq sees.
+2. **No sync nightmare** — A secondary DB would need invalidation rules every time a human edits a file outside the agent.
+3. **Forces block-shaped thinking** — Agents are steered toward API appends and scoped file edits instead of “replace the whole page.”
+
+When we need **ranking** (BM25), **adjacency** (wikilink/tag BFS), or **aggregates** (dashboard counts), we compute them **inside the MCP process** for that request and discard them. That is *caching*, not a competing database.
+
+### Parser for spatial truth; bounded line work for surgery and scale
+
+**[logseq-matryca-parser](https://github.com/MarcoPorcellato/logseq-matryca-parser)** (`logseq_matryca_parser`) owns the hard problem: **indentation**, block boundaries, and a faithful spatial view of a page. Our adapter **`src/rag/matryca_hooks.py`** feeds **`read_logseq_page`** so agents get the same block tree semantics Logseq uses — we do **not** fork a second full-file Markdown AST in this repo.
+
+We **do** implement **narrow, auditable** passes on raw text where the parser is the wrong abstraction or we need graph-wide coverage:
+
+| Class of work | Representative tools / modules | Mechanism |
+|---------------|----------------------------------|-----------|
+| **Scoped metadata** | `patch_logseq_block_property_lines` — `src/graph/property_line_edit.py` | Lines **inside** the span anchored at `id:: <uuid>`; only `key::` property lines |
+| **Graph-wide ref integrity** | `lint_logseq_block_refs` — `src/graph/block_ref_lint.py` | Two-pass regex: collect all `id::` UUIDs, validate each `((uuid))` |
+| **Lexical discovery** | `query_logseq_pages_local` — `src/rag/local_query.py` | Token bags + Okapi BM25 in memory |
+| **Structural hops** | `traverse_logseq_structural_hops`, hub/orphan reports — `src/graph/link_tag_hop.py` | Wikilinks, `#tags` / `tags::`, light `type::` / `domain::` edges on disk |
+| **Hashtag normalization** | `lint_unify_logseq_tags` — `src/graph/tag_unify.py` | Token-level `#tag` detection with guards (URLs, wikilinks, code); **not** prose “fixes” |
+| **Journals & aliases** | `journal_task_scan.py`, `alias_index.py` | Line- and property-oriented scans tuned to Logseq conventions |
+
+**Design principle:** use the **parser** when hierarchy and block identity must be correct; use **line-bounded regex and explicit file boundaries** when the operation is surgical, graph-wide, or must stay diff-friendly in code review.
+
+### FastMCP + Pydantic at the boundary
+
+`src/main.py` constructs **FastMCP** with a lifespan that wires **`LogseqClient`** and **`MatrycaWikiConfig`**. **`register_mcp_tools`** in **`src/agent/mcp_server.py`** attaches every tool. Incoming outline JSON is validated as **`OutlineNode`**: `page_type` / `domain` / `entity_type` rules, normalized `children`, and **fail-fast** behavior before any HTTP or disk mutation.
+
+### Git snapshots as opt-in rollback
+
+**`MATRYCA_GIT_SNAPSHOT_ON_WRITE`** (`src/agent/git_snapshot.py`) optionally runs **`git add -A` + `git commit`** on **`LOGSEQ_GRAPH_PATH`** when it is a git checkout — not a hosted backup product, but a **local, operator-controlled** safety rail. **`snapshot_logseq_graph_git`** exposes the same behavior for manual checkpoints.
+
+```mermaid
+flowchart TD
+  E["MATRYCA_GIT_SNAPSHOT_ON_WRITE"] -->|false| SKIP["No auto commit"]
+  E -->|true| G{"Graph path is a git repo?"}
+  G -->|no| SKIP2["Skipped; reason logged"]
+  G -->|yes| C["git add -A && git commit"]
+  C --> W["Outline write or disk mutator"]
+```
+
+### Choosing read vs write paths
+
+```mermaid
+flowchart TD
+  START["What do you need?"] --> Q1{"Spatial tree\nid:: · indent?"}
+  Q1 -->|yes| R1["read_logseq_page\nparser adapter"]
+  Q1 -->|no| Q2{"Append bullets under\na known parent UUID?"}
+  Q2 -->|yes| W1["write_logseq_outline\nLogseqClient.append_block"]
+  Q2 -->|no| Q3{"Only key:: lines\nin one block?"}
+  Q3 -->|yes| W2["patch_logseq_block_property_lines\ndry_run first"]
+  Q3 -->|no| Q4{"Vault-wide scan\nBM25 · lint · hops?"}
+  Q4 -->|yes| D1["FS scan or in-memory index\nno second DB"]
+```
+
+---
 
 ## End-to-end data flow
 
-At runtime, the agent invokes MCP tools exposed by a **FastMCP** server. Those tools validate payloads, call an async **LogseqClient** that speaks JSON-RPC over HTTP to Logseq’s local API, and Logseq persists changes as **indented bullet blocks** inside repository Markdown files.
+The MCP host spawns this process on **stdio**. Tool calls flow through FastMCP into **`MatrycaMCPServer`** and graph helpers: **live** block creation uses **`LogseqClient`** → Logseq’s **local** API → disk; **spatial reads** use the parser adapter; **mutators** write files atomically where applicable (often with `.bak`).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant LLM as LLM Agent
-    participant MCP as MCP Server (FastMCP)
+    participant MCP as FastMCP (stdio)
     participant Bridge as MatrycaMCPServer
-    participant Client as LogseqClient (Async HTTP)
-    participant API as Logseq Local API
-    participant FS as Local Markdown Files
+    participant Client as LogseqClient
+    participant API as Logseq local HTTP API
+    participant FS as Markdown on disk
 
-    LLM->>MCP: Tool call (e.g. write_logseq_outline)
-    MCP->>Bridge: Dispatch with validated context
-    Bridge->>Bridge: Pydantic validate outline (DFS plan)
-    loop Depth-first block creation
-        Bridge->>Client: append_block(parent_uuid, content, properties)
-        Client->>API: POST JSON-RPC (Bearer) localhost:12315
-        API->>FS: Insert / update block in .md
-        API-->>Client: result.uuid
-        Client-->>Bridge: new block UUID
+    LLM->>MCP: Tool call
+    MCP->>Bridge: Validated args / context
+    alt Write path (live graph)
+        Bridge->>Client: append_block / inject query
+        Client->>API: JSON-RPC
+        API->>FS: Persist blocks
+        API-->>Client: block uuid
+    else Read path (spatial)
+        Bridge->>FS: read page via parser adapter
+    else Disk mutator (property / journal / refactor)
+        Bridge->>FS: atomic write + optional .bak / git snapshot
     end
-    Bridge-->>MCP: Ordered list of UUIDs
+    Bridge-->>MCP: Structured result + hints
     MCP-->>LLM: Tool result
 ```
 
-The same components appear in the layered view below: the agent never touches the filesystem directly; Logseq remains the authority for graph structure and block identity.
+### Outline write ordering (depth-first)
+
+`write_logseq_outline` walks **`OutlineNode`** depth-first: each **`append_block`** returns a **real** UUID before children are created, so Logseq never receives **`UNRESOLVED_PARENT_UUID`**.
 
 ```mermaid
-flowchart LR
-    subgraph Agent["Agent tier"]
-        LLM[LLM Agent]
-    end
-    subgraph MCP["MCP tier"]
-        FM[FastMCP stdio]
-        MS[MatrycaMCPServer]
-    end
-    subgraph Bridge["Bridge tier"]
-        LC[LogseqClient]
-    end
-    subgraph Logseq["Logseq tier"]
-        API[HTTP JSON-RPC API]
-        MD[Local Markdown Files]
-    end
-    LLM <-->|MCP| FM
-    FM --> MS
-    MS --> LC
-    LC <-->|Bearer + JSON-RPC| API
-    API --> MD
+flowchart TD
+  P["parent_block_uuid"] --> N1["append node → uuid A"]
+  N1 --> C1["each child"]
+  C1 --> N2["append under A → uuid B"]
+  N2 --> C2["recurse"]
+  C2 --> DONE["DFS-ordered uuids returned"]
 ```
 
 ---
 
-## 1. The Bridge (Agent to Logseq)
+## The agentic pipeline
 
-The bridge between the agent and Logseq lives in `src/agent/mcp_server.py`. **`MatrycaMCPServer`** is responsible for turning tool-level JSON into durable Logseq blocks while respecting the outliner model: every child block must be created under a parent that already exists in the graph.
+Operational detail for LLMs lives in **`SYSTEM_PROMPT.md`**. At a high level:
 
-### Pydantic validation
+1. **Search** — Prefer **`query_logseq_pages_local`** with **`mode=bm25`**. Optionally **`read_l1_memory`** when mistakes would be costly before touching L2.
+2. **Scan** — **`read_logseq_page`** for ground truth; **`traverse_logseq_structural_hops`** / **`report_structural_hubs_orphans`** to avoid duplicate concepts; **`lint_logseq_block_refs`** when editing many `((uuid))` refs.
+3. **Refactor / update** — **`write_logseq_outline`** for nested bullets; **`patch_logseq_block_property_lines`** for property-only edits; **`inject_logseq_advanced_query`** for live Datalog blocks; journal and alias tools as needed.
+4. **Garden** — Flashcards, tag unify, reparent, unlinked mentions, MOC generation, large-block split — almost always **`dry_run=true`** first.
+5. **Quality gate** — No credentials in L2, sane fan-out, stable `id::`, re-lint refs after big edits (`src/agent/quality_gate.py` + prompts).
 
-Incoming outlines are modeled by **`OutlineNode`**, a Pydantic `BaseModel` with:
+**Read-only health:** **`render_logseq_dashboard`** builds **[[Matryca Dashboard]]**-style outline stats from `pages/**/*.md`.
 
-- **`text`**: block body (Markdown / outliner content).
-- **`properties`**: optional string key–value pairs aligned with Logseq block properties.
-- **`children`**: a nested list of child `OutlineNode` instances.
-
-A **`field_validator`** on `children` normalizes `null` or missing children to an empty list so partially specified JSON from agents still validates cleanly. The server then calls **`OutlineNode.model_validate(outline)`** so malformed shapes fail fast before any HTTP traffic.
-
-### Depth-first creation and parent UUID chaining
-
-Method **`write_logseq_outline`** walks the tree with an inner async **`walk`** function:
-
-1. Append the current node under the known **`parent_uuid`** via **`LogseqClient.append_block`**, which returns the new block’s **`uuid`**.
-2. Record that UUID in order for the caller.
-3. For each child, **`await walk(child, new_uuid)`** so the child’s parent is always the UUID just returned by Logseq.
-
-This **depth-first, await-between-levels** strategy guarantees that Logseq receives **`insertBlock`** calls only when the parent UUID is real and resolvable—eliminating races where children were requested before their parents existed (historically surfaced as **`UNRESOLVED_PARENT_UUID`**-class failures when creation order was optimistic or parallelized without ordering).
-
----
-
-## 2. The Client (JSON-RPC)
-
-`src/bridge/logseq_client.py` implements **`LogseqClient`**, a thin **async** wrapper over Logseq’s **local HTTP JSON-RPC** surface.
-
-### Transport and security
-
-- The client is constructed with **`api_url`** (defaulting in application wiring to **`http://localhost:12315`**) and **`token`**.
-- It uses **`httpx.AsyncClient`** with a normalized base URL and an **`Authorization: Bearer <token>`** header so only holders of the Logseq API token can mutate the graph.
-
-### Protocol envelope
-
-Requests are shaped as **`JsonRpcRequest`** Pydantic models: **`jsonrpc`**, **`id`**, **`method`**, and **`params`**. **`append_block`** builds a call to **`logseq.Editor.insertBlock`** with the parent UUID, content, and options (including **`sibling: False`** so new blocks nest as children).
-
-### Response handling
-
-The client posts the serialized envelope, checks HTTP status, requires a JSON **object** body, and inspects the JSON-RPC **`error`** field when present. On success it reads **`result`**, verifies it is an object, extracts **`uuid`**, and validates that it is a non-empty **string** before returning it to **`MatrycaMCPServer`**. Failures are raised as **`RuntimeError`** with structured logging for operations teams.
-
----
-
-## 3. Spatial RAG (External parser)
-
-Retrieval over Logseq OG cannot treat pages as unstructured prose: hierarchy (indentation), block boundaries, and properties such as **`id::`** carry meaning.
-
-**This repository does not host the spatial parsing implementation.** Parsing (indentation stack, AST, UUID and reference semantics) lives in the standalone **`logseq-matryca-parser`** package, installed here as a Git dependency and **on the roadmap for a PyPI release** so other tools can depend on it without vendoring.
-
-**`src/rag/matryca_hooks.py`** is a **lightweight adapter**: **`get_spatial_context(file_path)`** delegates to the external parser and returns its graph-native page model (for example a **`LogseqPage`** from **`LogosParser.parse_page_file`**). **matryca-logseq-llm-wiki** remains the **orchestrator** (MCP bridge, agent tools, RAG wiring); the parser remains the **single source of truth** for how Logseq Markdown becomes structured context.
+```mermaid
+flowchart TD
+  subgraph search["1 Search"]
+    BM25["query_logseq_pages_local"]
+    L1["read_l1_memory optional"]
+  end
+  subgraph scan["2 Scan"]
+    READ["read_logseq_page"]
+    HOP["traverse · hubs/orphans"]
+    LINT["lint_logseq_block_refs"]
+  end
+  subgraph update["3 Refactor / Update"]
+    OUT["write_logseq_outline"]
+    PATCH["patch_logseq_block_property_lines"]
+    AQ["inject_logseq_advanced_query"]
+    JR["journal analyze/append"]
+    AL["entity resolve/alias"]
+  end
+  subgraph garden["4 Garden"]
+    G1["flashcards · tags · reparent"]
+    G2["unlinked · MOC · split blocks"]
+  end
+  subgraph gate["5 Quality gate"]
+    QG["quality_gate · routing hints"]
+  end
+  L1 --> BM25
+  BM25 --> READ
+  READ --> HOP
+  HOP --> LINT
+  LINT --> OUT
+  OUT --> PATCH
+  PATCH --> AQ
+  AQ --> JR
+  JR --> AL
+  AL --> G1
+  G1 --> G2
+  G2 --> QG
+```
 
 ---
 
-## 4. Block reference lint (regex pass)
+## Phase breakdown (how the codebase grew)
 
-The MCP tool **`lint_logseq_block_refs`** performs a **filesystem-wide, two-pass text scan** over **`pages/**/*.md`** under **`LOGSEQ_GRAPH_PATH`**: first it unions every block UUID declared on an `id::` property line, then it flags each `((uuid))` block reference that is not UUID v4 or that does not match any collected id. This complements the parser (which is authoritative per-file) with a **cheap graph-wide integrity check** for broken transclusions. Implementation: **`src/graph/block_ref_lint.py`**.
+Use this as a **mental map** for `src/` — phases are product language; modules are what you grep.
 
----
+| Phase | What shipped | Why it exists |
+|:-----:|--------------|---------------|
+| **1 — Baseline** | MCP server, **`OutlineNode`**, **`write_logseq_outline`** (DFS `append_block`), **`read_logseq_page`** via parser adapter, block-ref lint, dashboard markdown | Prove the bridge: agents can **read spatially** and **write block-by-block** with validation |
+| **2 — L1 / L2** | **`read_l1_memory`**, routing hints in responses | Session-critical rules without scanning the whole vault |
+| **3 — PKM refinements** | BM25 query, structural hops + hubs/orphans, property-line patcher, templates, wiki lint, namespace index, **git snapshot** hook | Discovery + **safe** disk edits + house-style templates |
+| **4 — Logseq superpowers** | Advanced query injection, journal task scan + append, alias index + append | Native Logseq power features agents should use instead of static lists |
+| **5 — Graph gardener** | Flashcards from Q/A pairs, vault-wide tag unify, same-page reparent | PKM hygiene at scale |
+| **6 — Synthesis engine** | Unlinked mentions scan, MOC generator, large-block splitter, manual git snapshot tool | Graph “thickening” and long-bullet repair |
 
-## 5. Dashboard (graph stats)
-
-The MCP tool **`render_logseq_dashboard`** calls **`src/graph/dashboard.py`** to scan **`pages/**/*.md`**, tally **`id::`** declarations (same line regex as block-ref lint), run **`lint_block_refs_in_graph`**, and format a **Logseq outliner** snippet suitable for a **[[Matryca Dashboard]]** page. It is read-only and uses no database.
-
----
-
-## 6. Phase 3 — structural hops, surgical properties, PKM safety (no Postgres / no vectors)
-
-- **Structural BFS (`traverse_logseq_structural_hops`, `report_structural_hubs_orphans`)** — **`src/graph/link_tag_hop.py`** builds an on-disk adjacency from wikilinks, shared tags, and sparse ``type::`` / ``domain::`` rings (pattern from **obsidian-graph** without embeddings). No second database.
-- **Surgical property edits (`patch_logseq_block_property_lines`)** — **`src/graph/property_line_edit.py`** limits search/replace to ``key::`` lines inside a block span anchored at ``id:: <uuid>``, with dry-run and ``.bak`` on apply (cyanheads-style safety). Does **not** replace the spatial parser for reads; it is a constrained line edit for properties only.
-- **Git snapshots (`MATRYCA_GIT_SNAPSHOT_ON_WRITE`)** — **`src/agent/git_snapshot.py`** runs an optional ``git add -A`` + ``git commit`` on **`LOGSEQ_GRAPH_PATH`** before **`write_logseq_outline`** (rollback-friendly; never changes git config; uses ``GIT_AUTHOR_*`` env defaults only when unset).
-- **Templates (`list_logseq_templates`, `read_logseq_template`)** — **`src/graph/templates.py`** reads ``templates/*.md`` under the graph (Templater-style discovery).
-- **BM25 local query** — **`src/rag/local_query.py`** ranks pages with in-memory Okapi BM25 (Omnisearch-style relevance) with a legacy ``substring`` mode.
+**Cross-cutting:** **`src/graph/wiki_lint.py`**, **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`PROJECT_DIARY.md`**.
 
 ---
 
-## 7. Phase 4 — Logseq native superpowers (queries, journals, aliases)
+## Component layers
 
-- **Advanced queries (`inject_logseq_advanced_query`)** — **`src/graph/advanced_query_block.py`** validates inner **EDN** (bracket balance + required ``:query``) and wraps ``#+BEGIN_QUERY`` / ``#+END_QUERY``. Presets live in **`src/graph/templates.py`** (`advanced_query_preset_open_markers`, `advanced_query_preset_pages_tagged`). The MCP tool calls **`MatrycaMCPServer.inject_logseq_advanced_query_block`** → **`LogseqClient.append_block`** so dashboards stay live in Logseq.
-- **Journal task scan (`analyze_journal_tasks`, `append_logseq_journal_markdown`)** — **`src/graph/journal_task_scan.py`** line-scans ``journals/YYYY_MM_DD.md`` for ``TODO`` / ``LATER`` / ``WAITING`` and surfaces ``SCHEDULED:`` / ``DEADLINE:`` text; optional append uses atomic writes with ``.bak`` beside the journal file.
-- **Alias index (`resolve_logseq_entity`, `append_logseq_page_alias`)** — **`src/graph/alias_index.py`** indexes ``alias::`` across ``pages/**/*.md`` and ``journals/**/*.md``; **`append_page_alias_line`** in **`src/graph/property_line_edit.py`** appends idempotently to the first ``alias::`` line or creates one at EOF.
+```mermaid
+flowchart TB
+  subgraph agent["Agent tier"]
+    LLM["LLM / orchestrator"]
+  end
+  subgraph mcp["MCP tier"]
+    FM["FastMCP stdio"]
+    REG["register_mcp_tools"]
+    FM --> REG
+  end
+  subgraph bridge["Bridge tier"]
+    MS["MatrycaMCPServer"]
+    LC["LogseqClient"]
+    GS["git_snapshot"]
+    MS --> LC
+    MS --> GS
+  end
+  subgraph data["Data tier"]
+    API["Logseq JSON-RPC"]
+    PAR["logseq_matryca_parser"]
+    DISK["Bounded FS passes"]
+  end
+  LLM <--> FM
+  REG --> MS
+  LC <--> API
+  MS --> PAR
+  MS --> DISK
+```
 
 ---
 
-## Related entry points
+## Key entry points
 
-- **`src/main.py`**: FastMCP application, **`app_lifespan`** wiring of **`LogseqClient`**, **`MatrycaWikiConfig`**, **`MatrycaMCPServer`**, and MCP tool registration (read/write/lint/query helpers in **`register_mcp_tools`**) for stdio transport.
+| Path | Role |
+|------|------|
+| `src/main.py` | FastMCP app, lifespan, `register_mcp_tools` |
+| `src/agent/mcp_server.py` | All `@mcp.tool()` handlers, `OutlineNode`, `MatrycaMCPServer` |
+| `src/bridge/logseq_client.py` | Async JSON-RPC over HTTP |
+| `src/agent/git_snapshot.py` | Optional commits on graph root |
+| `src/rag/matryca_hooks.py` | Parser adapter for spatial reads |
 
-For day-to-day development decisions and rationale, see **`PROJECT_DIARY.md`** in the repository root.
+---
 
-Trimmed openspec-style notes (ingest, lint, L1/L2) live under **`docs/openspec/`** and point back to **`ROADMAP_LLM_WIKI.md`**.
+## Related reading
+
+- **[`SYSTEM_PROMPT.md`](../SYSTEM_PROMPT.md)** — agent rules (outlines, dry-runs, L1/L2)  
+- **[`ROADMAP_LLM_WIKI.md`](../ROADMAP_LLM_WIKI.md)** and phase roadmaps — checklist history  
+- **[`docs/openspec/README.md`](openspec/README.md)** — trimmed internal specs  
