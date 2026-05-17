@@ -11,29 +11,24 @@ Thank you for helping improve **matryca-logseq-llm-wiki**. This project bridges 
 ## Local setup
 
 1. Use **Python 3.11+** (see ``.python-version``).
-2. Install **[uv](https://docs.astral.sh/uv/)** if you do not have it yet.
-3. Create the virtual environment and install the project with dev tools:
+2. Install **[uv](https://docs.astral.sh/uv/)**. That is the only required toolchain besides a CPython interpreter compatible with the project.
+3. From the repository root, install dependencies and dev tools:
 
    ```bash
-   uv venv --python 3.11
-   uv sync --extra dev
+   make install
    ```
 
-   Activate when you need a classic shell:
+   This runs ``uv sync --extra dev`` and lets **uv** manage the virtual environment (typically ``.venv/``).
+
+4. Optional: activate the environment for a classic shell, or keep using **uv** via ``uv run`` and **Make** targets:
 
    ```bash
    source .venv/bin/activate   # Windows: .venv\Scripts\activate
    ```
 
-   Or run commands without activating:
+   Run ``make help`` for a short description of every target (format, lint, typecheck, test, check, clean).
 
-   ```bash
-   uv run ruff check .
-   uv run mypy src/
-   uv run pytest
-   ```
-
-4. Copy environment template and fill in values:
+5. Copy the environment template and fill in values:
 
    ```bash
    cp .env.example .env
@@ -41,7 +36,13 @@ Thank you for helping improve **matryca-logseq-llm-wiki**. This project bridges 
 
    Set `LOGSEQ_API_TOKEN`, `LOGSEQ_API_URL`, and `LOGSEQ_GRAPH_PATH` for your machine.
 
-5. Quality checks (same as CI): ``uv run ruff check .``, ``uv run mypy src/``, ``uv run pytest``.
+6. **Before you open a Pull Request**, run the full quality gate so formatting, linting, strict typing, and tests all pass:
+
+   ```bash
+   make check
+   ```
+
+   This applies Ruff fixes and formatting, runs Ruff lint, **mypy** on ``src/`` and ``tests/``, and **pytest**. Aligning with this step keeps reviews fast and matches what maintainers expect from a green contribution.
 
 ## The “atomic block” paradigm
 

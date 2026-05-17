@@ -88,28 +88,77 @@ class LogseqClient:
         content: str,
         properties: dict[str, str],
     ) -> str:
-        """Append a child block beneath ``parent_uuid`` via the Logseq editor API.
+        """Append a child block beneath ``parent_uuid`` via ``logseq.Editor.insertBlock``.
 
-        This method is a **stub** for ``logseq.Editor.insertBlock``-style JSON-RPC
-        calls. Until the real RPC is wired, it returns a fresh UUID so callers can
-        chain nested inserts using Logseq's actual parent UUID semantics.
+        Sends a JSON-RPC request so the new block is nested as a child of
+        ``parent_uuid`` (``sibling: False``) with the given ``properties``.
 
         Args:
-            parent_uuid: UUID of the parent Logseq block (string form).
+            parent_uuid: UUID of the parent Logseq block (or page identifier string).
             content: Markdown / outliner text for the new block body.
             properties: Block properties (e.g. ``{"id": "<uuid>"}``) as string pairs.
 
         Returns:
-            Synthetic UUID string for the created block (stub behavior).
+            The created block's ``uuid`` string from the Logseq API response.
 
         Raises:
-            httpx.HTTPError: When the real implementation performs HTTP and transport fails.
+            httpx.HTTPError: When the HTTP transport fails.
+            ValueError: When the response body is not a JSON object.
+            RuntimeError: When the RPC reports an error, omits a result, or omits ``uuid``.
         """
-        new_uuid = str(uuid.uuid4())
-        logger.bind(
-            parent_uuid=parent_uuid,
-            content_len=len(content),
-            new_block_uuid=new_uuid,
-            props=len(properties),
-        ).info("append_block stub: returning synthetic block UUID (no HTTP insert yet)")
-        return new_uuid
+        payload = JsonRpcRequest(
+            id=str(uuid.uuid4()),
+            method="logseq.Editor.insertBlock",
+            params=[
+                parent_uuid,
+                content,
+                {"sibling": False, "properties": properties},
+            ],
+        )
+        data = await self._post_json_rpc(payload)
+
+        if "error" in data:
+            err = data["error"]
+            logger.error(
+                "Logseq insertBlock failed (RPC error): parent_uuid={parent_uuid!r} "
+                "content={content!r} error={error!r}",
+                parent_uuid=parent_uuid,
+                content=content,
+                error=err,
+            )
+            msg = f"Logseq insertBlock RPC error: {err!r}"
+            raise RuntimeError(msg)
+
+        result = data.get("result")
+        if result is None:
+            logger.error(
+                "Logseq insertBlock failed (null result): parent_uuid={parent_uuid!r} "
+                "content={content!r} response_keys={keys!r}",
+                parent_uuid=parent_uuid,
+                content=content,
+                keys=list(data),
+            )
+            raise RuntimeError("Logseq insertBlock returned no result")
+
+        if not isinstance(result, dict):
+            logger.error(
+                "Logseq insertBlock failed (unexpected result type): parent_uuid={parent_uuid!r} "
+                "content={content!r} result={result!r}",
+                parent_uuid=parent_uuid,
+                content=content,
+                result=result,
+            )
+            raise RuntimeError("Logseq insertBlock returned a non-object result")
+
+        block_uuid = result.get("uuid")
+        if not isinstance(block_uuid, str) or not block_uuid:
+            logger.error(
+                "Logseq insertBlock failed (missing uuid): parent_uuid={parent_uuid!r} "
+                "content={content!r} result={result!r}",
+                parent_uuid=parent_uuid,
+                content=content,
+                result=result,
+            )
+            raise RuntimeError("Logseq insertBlock result missing uuid")
+
+        return block_uuid
