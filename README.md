@@ -75,7 +75,9 @@ The agent generates property-rich, nested outlines. Every concept is a node; eve
 
 1. **The System Prompt:** Directives that force the LLM to abandon flat paragraphs and output strictly structured, nested Markdown outlines with auto-generated UUIDs.
 2. **The FastMCP Bridge:** A lightweight Model Context Protocol (MCP) server built with `FastMCP`. It exposes tools to the agent, validates hierarchical JSON payloads via Pydantic, and interacts asynchronously with Logseq's local HTTP API (`localhost:12315`) to surgically insert blocks.
-3. **The Spatial RAG Pipeline:** Instead of blind text-chunking, this project natively integrates the [**Logseq Matryca Parser**](https://github.com/MarcoPorcellato/logseq-matryca-parser) as a core dependency. It calculates spatial indentation and preserves the exact parent-child lineage of every atomic block for high-fidelity vector retrieval.
+3. **L1 fast context:** The `read_l1_memory` tool loads small Markdown “session rules” from `MATRYCA_L1_PATH` or `matryca-l1/*.md` next to your graph—analogous to an L1 cache so critical constraints load without scanning the whole vault.
+4. **Graph health tools:** `lint_logseq_block_refs` scans for broken `((uuid))` references; `render_logseq_dashboard` builds a **[[Matryca Dashboard]]**-style stats outline from the same graph path.
+5. **The Spatial RAG Pipeline:** Instead of blind text-chunking, this project natively integrates the [**Logseq Matryca Parser**](https://github.com/MarcoPorcellato/logseq-matryca-parser) as a core dependency. It calculates spatial indentation and preserves the exact parent-child lineage of every atomic block for high-fidelity vector retrieval.
 
 ## Getting Started (Developer Setup)
 
@@ -100,6 +102,8 @@ We use [uv](https://docs.astral.sh/uv/) for blazing-fast dependency management a
    *(This instantly runs Ruff formatting, linting, MyPy strict type-checking, and Pytest).*
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for deeper technical details.
+
+Optional **``matryca-wiki.yml``** (see ``matryca-wiki.example.yml`` in the repo root) configures namespaces, L1 ``memory_path``, wiki lint filename prefix, and dashboard title—resolved from ``MATRYCA_WIKI_CONFIG`` or ``$LOGSEQ_GRAPH_PATH/matryca-wiki.yml``.
 
 ## The Goal
 

@@ -6,23 +6,14 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.session import ServerSession
+from mcp.server.fastmcp import FastMCP
 
-from .agent.mcp_server import MatrycaMCPServer
+from .agent.mcp_server import AppContext, MatrycaMCPServer, register_mcp_tools
 from .bridge.logseq_client import LogseqClient
-
-
-@dataclass(frozen=True, slots=True)
-class AppContext:
-    """Dependencies available for the MCP server lifetime."""
-
-    bridge: MatrycaMCPServer
+from .config import load_matryca_wiki_config
 
 
 @asynccontextmanager
@@ -50,39 +41,19 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
 
     client = LogseqClient(api_url=api_url, token=token)
     bridge = MatrycaMCPServer(client=client)
-    logger.bind(api_url=api_url).info("Matryca MCP lifespan started (stdio)")
+    wiki_config = load_matryca_wiki_config()
+    logger.bind(api_url=api_url, namespaces=len(wiki_config.namespaces)).info(
+        "Matryca MCP lifespan started (stdio)",
+    )
     try:
-        yield AppContext(bridge=bridge)
+        yield AppContext(bridge=bridge, wiki_config=wiki_config)
     finally:
         await client.aclose()
         logger.info("Matryca MCP lifespan stopped")
 
 
 mcp = FastMCP("matryca-logseq-llm-wiki", lifespan=app_lifespan)
-
-
-@mcp.tool()
-async def write_logseq_outline(
-    outline: dict[str, Any],
-    parent_block_uuid: str,
-    ctx: Context[ServerSession, AppContext],
-) -> list[str]:
-    """Create blocks from a nested outline under ``parent_block_uuid`` (parent-first order).
-
-    Args:
-        outline: Mapping compatible with :class:`~src.agent.mcp_server.OutlineNode`.
-        parent_block_uuid: Existing Logseq block UUID to attach the root node under.
-        ctx: Injected MCP context with lifespan-bound services.
-
-    Returns:
-        DFS-ordered list of UUID strings for every created block.
-
-    """
-    bridge = ctx.request_context.lifespan_context.bridge
-    return await bridge.write_logseq_outline(
-        outline,
-        parent_block_uuid=parent_block_uuid,
-    )
+register_mcp_tools(mcp)
 
 
 async def _run_stdio_server() -> None:

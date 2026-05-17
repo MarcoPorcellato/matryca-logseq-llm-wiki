@@ -1,0 +1,19 @@
+# Optional Matryca wiki orchestration (copy to matryca-wiki.yml beside your graph or set MATRYCA_WIKI_CONFIG).
+# Logseq markdown shape stays authoritative via logseq-matryca-parser; this file is metadata only.
+
+namespaces:
+  - Wiki
+  - Projects
+  - Reference
+
+# L1 fast context: directory of .md files or a single .md file (overridden by MATRYCA_L1_PATH when set).
+memory_path: ~/Documents/matryca-l1
+
+# Logseq page filename prefix for wiki-style lint (triple-underscore pages).
+wiki_file_prefix: "Matryca___"
+
+# Maximum namespace depth for ingest planning (1 = top-level only).
+max_depth: 3
+
+# Title for the dashboard page body (see render_logseq_dashboard).
+dashboard_page_title: "Matryca Dashboard"

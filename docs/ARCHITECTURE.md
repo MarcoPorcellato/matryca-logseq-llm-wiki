@@ -112,8 +112,22 @@ Retrieval over Logseq OG cannot treat pages as unstructured prose: hierarchy (in
 
 ---
 
+## 4. Block reference lint (regex pass)
+
+The MCP tool **`lint_logseq_block_refs`** performs a **filesystem-wide, two-pass text scan** over **`pages/**/*.md`** under **`LOGSEQ_GRAPH_PATH`**: first it unions every block UUID declared on an `id::` property line, then it flags each `((uuid))` block reference that is not UUID v4 or that does not match any collected id. This complements the parser (which is authoritative per-file) with a **cheap graph-wide integrity check** for broken transclusions. Implementation: **`src/graph/block_ref_lint.py`**.
+
+---
+
+## 5. Dashboard (graph stats)
+
+The MCP tool **`render_logseq_dashboard`** calls **`src/graph/dashboard.py`** to scan **`pages/**/*.md`**, tally **`id::`** declarations (same line regex as block-ref lint), run **`lint_block_refs_in_graph`**, and format a **Logseq outliner** snippet suitable for a **[[Matryca Dashboard]]** page. It is read-only and uses no database.
+
+---
+
 ## Related entry points
 
-- **`src/main.py`**: FastMCP application, **`app_lifespan`** wiring of **`LogseqClient`** and **`MatrycaMCPServer`**, and the **`write_logseq_outline`** tool registration for stdio transport.
+- **`src/main.py`**: FastMCP application, **`app_lifespan`** wiring of **`LogseqClient`**, **`MatrycaWikiConfig`**, **`MatrycaMCPServer`**, and MCP tool registration (read/write/lint/query helpers in **`register_mcp_tools`**) for stdio transport.
 
 For day-to-day development decisions and rationale, see **`PROJECT_DIARY.md`** in the repository root.
+
+Trimmed openspec-style notes (ingest, lint, L1/L2) live under **`docs/openspec/`** and point back to **`ROADMAP_LLM_WIKI.md`**.

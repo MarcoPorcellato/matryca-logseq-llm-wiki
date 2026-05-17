@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv>=1.0.0,<2.0.0",
     "loguru>=0.7.0,<1.0.0",
     "mcp>=1.0.0,<2.0.0",
+    "pyyaml>=6.0.0,<7.0.0",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +63,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "logseq_matryca_parser.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "yaml"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
