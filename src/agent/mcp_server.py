@@ -22,6 +22,7 @@ from ..graph.advanced_query_block import (
 from ..graph.alias_index import build_alias_index
 from ..graph.block_ref_lint import lint_block_refs_in_graph
 from ..graph.dashboard import build_dashboard_markdown
+from ..graph.flashcards import append_logseq_flashcards_under_block
 from ..graph.hubs import build_namespace_index_markdown
 from ..graph.journal_task_scan import (
     append_journal_markdown_section,
@@ -29,10 +30,14 @@ from ..graph.journal_task_scan import (
     scan_journal_tasks,
 )
 from ..graph.link_tag_hop import format_hop_report_markdown, format_hub_orphan_markdown
+from ..graph.moc_page import build_moc_markdown, write_moc_page
 from ..graph.property_line_edit import (
     append_page_alias_line,
     edit_block_property_lines,
 )
+from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
+from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
+from ..graph.unlinked_mentions import resolve_unlinked_mentions as scan_unlinked_mentions
 from ..graph.wiki_lint import format_wiki_lint_report, lint_wiki_prefixed_pages
 from ..rag.local_query import format_keyword_query_markdown
 from ..rag.matryca_hooks import get_page_spatial_context
@@ -520,6 +525,193 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             return append_page_alias_line(graph_path, page_ref, alias, dry_run=dry_run).as_dict()
 
         return await asyncio.to_thread(_run)
+
+    @mcp.tool()
+    async def generate_logseq_flashcards(
+        ctx: Context[ServerSession, AppContext],
+        page_ref: str,
+        source_block_uuid: str,
+        max_cards: int = 30,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Extract ``question :: answer`` pairs in a block subtree and append ``#card`` children.
+
+        **Inspired by:** ``st3v3nmw/obsidian-spaced-repetition`` (SRS ``::`` pairs)
+        and Logseq ``#card``.
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+
+        def _run() -> dict[str, Any]:
+            return append_logseq_flashcards_under_block(
+                graph_path,
+                page_ref,
+                source_block_uuid,
+                max_cards=max_cards,
+                dry_run=dry_run,
+            ).as_dict()
+
+        return await asyncio.to_thread(_run)
+
+    @mcp.tool()
+    async def lint_unify_logseq_tags(
+        ctx: Context[ServerSession, AppContext],
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Cluster ``#tag`` spellings (case / variants), pick the most frequent, unify across graph.
+
+        **Inspired by:** ``obsidian-linter`` and tags-manager workflows.
+        Skips URLs, wikilinks, inline code.
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+
+        def _run() -> dict[str, Any]:
+            raw = lint_unify_logseq_tags(graph_path, dry_run=dry_run).as_dict()
+            return cast(dict[str, Any], raw)
+
+        return await asyncio.to_thread(_run)
+
+    @mcp.tool()
+    async def refactor_logseq_blocks(
+        ctx: Context[ServerSession, AppContext],
+        page_ref: str,
+        groups: list[dict[str, Any]],
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Group flat sibling blocks under new category headings (indent-only; preserves ``id::``).
+
+        **Inspired by:** ``vslinko/obsidian-outliner`` reparenting.
+        Triggers a git snapshot when applying.
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+
+        git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
+        if not dry_run:
+            git_snap = await asyncio.to_thread(
+                snapshot_git_working_tree,
+                graph_path,
+                message="matryca: pre refactor_logseq_blocks",
+            )
+
+        def _run() -> dict[str, Any]:
+            return run_reparent_logseq_blocks(
+                graph_path,
+                page_ref,
+                groups,
+                dry_run=dry_run,
+            ).as_dict()
+
+        out = await asyncio.to_thread(_run)
+        out["git_snapshot"] = git_snap
+        return out
+
+    @mcp.tool()
+    async def resolve_unlinked_mentions(
+        ctx: Context[ServerSession, AppContext],
+        max_hits_per_file: int = 80,
+        max_titles: int = 500,
+    ) -> dict[str, Any]:
+        """List plain-text mentions of existing page titles (candidates for ``[[wikilinks]]``).
+
+        **Inspired by:** ``logseq-plugin-unlinked-references`` (guards for URLs / links / code).
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "error": "LOGSEQ_GRAPH_PATH is not set.", "hits": []}
+
+        def _run() -> dict[str, Any]:
+            return scan_unlinked_mentions(
+                graph_path,
+                max_hits_per_file=max_hits_per_file,
+                max_titles=max_titles,
+            )
+
+        return await asyncio.to_thread(_run)
+
+    @mcp.tool()
+    async def generate_moc_page(
+        ctx: Context[ServerSession, AppContext],
+        namespace: str,
+        output_page_title: str | None = None,
+        write_to_disk: bool = False,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Build a hierarchical MOC (Map of Content) Markdown index for a namespace stem.
+
+        **Inspired by:** ``zoottel/obsidian-zoottelkeeper`` index pages. Optional atomic page write.
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "error": "LOGSEQ_GRAPH_PATH is not set."}
+
+        def _run() -> dict[str, Any]:
+            if write_to_disk:
+                snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
+                if not dry_run:
+                    snap = snapshot_git_working_tree(
+                        graph_path,
+                        message="matryca: pre generate_moc_page",
+                    )
+                out = write_moc_page(
+                    graph_path,
+                    namespace,
+                    output_page_title=output_page_title,
+                    dry_run=dry_run,
+                )
+                merged = dict(out)
+                merged["git_snapshot"] = snap
+                return merged
+            md = build_moc_markdown(graph_path, namespace)
+            return {
+                "ok": True,
+                "write_to_disk": False,
+                "markdown": md,
+                "hint": "Pass write_to_disk=true and dry_run=false to save under pages/.",
+            }
+
+        return await asyncio.to_thread(_run)
+
+    @mcp.tool()
+    async def refactor_large_blocks(
+        ctx: Context[ServerSession, AppContext],
+        page_ref: str | None = None,
+        min_chars: int = 400,
+        max_blocks: int = 25,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Split very long bullets into parent + children; parent keeps the original ``id::``.
+
+        **Inspired by:** ``FeralFlora/obsidian-text-segmenter``. Git snapshot when applying.
+        """
+        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if not graph_path:
+            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+
+        git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
+        if not dry_run:
+            git_snap = await asyncio.to_thread(
+                snapshot_git_working_tree,
+                graph_path,
+                message="matryca: pre refactor_large_blocks",
+            )
+
+        def _run() -> dict[str, Any]:
+            return run_refactor_large_blocks(
+                graph_path,
+                page_ref=page_ref,
+                min_chars=min_chars,
+                max_blocks=max_blocks,
+                dry_run=dry_run,
+            ).as_dict()
+
+        out = await asyncio.to_thread(_run)
+        out["git_snapshot"] = git_snap
+        return out
 
     @mcp.tool()
     async def snapshot_logseq_graph_git(

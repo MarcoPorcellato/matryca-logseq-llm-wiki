@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from src.graph.journal_task_scan import (
     append_journal_markdown_section,
@@ -12,13 +13,13 @@ from src.graph.journal_task_scan import (
 )
 
 
-def test_journal_file_path_naming(tmp_path) -> None:
+def test_journal_file_path_naming(tmp_path: Path) -> None:
     p = journal_file_path(tmp_path, date(2026, 5, 18))
     assert p.name == "2026_05_18.md"
     assert p.parent.name == "journals"
 
 
-def test_scan_journal_tasks_collects_markers(tmp_path) -> None:
+def test_scan_journal_tasks_collects_markers(tmp_path: Path) -> None:
     jdir = tmp_path / "journals"
     jdir.mkdir()
     day = date(2026, 5, 18)
@@ -46,7 +47,7 @@ def test_scan_journal_tasks_collects_markers(tmp_path) -> None:
     assert "SCHEDULED:" in (todo.scheduled or "")
 
 
-def test_nested_task_block(tmp_path) -> None:
+def test_nested_task_block(tmp_path: Path) -> None:
     jdir = tmp_path / "journals"
     jdir.mkdir()
     day = date(2026, 5, 10)
@@ -60,7 +61,7 @@ def test_nested_task_block(tmp_path) -> None:
     assert "nested note" in parent.block_text
 
 
-def test_format_review_markdown(tmp_path) -> None:
+def test_format_review_markdown(tmp_path: Path) -> None:
     jdir = tmp_path / "journals"
     jdir.mkdir()
     day = date(2026, 5, 1)
@@ -71,7 +72,7 @@ def test_format_review_markdown(tmp_path) -> None:
     assert "`TODO`" in md
 
 
-def test_append_journal_section_dry_run(tmp_path) -> None:
+def test_append_journal_section_dry_run(tmp_path: Path) -> None:
     out = append_journal_markdown_section(
         tmp_path,
         "## Hello",

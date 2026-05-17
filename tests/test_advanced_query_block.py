@@ -11,7 +11,7 @@ from src.graph.advanced_query_block import (
 
 
 def test_wrap_logseq_advanced_query_minimal() -> None:
-    inner = "{:title [:h2 \"X\"] :query [:find ?a :where [?a :block/name _]]}"
+    inner = '{:title [:h2 "X"] :query [:find ?a :where [?a :block/name _]]}'
     out = wrap_logseq_advanced_query(inner)
     assert out.startswith("#+BEGIN_QUERY\n")
     assert out.endswith("#+END_QUERY\n") or out.endswith("#+END_QUERY")
@@ -25,7 +25,7 @@ def test_validate_rejects_unbalanced() -> None:
 
 def test_validate_requires_query_key() -> None:
     with pytest.raises(ValueError, match=":query"):
-        validate_advanced_query_edn("{:title \"only\"}")
+        validate_advanced_query_edn('{:title "only"}')
 
 
 def test_preset_open_markers_round_trip() -> None:
