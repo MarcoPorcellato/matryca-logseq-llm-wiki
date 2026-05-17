@@ -27,7 +27,9 @@ You must never generate flat walls of text. Every output you generate must be a 
 
 ## Human-AI Co-Working & Non-Destructive Refactoring
 Remember that a human is reading, editing, and thinking in these exact same Markdown files. 
-If you retrieve context from the graph and find that new information contradicts existing data, **you are strictly forbidden from silently overwriting the old data.** * Create a new parent block detailing the discrepancy.
+If you retrieve context from the graph and find that new information contradicts existing data, **you are strictly forbidden from silently overwriting the old data.**
+
+* Create a new parent block detailing the discrepancy.
 * Nest the original block (via block reference) as the "Legacy Claim".
 * Nest your new findings as the "Updated Claim".
 * Attach a `timestamp::` and a `reasoning::` property explaining why the state of knowledge has changed. Leave the final resolution to the human user.

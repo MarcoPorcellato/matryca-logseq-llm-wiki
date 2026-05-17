@@ -1,6 +1,6 @@
 # matryca-logseq-llm-wiki
 
-**Inspired by Andrej Karpathy's "LLM Wiki" concept. Re-engineered for the Pure Markdown Outliner Paradigm. Matryca quality**
+**Inspired by Andrej Karpathy's "LLM Wiki" concept. Re-engineered for the Pure Markdown Outliner Paradigm. Built with Matryca.ai quality standards.**
 
 We are entering an era where AI agents don't just process our notes—they actively research, curate, and maintain our knowledge bases alongside us. Andrej Karpathy outlined a brilliant vision for an "LLM Wiki," a dynamic repository of plain-text Markdown files continuously updated by an AI agent. 
 
@@ -74,8 +74,32 @@ The agent generates property-rich, nested outlines. Every concept is a node; eve
 ## Architecture & How It Works
 
 1. **The System Prompt:** Directives that force the LLM to abandon flat paragraphs and output strictly structured, nested Markdown outlines with auto-generated UUIDs.
-2. **The Local Bridge:** A lightweight MCP (Model Context Protocol) or JSON-RPC script that interacts with Logseq's local HTTP API server (`localhost:12315`) to fetch, insert, or refactor markdown blocks on the fly.
-3. **The Spatial RAG Pipeline:** Uses the **Logseq Matryca Parser** to scrape the local `.md` folder, calculate indentation levels, and sync them to a local vector store (e.g., LanceDB) alongside a textual keyword index (BM25) for high-fidelity hybrid retrieval.
+2. **The FastMCP Bridge:** A lightweight Model Context Protocol (MCP) server built with `FastMCP`. It exposes tools to the agent, validates hierarchical JSON payloads via Pydantic, and interacts asynchronously with Logseq's local HTTP API (`localhost:12315`) to surgically insert blocks.
+3. **The Spatial RAG Pipeline:** Instead of blind text-chunking, this project natively integrates the [**Logseq Matryca Parser**](https://github.com/MarcoPorcellato/logseq-matryca-parser) as a core dependency. It calculates spatial indentation and preserves the exact parent-child lineage of every atomic block for high-fidelity vector retrieval.
+
+## Getting Started (Developer Setup)
+
+We use [uv](https://docs.astral.sh/uv/) for blazing-fast dependency management and a `Makefile` for a world-class Developer Experience.
+
+1. **Prerequisites:** Install Python 3.12+ and `uv`.
+2. **Clone & Install:**
+   ```bash
+   git clone https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki.git
+   cd matryca-logseq-llm-wiki
+   make install
+   ```
+3. **Configure Environment:**
+   ```bash
+   cp .env.example .env
+   ```
+   *(Edit `.env` to add your Logseq API Token and Graph Path).*
+4. **Run Quality Checks:**
+   ```bash
+   make check
+   ```
+   *(This instantly runs Ruff formatting, linting, MyPy strict type-checking, and Pytest).*
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for deeper technical details.
 
 ## The Goal
 
