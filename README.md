@@ -3,7 +3,7 @@
 > **The ultimate agentic knowledge manager for Logseq OG** — MCP tools that respect the **atomic outliner**, not flat text blobs. **Local-only**, **database-free**, built for humans and agents co-editing the same Markdown graph.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-72%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-92%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -22,6 +22,16 @@ Inspired by Andrej Karpathy’s “LLM Wiki” vision and [llm-wiki](https://git
 | Ignores journals and tasks | **`analyze_journal_tasks`** + **`append_logseq_journal_markdown`** for native `TODO` / `LATER` / `WAITING` + `SCHEDULED:` / `DEADLINE:` |
 | Rewrites whole pages | **Depth-first** **`write_logseq_outline`** via Logseq’s API; **scoped** **`patch_logseq_block_property_lines`** for `key::` lines only |
 | No rollback story | Optional **`MATRYCA_GIT_SNAPSHOT_ON_WRITE`**: **git commit** on your graph repo before risky writes |
+
+### Zero-Corruption Transactional Architecture
+
+Disk mutators do not open your page and shrink it in place. Every eligible write path funnels through **`atomic_write_bytes`** in **`src/graph/markdown_blocks.py`**: the new bytes land in a **hidden temp file in the same directory** as the target (so `os.replace` never crosses volumes), the handle is **flushed** and **`os.fsync`**’d to the storage device, and only then the kernel performs a **single atomic rename** (`os.replace`) onto the real `.md` path.
+
+Until that swap succeeds, the original file remains **bit-for-bit intact**. There is no window where a crash or killed MCP process leaves a **half-written or truncated** page — the pattern is the same family of guarantees as **write-ahead logging** in SQLite or **safe ref updates** in Git: readers always see either the **previous** committed version or the **next** one, never garbage in between.
+
+### Compiler-grade markdown & property awareness
+
+Matryca treats whole pages like a compiler treats a translation unit. A **streaming global fence scanner** marks **dead zones** where prose tools must not operate: **Markdown fenced code** (triple-backtick regions), **HTML block comments** (`<!-- … -->`), Logseq **Advanced Query** blocks (`#+BEGIN_QUERY` … `#+END_QUERY`), and **Org-style drawers** such as **`:LOGBOOK:`** (plus `{{` macro opens), aligned with how Logseq’s **mldoc** layer reasons about block structure. Property surgery and tag unify use **mldoc-aligned** `key:: value` parsing — first `::` pair only, wikilink-depth-aware CSV splitting, and **double-quoted spans** so `#tags` inside `"…"` literals are never “fixed” by mistake. Together, these layers block destructive AI writes that would otherwise shred queries, code samples, or fragile property values.
 
 **Strict localism:** Tools read **`LOGSEQ_GRAPH_PATH`** and call Logseq’s **localhost** JSON-RPC API. Lexical ranking (BM25), structural hops, and lint passes use **in-memory or line-scanned** data — nothing leaves your machine unless *you* send it.
 
@@ -83,8 +93,10 @@ Each phase adds capabilities; newer phases assume you still use **read → plan 
 | **4** | **Logseq superpowers** — Datalog queries, journals, entities | `inject_logseq_advanced_query`, `analyze_journal_tasks`, `append_logseq_journal_markdown`, `resolve_logseq_entity`, `append_logseq_page_alias` |
 | **5** | **Graph gardener** — cards, tags, reparent | `generate_logseq_flashcards`, `lint_unify_logseq_tags`, `refactor_logseq_blocks` |
 | **6** | **Synthesis engine** — linking, MOCs, atomic splits | `resolve_unlinked_mentions`, `generate_moc_page`, `refactor_large_blocks`, `snapshot_logseq_graph_git` |
+| **7** | **Mldoc AST parsing & structural guards** — compiler-aligned `key::` rules, quote / `[[wikilink]]`-aware CSV tokenization, drawer & fence macro shields | Same MCP surface; **hardened internals** in `patch_logseq_block_property_lines`, `lint_unify_logseq_tags`, `append_logseq_page_alias`, `refactor_large_blocks` (property lines, tag unify, alias append, long-bullet split) via **`mldoc_properties`** + **`mldoc_guards`** |
+| **8** | **Ironclad Shield** — global fence lexing, transactional atomic swaps, generational `mtime` caches | **Dead-zone lexing** (`compute_page_protected_line_indices`) wired into property edits, tag unify, reparent, unlinked mentions, large-block split; **ACID-style disk commits** (`atomic_write_bytes` / `atomic_write_file`) across graph mutators; **incremental BM25 + alias** rebuilds only when `st_mtime_ns` signatures change |
 
-**Roadmaps:** [`ROADMAP_LLM_WIKI.md`](ROADMAP_LLM_WIKI.md), [`ROADMAP_LLM_WIKI_PHASE_3.md`](ROADMAP_LLM_WIKI_PHASE_3.md), [`ROADMAP_LOGSEQ_SUPERPOWERS.md`](ROADMAP_LOGSEQ_SUPERPOWERS.md), [`ROADMAP_PHASE_5_6.md`](ROADMAP_PHASE_5_6.md).
+**Roadmaps:** [`ROADMAP_LLM_WIKI.md`](ROADMAP_LLM_WIKI.md), [`ROADMAP_LLM_WIKI_PHASE_3.md`](ROADMAP_LLM_WIKI_PHASE_3.md), [`ROADMAP_LOGSEQ_SUPERPOWERS.md`](ROADMAP_LOGSEQ_SUPERPOWERS.md), [`ROADMAP_PHASE_5_6.md`](ROADMAP_PHASE_5_6.md), [`ROADMAP_MLDOC_COMPLIANCE.md`](ROADMAP_MLDOC_COMPLIANCE.md), [`ROADMAP_IRONCLAD_SHIELD.md`](ROADMAP_IRONCLAD_SHIELD.md).
 
 ### Phases stacked (evolution)
 
@@ -96,7 +108,9 @@ flowchart BT
   P4["4 Superpowers"]
   P5["5 Gardener"]
   P6["6 Synthesis"]
-  P1 --> P2 --> P3 --> P4 --> P5 --> P6
+  P7["7 Mldoc guards"]
+  P8["8 Ironclad Shield"]
+  P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
 ```
 
 ### Agent loop (Search → quality gate)
@@ -159,7 +173,7 @@ Use **`snapshot_logseq_graph_git`** for a **manual** checkpoint before a big mul
 make check
 ```
 
-Runs Ruff (format + lint), strict **mypy** on `src/` and `tests/`, and **pytest** (72 tests). CI on `main` enforces the same bar (see `.github/workflows/ci.yml`).
+Runs Ruff (format + lint), strict **mypy** on `src/` and `tests/`, and **pytest** (92 tests). CI on `main` enforces the same bar (see `.github/workflows/ci.yml`).
 
 ### Claude Desktop (MCP over stdio)
 
