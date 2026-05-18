@@ -15,21 +15,12 @@ from .markdown_blocks import (
     read_page_lines,
 )
 
+from .mldoc_properties import is_logseq_block_property_line
+
 # Obsidian-style basic card: "question :: answer" in bullet body (not Logseq ``key::`` lines).
 _SRS_PAIR = re.compile(
     r"^(?P<indent>\s*)[-*+]\s+(?P<body>.+)$",
 )
-_PROP_LINE = re.compile(r"^\s*[^\s#][^:]*::\s*\S")
-
-
-def _looks_like_logseq_property_line(stripped: str) -> bool:
-    if re.match(r"^\s*[-*+]\s+", stripped):
-        return False
-    if "::" not in stripped:
-        return False
-    if stripped.lstrip().startswith("#"):
-        return False
-    return bool(_PROP_LINE.match(stripped))
 
 
 def _parse_srs_pair_from_bullet(stripped: str) -> tuple[str, str] | None:
@@ -37,7 +28,7 @@ def _parse_srs_pair_from_bullet(stripped: str) -> tuple[str, str] | None:
     if not m:
         return None
     body = m.group("body").strip()
-    if _looks_like_logseq_property_line(stripped):
+    if is_logseq_block_property_line(stripped):
         return None
     sep = " :: "
     if sep not in body:

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .markdown_blocks import iter_graph_markdown_files
+from .mldoc_properties import double_quoted_spans_in_value, parse_logseq_property_line
 
 _TAG_RE = re.compile(r"#([\w./-]+)", re.UNICODE)
 
@@ -24,6 +25,14 @@ def _in_wikilink(line: str, idx: int) -> bool:
     opens = before.count("[[")
     closes = before.count("]]")
     return opens > closes
+
+
+def _property_value_quote_ranges(line: str) -> list[tuple[int, int]]:
+    """Do not rewrite ``#tags`` inside quoted segments of ``key::`` property values."""
+    pp = parse_logseq_property_line(line.rstrip("\n"))
+    if not pp:
+        return []
+    return double_quoted_spans_in_value(pp.value_raw, base_offset=pp.value_start)
 
 
 def _in_url_fragment(line: str, idx: int) -> bool:
@@ -42,7 +51,12 @@ def _valid_tag_match(line: str, m: re.Match[str]) -> bool:
         return False
     if _in_wikilink(line, m.start()):
         return False
-    return not _in_url_fragment(line, m.start())
+    if _in_url_fragment(line, m.start()):
+        return False
+    for a, b in _property_value_quote_ranges(line):
+        if a <= m.start() < b or a < m.end() <= b or (m.start() < a and m.end() > b):
+            return False
+    return True
 
 
 @dataclass
@@ -119,18 +133,46 @@ def _replacement_pattern_for_variant(variant: str) -> re.Pattern[str]:
 def unify_tags_in_text(text: str, mapping: dict[str, str]) -> tuple[str, int]:
     """Replace raw tag spellings with canonical forms. Returns (new_text, replacements)."""
     total = 0
-    out = text
+    chunks: list[str] = []
+    pos = 0
+    for m in re.finditer(r"\r\n|\n|\r", text):
+        line = text[pos : m.start()]
+        nl = m.group(0)
+        new_line, n = _unify_tags_single_line(line, mapping)
+        total += n
+        chunks.append(new_line + nl)
+        pos = m.end()
+    tail, n = _unify_tags_single_line(text[pos:], mapping)
+    total += n
+    chunks.append(tail)
+    return "".join(chunks), total
+
+
+def _unify_tags_single_line(line: str, mapping: dict[str, str]) -> tuple[str, int]:
+    """Apply mapping on one line using the same guards as :func:`scan_tag_clusters`."""
+    ops: list[tuple[int, int, str]] = []
     for raw, canonical in mapping.items():
         if raw == canonical:
             continue
         rx = _replacement_pattern_for_variant(raw)
-
-        def _sub(_m: re.Match[str], c: str = canonical) -> str:
-            return c
-
-        out, n = rx.subn(_sub, out)
-        total += n
-    return out, total
+        for m in rx.finditer(line):
+            if not _valid_tag_match(line, m):
+                continue
+            ops.append((m.start(), m.end(), canonical))
+    ops.sort(key=lambda t: t[0])
+    merged: list[tuple[int, int, str]] = []
+    last_end = -1
+    for start, end, rep in ops:
+        if start < last_end:
+            continue
+        merged.append((start, end, rep))
+        last_end = end
+    if not merged:
+        return line, 0
+    s = line
+    for start, end, rep in sorted(merged, key=lambda t: -t[0]):
+        s = s[:start] + rep + s[end:]
+    return s, len(merged)
 
 
 @dataclass(frozen=True, slots=True)

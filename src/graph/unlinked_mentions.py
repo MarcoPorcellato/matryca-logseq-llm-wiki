@@ -46,6 +46,9 @@ def _excluded_ranges(line: str) -> list[tuple[int, int]]:
     # URLs
     for m in re.finditer(r"https?://[^\s)>\]]+", line):
         ex.append((m.start(), m.end()))
+    # Logseq / mldoc-style macros ``{{...}}``
+    for m in re.finditer(r"\{\{[\s\S]*?\}\}", line):
+        ex.append((m.start(), m.end()))
     return _merge_ranges(ex)
 
 

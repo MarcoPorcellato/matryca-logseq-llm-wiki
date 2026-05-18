@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .markdown_blocks import bullet_indent_unit, read_page_lines
+from .mldoc_guards import bullet_first_line_refactor_blocked, pre_id_block_lines_protected
 
 _BULLET = re.compile(r"^(\s*)([-*+])\s+(.*)$")
 _ID_LINE = re.compile(
@@ -83,6 +84,10 @@ def _collect_candidates(
         if not bm:
             continue
         body = bm.group(3).strip()
+        if bullet_first_line_refactor_blocked(body):
+            continue
+        if pre_id_block_lines_protected(stripped, bullet_idx, i):
+            continue
         if len(body) < min_chars:
             continue
         sents = _split_sentences(body)

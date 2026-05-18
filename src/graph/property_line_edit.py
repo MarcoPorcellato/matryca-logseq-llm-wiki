@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .alias_index import normalize_concept_key
+from .mldoc_properties import is_logseq_block_property_line, split_logseq_property_list_values
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
-_PROP = re.compile(r"^(\s*)([^\s#][^:]*?)::(\s*)(.*)\s*$")
 
 
 def _find_id_line_index(lines: list[str], block_uuid: str) -> int | None:
@@ -50,14 +50,11 @@ def _property_span_end(lines: list[str], id_line_idx: int, bullet_idx: int) -> i
 
 
 def _property_line_indices(lines: list[str], start: int, end: int) -> list[int]:
-    """Indices in ``[start, end)`` that look like Logseq property lines ``key::``."""
+    """Indices in ``[start, end)`` that are Logseq ``key::`` block property lines (mldoc-aligned)."""
     out: list[int] = []
     for i in range(start, end):
-        line = lines[i]
-        if _PROP.match(line) and "::" in line:
-            key_part = line.split("::", 1)[0].lstrip()
-            if key_part and not key_part.startswith("#"):
-                out.append(i)
+        if is_logseq_block_property_line(lines[i]):
+            out.append(i)
     return out
 
 
@@ -369,7 +366,7 @@ _ALIAS_LINE_ANY = re.compile(r"(?im)^(\s*)alias::(\s*)(.+)\s*$")
 
 
 def _split_alias_csv(raw: str) -> list[str]:
-    return [p.strip() for p in raw.split(",") if p.strip()]
+    return split_logseq_property_list_values(raw)
 
 
 def _alias_token_compare_key(token: str) -> str:
