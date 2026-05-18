@@ -22,6 +22,10 @@ def test_snapshot_commit_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MATRYCA_GIT_SNAPSHOT_ON_WRITE", "true")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Matryca Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@matryca.local")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Matryca Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@matryca.local")
     subprocess.run(
         ["git", "init", "-b", "main"],
         cwd=str(tmp_path),
