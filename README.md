@@ -7,6 +7,8 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
+![Matryca Logseq LLM Wiki — Agentic Knowledge Management for Logseq OG](images/20260519%20Logseq%20Matryca%20LLM%20Wiki%20copertina%20github.jpg)
+
 As the PKM ecosystem pivots heavily toward opaque SQLite databases to accommodate AI, many of us want to keep our Second Brain in pure, local Markdown. But standard LLM RAG pipelines destroy Markdown: they blindly chunk files, severing the crucial parent-child relationship of your bullet points.
 
 Matryca solves the context-fragmentation problem. Powered by the [Logseq Matryca Parser](https://github.com/MarcoPorcellato/logseq-matryca-parser) and [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), this architecture allows agents like Claude Desktop or Cursor to read the exact Abstract Syntax Tree (AST) of your thoughts. It understands nested bullets, `id::` UUIDs, and `[[wikilinks]]`, allowing the AI to organically grow, synthesize, and garden your graph alongside you.
