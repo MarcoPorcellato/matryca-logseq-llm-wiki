@@ -296,6 +296,10 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         **``target_type=dashboard``** — ``query`` ignored. Matryca dashboard Markdown:
         page counts, ``id::`` tally, block-ref health under ``pages/``.
 
+        **``target_type=xray_page``** — ``query`` = Logseq **page title**. Ultra-dense
+        ``[n]`` outline (X-Ray mode); persists alias→UUID map to ``.matryca_aliases.json`` at
+        the graph root. Use ``[n]`` in ``target`` / ``target_uuid`` on later mutations.
+
         **Requires:** ``LOGSEQ_GRAPH_PATH`` for every target except ``memory`` (still recommended).
         """
         wiki_config = ctx.request_context.lifespan_context.wiki_config

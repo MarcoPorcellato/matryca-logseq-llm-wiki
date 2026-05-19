@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from argparse import Namespace
@@ -12,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 from src.cli import build_parser, main, run_cli
+
+BLOCK_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def test_parser_exposes_five_subcommands() -> None:
@@ -32,6 +35,10 @@ def test_parser_exposes_five_subcommands() -> None:
             {"command": "read", "target_type": "page", "query": "My Project"},
         ),
         (["read", "memory"], {"command": "read", "target_type": "memory", "query": ""}),
+        (
+            ["read", "xray_page", "Alias Demo"],
+            {"command": "read", "target_type": "xray_page", "query": "Alias Demo"},
+        ),
         (
             ["search", "bm25", "redis cache"],
             {"command": "search", "method": "bm25", "query": "redis cache"},
@@ -179,6 +186,64 @@ def test_subprocess_read_memory_routes() -> None:
     )
     assert proc.returncode == 0
     assert proc.stdout
+
+
+def _write_xray_fixture_page(graph_root: Path, page_title: str = "Alias Demo") -> None:
+    pages = graph_root / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    (pages / f"{page_title}.md").write_text(
+        f"- Parent bullet\n  id:: {BLOCK_UUID}\n  status:: active\n",
+        encoding="utf-8",
+    )
+
+
+def test_subprocess_xray_page_then_mutate_alias_across_invocations(tmp_path: Path) -> None:
+    """X-Ray read persists aliases; a later CLI mutate can target ``[0]``."""
+    _write_xray_fixture_page(tmp_path)
+    env = {"LOGSEQ_GRAPH_PATH": str(tmp_path), "LOGSEQ_API_TOKEN": "unused-for-edit-property"}
+
+    read_proc = subprocess.run(
+        [sys.executable, "-m", "src.cli", "read", "xray_page", "Alias Demo"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+    assert read_proc.returncode == 0, read_proc.stderr
+    assert "[0]" in read_proc.stdout
+    assert "Parent bullet" in read_proc.stdout
+    assert (tmp_path / ".matryca_aliases.json").is_file()
+
+    mutate_proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.cli",
+            "mutate",
+            "edit_property",
+            "--target",
+            "Alias Demo|[0]",
+            "--payload",
+            json.dumps(
+                {
+                    "search": "status:: active",
+                    "replacement": "status:: done",
+                    "dry_run": False,
+                },
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+    assert mutate_proc.returncode == 0, mutate_proc.stderr
+    mutate_payload = json.loads(mutate_proc.stdout)
+    assert mutate_payload.get("ok") is True
+
+    page_text = (tmp_path / "pages" / "Alias Demo.md").read_text(encoding="utf-8")
+    assert "status:: done" in page_text
+    assert "status:: active" not in page_text
 
 
 def test_subprocess_missing_subcommand_exits_nonzero() -> None:

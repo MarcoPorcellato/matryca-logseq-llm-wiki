@@ -31,6 +31,7 @@ from ..graph.unlinked_mentions import resolve_unlinked_mentions as scan_unlinked
 from ..graph.wiki_lint import format_wiki_lint_report, lint_wiki_prefixed_pages
 from ..rag.local_query import format_keyword_query_markdown
 from ..rag.matryca_hooks import get_page_spatial_context
+from .alias_state import resolve_pipe_target, resolve_target
 from .git_snapshot import snapshot_git_working_tree
 from .graph_tool_helpers import (
     MutateGraphAction,
@@ -45,6 +46,7 @@ from .graph_tool_helpers import (
     parse_json_object,
     parse_optional_json_query,
     read_block_ast_markdown,
+    read_xray_page_markdown,
 )
 from .l1_memory import read_l1_memory_async
 from .quality_gate import advanced_query_security_violations, markdown_append_bounds_violations
@@ -97,6 +99,23 @@ async def dispatch_read(
             logger.bind(page=page_name).exception("read_graph_data OS error")
             return f"Could not read the page file from disk: {exc}"
         return append_read_page_routing_hint(markdown)
+
+    if target_type == "xray_page":
+        page_name = query.strip()
+        if not page_name:
+            return "For `target_type=xray_page`, set `query` to the Logseq page title."
+        try:
+            return await asyncio.to_thread(read_xray_page_markdown, graph_path, page_name)
+        except FileNotFoundError:
+            return "Page not found, you can create it."
+        except ImportError as exc:
+            logger.error("read_graph_data xray_page parser missing: {}", exc)
+            return (
+                f"Spatial parser is not available (install `logseq-matryca-parser`). Detail: {exc}"
+            )
+        except OSError as exc:
+            logger.bind(page=page_name).exception("read_graph_data xray_page OS error")
+            return f"Could not read the page file from disk: {exc}"
 
     if target_type == "block_ast":
         block_query = query.strip()
@@ -236,9 +255,12 @@ async def dispatch_mutate(
 ) -> dict[str, Any]:
     """Route ``mutate_graph`` by ``action``."""
     graph_path = graph_path_from_env()
+    resolved_target = (
+        resolve_target(graph_path, target) if graph_path and action != "append_journal" else target
+    )
 
     if action == "write_outline":
-        parent_uuid = target.strip()
+        parent_uuid = resolved_target.strip()
         if not parent_uuid:
             return {"ok": False, "error": "`target` must be the parent block UUID."}
         outline = parse_json_object(payload, field_name="payload")
@@ -258,7 +280,8 @@ async def dispatch_mutate(
                 "current_size_bytes": 0,
                 "lines_changed": 0,
             }
-        target_parts = [p.strip() for p in target.split("|", 1)]
+        pipe_target = resolve_pipe_target(graph_path, target)
+        target_parts = [p.strip() for p in pipe_target.split("|", 1)]
         if len(target_parts) != 2 or not target_parts[0] or not target_parts[1]:
             return {
                 "ok": False,
@@ -309,7 +332,7 @@ async def dispatch_mutate(
             dry_run=dry_run,
         )
 
-    parent_block = target.strip()
+    parent_block = resolved_target.strip()
     if not parent_block:
         return {
             "ok": False,
@@ -376,9 +399,15 @@ async def dispatch_refactor(
 
     refactor_opts = parse_optional_json_query(payload)
     dry_run = bool(refactor_opts.get("dry_run", True))
+    resolved_uuid = target_uuid
+    if graph_path:
+        if "|" in target_uuid:
+            resolved_uuid = resolve_pipe_target(graph_path, target_uuid)
+        elif target_uuid.strip():
+            resolved_uuid = resolve_target(graph_path, target_uuid)
 
     if action == "split_large":
-        page_ref = target_uuid.strip() or None
+        page_ref = resolved_uuid.strip() or None
         min_chars = max(50, int(refactor_opts.get("min_chars", 400)))
         max_blocks = max(1, min(int(refactor_opts.get("max_blocks", 25)), 100))
         git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
@@ -403,7 +432,7 @@ async def dispatch_refactor(
         return split_out
 
     if action == "reparent":
-        reparent_page = target_uuid.strip()
+        reparent_page = resolved_uuid.strip()
         if not reparent_page:
             return {"ok": False, "error": "For reparent, `target_uuid` must be the page title."}
         groups_raw = refactor_opts.get("groups")
@@ -435,7 +464,7 @@ async def dispatch_refactor(
         reparent_out["git_snapshot"] = reparent_git
         return reparent_out
 
-    flash_parts = [p.strip() for p in target_uuid.split("|", 1)]
+    flash_parts = [p.strip() for p in resolved_uuid.split("|", 1)]
     if len(flash_parts) != 2 or not flash_parts[0] or not flash_parts[1]:
         return {
             "ok": False,

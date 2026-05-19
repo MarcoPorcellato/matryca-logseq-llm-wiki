@@ -14,7 +14,7 @@ All graph work routes through these polymorphic tools. Each tool selects behavio
 
 | Tool | Discriminator | Purpose |
 |------|---------------|---------|
-| `read_graph_data` | `target_type` | Read pages, L1 memory, block excerpts, structural hops, dashboard |
+| `read_graph_data` | `target_type` | Read pages, L1 memory, block excerpts, structural hops, dashboard, X-Ray aliases |
 | `search_graph` | `method` | BM25, regex, unlinked mentions, journal tasks |
 | `mutate_graph` | `action` | Write outlines, edit properties, append journal, inject queries |
 | `refactor_blocks` | `action` | Split wall bullets, reparent siblings, generate flashcards |
@@ -62,6 +62,20 @@ Classify only blocks you intentionally tag; children usually omit schema fields.
 3. **Reference** — Only after `id::` exists on disk, emit `((that-uuid))` in new content.
 
 Re-run `run_linter` / `linter_name="block_refs"` after bulk ref edits.
+
+---
+
+## X-Ray mode and session aliases (`[n]`)
+
+For large pages, prefer **`read_graph_data` / `target_type="xray_page"`** with `query` = page title. The tool returns an ultra-dense outline like `[0] Parent` / `  [1] Child` (properties stripped) and writes **`{graph_root}/.matryca_aliases.json`** mapping each `[n]` to the real Logseq block UUID.
+
+On later **`mutate_graph`** or **`refactor_blocks`** calls (including separate CLI invocations), pass **`[n]`** directly wherever you would use a 36-character UUID:
+
+- `write_outline` / `inject_query`: `target` = `[0]` (parent block alias)
+- `edit_property` / `generate_flashcards`: `target` or `target_uuid` = `Page Title|[1]`
+- Unknown or stale aliases raise a clear error — re-run `xray_page` on that page to refresh the map
+
+Use `target_type="page"` when you need full spatial metadata (`synthetic_id`, `source_uuid`, properties). Use **`xray_page`** when you only need topology + text and minimal tokens.
 
 ---
 
@@ -118,6 +132,12 @@ BFS over wikilinks, tags, light `type::` / `domain::` rings. Optional JSON query
 ```
 
 Health snapshot: page counts, `id::` tally, block-ref summary. `query` ignored.
+
+```json
+{ "target_type": "xray_page", "query": "My Project" }
+```
+
+X-Ray outline with `[n]` aliases; persists `.matryca_aliases.json` at the graph root. Pass `[n]` into `target` / `target_uuid` on subsequent mutations (stateless CLI-safe).
 
 ---
 

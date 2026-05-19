@@ -340,11 +340,36 @@ wheels = [
 [[package]]
 name = "logseq-matryca-parser"
 version = "0.3.0"
-source = { git = "https://github.com/MarcoPorcellato/logseq-matryca-parser.git#524bc8bf87ad6568f6ffc82f189b4ecbaba84703" }
+source = { editable = "../logseq-matryca-parser" }
 dependencies = [
     { name = "pydantic" },
     { name = "rich" },
     { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "langchain-core", marker = "extra == 'ai'" },
+    { name = "langchain-core", marker = "extra == 'all'" },
+    { name = "llama-index-core", marker = "extra == 'ai'" },
+    { name = "llama-index-core", marker = "extra == 'all'" },
+    { name = "networkx", marker = "extra == 'all'", specifier = ">=3.0.0" },
+    { name = "networkx", marker = "extra == 'viz'", specifier = ">=3.0.0" },
+    { name = "pydantic", specifier = ">=2.7.0" },
+    { name = "pyvis", marker = "extra == 'all'", specifier = ">=0.3.2" },
+    { name = "pyvis", marker = "extra == 'viz'", specifier = ">=0.3.2" },
+    { name = "rich", specifier = ">=13.7.1" },
+    { name = "typer", specifier = ">=0.12.0" },
+    { name = "watchdog", marker = "extra == 'watch'", specifier = ">=4.0.0" },
+]
+provides-extras = ["viz", "ai", "all", "watch"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "logseq-matryca-parser", extras = ["all", "watch"] },
+    { name = "mypy", specifier = ">=1.20.2" },
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "ruff", specifier = ">=0.15.12" },
 ]
 
 [[package]]
@@ -397,7 +422,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
-    { name = "logseq-matryca-parser", git = "https://github.com/MarcoPorcellato/logseq-matryca-parser.git" },
+    { name = "logseq-matryca-parser", editable = "../logseq-matryca-parser" },
     { name = "loguru", specifier = ">=0.7.0,<1.0.0" },
     { name = "mcp", specifier = ">=1.0.0,<2.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0,<2.0.0" },

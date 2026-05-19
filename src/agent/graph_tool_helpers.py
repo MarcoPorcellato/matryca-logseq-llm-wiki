@@ -11,7 +11,14 @@ from typing import Any, Literal, cast
 from ..graph.markdown_blocks import locate_block_by_uuid
 from ..graph.path_sandbox import graph_safe_page_path
 
-ReadGraphTarget = Literal["page", "memory", "block_ast", "structural_hops", "dashboard"]
+ReadGraphTarget = Literal[
+    "page",
+    "memory",
+    "block_ast",
+    "structural_hops",
+    "dashboard",
+    "xray_page",
+]
 SearchGraphMethod = Literal["bm25", "regex", "unlinked_mentions", "journal_tasks"]
 MutateGraphAction = Literal["write_outline", "edit_property", "append_journal", "inject_query"]
 RefactorBlocksAction = Literal["split_large", "reparent", "generate_flashcards"]
@@ -56,6 +63,77 @@ def parse_optional_json_query(query: str) -> dict[str, Any]:
             raise TypeError(msg)
         return cast(dict[str, Any], data)
     return {}
+
+
+def _persistable_block_uuid(node: object) -> str:
+    """Prefer on-disk ``id::`` (``source_uuid``) over parser session ``uuid``."""
+    source_uuid = getattr(node, "source_uuid", None)
+    if isinstance(source_uuid, str) and source_uuid.strip():
+        return source_uuid.strip()
+    node_uuid = getattr(node, "uuid", None)
+    if isinstance(node_uuid, str) and node_uuid.strip():
+        return node_uuid.strip()
+    msg = "Parsed block is missing both `source_uuid` and `uuid`"
+    raise ValueError(msg)
+
+
+def _persistable_alias_map(
+    roots: list[object],
+    parser_alias_map: dict[int, str],
+) -> dict[int, str]:
+    """Map session aliases to UUIDs safe for on-disk ``id::`` lookups."""
+    by_parser_uuid: dict[str, object] = {}
+
+    def walk(node: object) -> None:
+        parser_uuid = getattr(node, "uuid", None)
+        if isinstance(parser_uuid, str) and parser_uuid:
+            by_parser_uuid[parser_uuid] = node
+        for child in getattr(node, "children", None) or []:
+            walk(child)
+
+    for root in roots:
+        walk(root)
+
+    persistable: dict[int, str] = {}
+    for alias, parser_uuid in parser_alias_map.items():
+        node = by_parser_uuid.get(parser_uuid)
+        if node is None:
+            continue
+        persistable[alias] = _persistable_block_uuid(node)
+    return persistable
+
+
+def read_xray_page_markdown(graph_path: str, page_name: str) -> str:
+    """Parse a page, assign ``[n]`` aliases, persist them, and return X-Ray markdown."""
+    from logseq_matryca_parser.agent_press import SessionAliasRegistry, to_xray_markdown
+
+    from ..rag.matryca_hooks import get_spatial_context, resolve_logseq_page_md
+    from .alias_state import save_alias_map
+
+    title = page_name.strip()
+    if not title:
+        msg = "For `target_type=xray_page`, set `query` to the Logseq page title."
+        raise ValueError(msg)
+
+    path = resolve_logseq_page_md(graph_path, title)
+    parsed = get_spatial_context(str(path))
+    roots = getattr(parsed, "root_nodes", None) or []
+    if not roots:
+        return f"# X-Ray: [[{title}]]\n\n_Empty page — no outline blocks to alias._\n"
+
+    registry = SessionAliasRegistry()
+    parser_alias_map = registry.generate_aliases(roots)
+    alias_map = _persistable_alias_map(roots, parser_alias_map)
+    save_alias_map(graph_path, alias_map)
+    body = to_xray_markdown(roots, registry)
+    alias_count = len(alias_map)
+    return (
+        f"# X-Ray: [[{title}]]\n\n"
+        f"**Aliases:** {alias_count} block(s) mapped to `[0]`…`[{alias_count - 1}]` "
+        f"in `.matryca_aliases.json` at the graph root. "
+        "Pass `[n]` as `target` or in `Page Title|[n]` for `mutate_graph` / `refactor_blocks`.\n\n"
+        f"{body}\n"
+    )
 
 
 def read_block_ast_markdown(graph_path: str, query: str) -> str:
@@ -148,4 +226,5 @@ __all__ = [
     "parse_json_object",
     "parse_optional_json_query",
     "read_block_ast_markdown",
+    "read_xray_page_markdown",
 ]

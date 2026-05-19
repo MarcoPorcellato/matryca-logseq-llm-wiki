@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [
     "httpx>=0.27.0,<1.0.0",
-    "logseq-matryca-parser @ git+https://github.com/MarcoPorcellato/logseq-matryca-parser.git",
+    "logseq-matryca-parser",
     "pydantic>=2.0.0,<3.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "loguru>=0.7.0,<1.0.0",
@@ -30,6 +30,9 @@ dev = [
     "ruff>=0.8.0,<1.0.0",
     "mypy>=1.13.0,<2.0.0",
 ]
+
+[tool.uv.sources]
+logseq-matryca-parser = { path = "../logseq-matryca-parser", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]
