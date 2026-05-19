@@ -10,6 +10,8 @@ from pathlib import Path
 from .logseq_uuid import assert_valid_block_refs_in_markdown
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
+# mkstemp(prefix=f".{basename}.", suffix=".tmp") → ``.{name}.{token}.tmp``
+_ATOMIC_TMP_NAME = re.compile(r"^\.[^/\\]+\..+\.tmp$")
 
 
 # Same resolution rules as :mod:`src.graph.property_line_edit`.
@@ -129,15 +131,17 @@ def atomic_write_bytes(file_path: str | Path, data: bytes) -> None:
         dir=str(path.parent),
     )
     tmp_path = Path(tmp_name)
+    committed = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+        committed = True
+    finally:
+        if not committed:
+            tmp_path.unlink(missing_ok=True)
 
 
 def atomic_write_file(
@@ -151,6 +155,27 @@ def atomic_write_file(
         atomic_write_bytes(file_path, contents)
     else:
         atomic_write_bytes(file_path, contents.encode(encoding))
+
+
+def sweep_dangling_atomic_tmp_files(graph_root: str | Path) -> int:
+    """Remove orphan ``.{name}.{token}.tmp`` files left by ungraceful process termination.
+
+    Scans ``pages/`` and ``journals/`` (including nested folders). Returns the count
+    of files unlinked.
+    """
+    root = Path(graph_root).expanduser().resolve(strict=False)
+    removed = 0
+    for sub in ("pages", "journals"):
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for candidate in base.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if _ATOMIC_TMP_NAME.match(candidate.name):
+                candidate.unlink(missing_ok=True)
+                removed += 1
+    return removed
 
 
 def iter_graph_markdown_files(graph_root: str | Path) -> list[Path]:
@@ -176,4 +201,5 @@ __all__ = [
     "locate_block_by_uuid",
     "graph_safe_page_path",
     "read_page_lines",
+    "sweep_dangling_atomic_tmp_files",
 ]

@@ -12,8 +12,12 @@ from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
 from .agent.mcp_server import AppContext, MatrycaMCPServer, register_mcp_tools
+from .agent.mcp_telemetry import install_loguru_mcp_bridge
 from .bridge.logseq_client import LogseqClient
 from .config import load_matryca_wiki_config
+from .graph.markdown_blocks import sweep_dangling_atomic_tmp_files
+
+install_loguru_mcp_bridge()
 
 
 @asynccontextmanager
@@ -42,6 +46,13 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     client = LogseqClient(api_url=api_url, token=token)
     bridge = MatrycaMCPServer(client=client)
     wiki_config = load_matryca_wiki_config()
+    graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+    if graph_path:
+        swept = await asyncio.to_thread(sweep_dangling_atomic_tmp_files, graph_path)
+        if swept:
+            logger.bind(graph=graph_path, removed=swept).info(
+                "Swept dangling atomic-write temp files at startup",
+            )
     logger.bind(api_url=api_url, namespaces=len(wiki_config.namespaces)).info(
         "Matryca MCP lifespan started (stdio)",
     )

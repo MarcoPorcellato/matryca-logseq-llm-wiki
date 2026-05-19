@@ -330,14 +330,16 @@ async def get_page_spatial_context(page_name: str, graph_path: str) -> str:
         FileNotFoundError: If the page file cannot be resolved under ``pages/``.
         OSError: If the file cannot be read.
     """
-    path = resolve_logseq_page_md(graph_path, page_name)
-    logger.bind(page=page_name, path=str(path)).debug("Resolved Logseq page path for spatial read")
 
-    def _load_and_format() -> str:
+    def _resolve_load_and_format() -> str:
+        path = resolve_logseq_page_md(graph_path, page_name)
+        logger.bind(page=page_name, path=str(path)).debug(
+            "Resolved Logseq page path for spatial read",
+        )
         parsed = get_spatial_context(str(path))
         return _format_parsed_page_markdown(parsed)
 
-    return await asyncio.to_thread(_load_and_format)
+    return await asyncio.to_thread(_resolve_load_and_format)
 
 
 __all__ = [

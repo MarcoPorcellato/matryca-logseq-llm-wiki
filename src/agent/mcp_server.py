@@ -37,12 +37,14 @@ from ..graph.property_line_edit import (
 )
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
 from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
+from ..graph.tag_unify import lint_unify_logseq_tags as core_lint_unify_logseq_tags
 from ..graph.unlinked_mentions import resolve_unlinked_mentions as scan_unlinked_mentions
 from ..graph.wiki_lint import format_wiki_lint_report, lint_wiki_prefixed_pages
 from ..rag.local_query import format_keyword_query_markdown
 from ..rag.matryca_hooks import get_page_spatial_context
 from .git_snapshot import snapshot_git_working_tree
 from .l1_memory import read_l1_memory_async
+from .mcp_telemetry import mcp_tool_info, mcp_tool_session, run_in_thread_with_mcp_context
 from .quality_gate import (
     advanced_query_security_violations,
     outline_security_violations,
@@ -140,6 +142,14 @@ def outline_block_count(outline: dict[str, Any]) -> int:
     return n
 
 
+def _validate_outline_for_write(outline: dict[str, Any]) -> OutlineNode:
+    """Run security scan and Pydantic validation (CPU-heavy; call via ``to_thread``)."""
+    sec = outline_security_violations(outline)
+    if sec:
+        raise ValueError("; ".join(sec))
+    return OutlineNode.model_validate(outline)
+
+
 class MatrycaMCPServer:
     """MCP-oriented bridge: validates tool payloads and drives :class:`LogseqClient`."""
 
@@ -177,11 +187,7 @@ class MatrycaMCPServer:
             msg = "write_logseq_outline requires a configured LogseqClient"
             raise ValueError(msg)
 
-        sec = outline_security_violations(outline)
-        if sec:
-            raise ValueError("; ".join(sec))
-
-        root = OutlineNode.model_validate(outline)
+        root = await asyncio.to_thread(_validate_outline_for_write, outline)
 
         graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
         git_snap: dict[str, object] = {
@@ -569,7 +575,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
 
         def _run() -> dict[str, Any]:
-            raw = lint_unify_logseq_tags(graph_path, dry_run=dry_run).as_dict()
+            raw = core_lint_unify_logseq_tags(graph_path, dry_run=dry_run).as_dict()
             return cast(dict[str, Any], raw)
 
         return await asyncio.to_thread(_run)
@@ -850,11 +856,15 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             )
         wiki_config = ctx.request_context.lifespan_context.wiki_config
 
+        await mcp_tool_info(ctx, "Scanning wiki-prefixed pages under pages/ for lint findings…")
+
         def _run() -> str:
             findings = lint_wiki_prefixed_pages(graph_path, wiki_config)
             return format_wiki_lint_report(findings, prefix=wiki_config.wiki_file_prefix)
 
-        report = await asyncio.to_thread(_run)
+        async with mcp_tool_session(ctx):
+            report: str = await run_in_thread_with_mcp_context(_run)
+        await mcp_tool_info(ctx, "Wiki lint scan complete.")
         logger.bind(graph=graph_path).info("lint_matryca_wiki_pages completed")
         return report
 
@@ -876,7 +886,17 @@ def register_mcp_tools(mcp: FastMCP) -> None:
                 "Set it to your graph root, then retry."
             )
         wiki_config = ctx.request_context.lifespan_context.wiki_config
-        markdown = await asyncio.to_thread(build_dashboard_markdown, graph_path, wiki_config)
+        await mcp_tool_info(
+            ctx,
+            "Rendering Matryca dashboard: scanning pages/ and block-reference health…",
+        )
+        async with mcp_tool_session(ctx):
+            markdown: str = await run_in_thread_with_mcp_context(
+                build_dashboard_markdown,
+                graph_path,
+                wiki_config,
+            )
+        await mcp_tool_info(ctx, "Dashboard render complete.")
         logger.bind(graph=graph_path).info("render_logseq_dashboard completed")
         return markdown
 
@@ -899,6 +919,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def query_logseq_pages_local(
+        ctx: Context[ServerSession, AppContext],
         keyword: str,
         limit: int = 15,
         mode: str = "bm25",
@@ -914,13 +935,25 @@ def register_mcp_tools(mcp: FastMCP) -> None:
                 "LOGSEQ_GRAPH_PATH is not set; cannot query pages on disk. "
                 "Set it to your graph root, then retry."
             )
-        return await asyncio.to_thread(
-            format_keyword_query_markdown,
-            graph_path,
-            keyword,
-            limit=limit,
-            mode=mode,
-        )
+        query_mode = mode.strip().lower()
+        if query_mode in ("bm25", "tfidf", "relevance"):
+            await mcp_tool_info(
+                ctx,
+                "Building in-memory BM25 index over pages/ "
+                "(first run or cache miss may take a moment)…",
+            )
+        else:
+            await mcp_tool_info(ctx, f"Scanning pages/ for substring matches ({query_mode})…")
+        async with mcp_tool_session(ctx):
+            result: str = await run_in_thread_with_mcp_context(
+                format_keyword_query_markdown,
+                graph_path,
+                keyword,
+                limit=limit,
+                mode=mode,
+            )
+        await mcp_tool_info(ctx, "Local page query complete.")
+        return result
 
     @mcp.tool()
     async def write_logseq_outline(

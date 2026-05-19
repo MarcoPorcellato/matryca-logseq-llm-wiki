@@ -45,14 +45,15 @@ def cached_build_alias_index(graph_root: str | Path) -> AliasIndex:
     """Return :class:`AliasIndex`, reusing memory when source mtimes are unchanged."""
     root = Path(graph_root).expanduser().resolve(strict=False)
     key = str(root)
-    paths = iter_alias_source_paths(root)
-    sig = _signature(paths, root)
     with _lock:
+        paths = iter_alias_source_paths(root)
+        sig = _signature(paths, root)
         hit = _alias_cache.get(key)
         if hit is not None and hit[0] == sig:
             return hit[1]
         idx = build_alias_index(root)
-        _alias_cache[key] = (sig, idx)
+        sig_after = _signature(iter_alias_source_paths(root), root)
+        _alias_cache[key] = (sig_after, idx)
         return idx
 
 
@@ -116,14 +117,15 @@ def get_cached_bm25_corpus(graph_root: str | Path) -> Bm25Corpus:
     """Token bags + DF for BM25; rebuilt when any page ``st_mtime`` changes."""
     root = Path(graph_root).expanduser().resolve(strict=False)
     key = str(root)
-    paths = _bm25_page_paths(root)
-    sig = _signature(paths, root)
     with _lock:
+        paths = _bm25_page_paths(root)
+        sig = _signature(paths, root)
         hit = _bm25_cache.get(key)
         if hit is not None and hit[0] == sig:
             return hit[1]
         corpus = _build_bm25_corpus(root)
-        _bm25_cache[key] = (sig, corpus)
+        sig_after = _signature(_bm25_page_paths(root), root)
+        _bm25_cache[key] = (sig_after, corpus)
         return corpus
 
 
