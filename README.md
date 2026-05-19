@@ -179,6 +179,19 @@ This creates a **Split-Brain** hazard. If you set `LOGSEQ_GRAPH_PATH` to a test 
 
    Use an **absolute** path. With `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`, selected writes also create a local **git commit** on the test graph so you can revert experiments.
 
+<details>
+<summary><b>🛠️ Using Logseq Sync? Click here if Logseq refuses to open the test folder.</b></summary>
+<br>
+If you use Logseq Sync, the app tracks graphs by hidden UUIDs, not folder paths. A direct copy-paste will cause a UUID clash. Do a <b>Clean Transplant</b> instead:
+<ol>
+  <li>Create a brand new, empty folder (e.g., <code>Logseq_Matryca_Test</code>).</li>
+  <li>Open Logseq, click "Add new graph", and select this empty folder to initialize a clean state.</li>
+  <li>Close Logseq completely.</li>
+  <li>Copy <b>ONLY</b> the <code>pages/</code>, <code>journals/</code>, and <code>assets/</code> folders from your real graph into the test folder. (Do NOT copy the <code>logseq/</code> folder or hidden git files).</li>
+  <li>Reopen Logseq and click <b>Re-index</b>.</li>
+</ol>
+</details>
+
 **Sanity check:** After setup, change one harmless block via the API (or a single MCP write) and confirm the edit appears **only** under `Logseq_Matryca_Test` on disk — not in your production vault.
 
 ---
