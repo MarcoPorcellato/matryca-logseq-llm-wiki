@@ -14,6 +14,7 @@ from .alias_index import normalize_concept_key
 from .global_fence_scanner import compute_page_protected_line_indices
 from .markdown_blocks import atomic_write_bytes
 from .mldoc_properties import is_logseq_block_property_line, split_logseq_property_list_values
+from .page_write_lock import page_rmw_lock
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
 
@@ -203,17 +204,39 @@ def edit_block_property_lines(
             lines_changed=0,
         )
 
-    raw = path.read_bytes()
-    previous_size = len(raw)
+    with page_rmw_lock(path):
+        raw = path.read_bytes()
+        previous_size = len(raw)
 
-    if use_regex:
-        try:
-            re.compile(search, 0 if case_sensitive else re.IGNORECASE)
-        except re.error as exc:
+        if use_regex:
+            try:
+                re.compile(search, 0 if case_sensitive else re.IGNORECASE)
+            except re.error as exc:
+                return PropertyLineEditOutcome(
+                    ok=False,
+                    code="invalid_regex",
+                    hint=str(exc),
+                    dry_run=dry_run,
+                    match_count=0,
+                    previews=[],
+                    previous_size_bytes=previous_size,
+                    current_size_bytes=previous_size,
+                    lines_changed=0,
+                )
+
+        text = raw.decode("utf-8")
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            lines = [""]
+
+        protected = compute_page_protected_line_indices(text)
+
+        id_idx = _find_id_line_index([ln.rstrip("\n") for ln in lines], block_uuid)
+        if id_idx is None:
             return PropertyLineEditOutcome(
                 ok=False,
-                code="invalid_regex",
-                hint=str(exc),
+                code="uuid_not_found",
+                hint="No `id:: <uuid>` line matches this block_uuid in the page file.",
                 dry_run=dry_run,
                 match_count=0,
                 previews=[],
@@ -222,158 +245,138 @@ def edit_block_property_lines(
                 lines_changed=0,
             )
 
-    text = raw.decode("utf-8")
-    lines = text.splitlines(keepends=True)
-    if not lines:
-        lines = [""]
+        stripped = [ln.rstrip("\n") for ln in lines]
+        bullet_idx = _block_bullet_index(stripped, id_idx)
+        if bullet_idx is None:
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="malformed_block",
+                hint="Could not find a list bullet (`-` / `*` / `+`) above the `id::` line.",
+                dry_run=dry_run,
+                match_count=0,
+                previews=[],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
-    protected = compute_page_protected_line_indices(text)
+        end = _property_span_end(stripped, id_idx, bullet_idx)
+        prop_indices = _property_line_indices(stripped, id_idx, end)
+        if not prop_indices:
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="no_property_lines",
+                hint="No property lines found in the resolved block span.",
+                dry_run=dry_run,
+                match_count=0,
+                previews=[],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
-    id_idx = _find_id_line_index([ln.rstrip("\n") for ln in lines], block_uuid)
-    if id_idx is None:
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="uuid_not_found",
-            hint="No `id:: <uuid>` line matches this block_uuid in the page file.",
-            dry_run=dry_run,
-            match_count=0,
-            previews=[],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        blocked = [li for li in prop_indices if li in protected]
+        if blocked:
+            first = blocked[0] + 1
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="protected_fence",
+                hint=(
+                    "A property line in this block sits inside a global Markdown / query / HTML "
+                    f"dead zone (first hit: line {first})."
+                ),
+                dry_run=dry_run,
+                match_count=0,
+                previews=[],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
-    stripped = [ln.rstrip("\n") for ln in lines]
-    bullet_idx = _block_bullet_index(stripped, id_idx)
-    if bullet_idx is None:
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="malformed_block",
-            hint="Could not find a list bullet (`-` / `*` / `+`) above the `id::` line.",
-            dry_run=dry_run,
-            match_count=0,
-            previews=[],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        previews: list[str] = []
+        total_matches = 0
+        new_lines = list(lines)
+        lines_changed = 0
 
-    end = _property_span_end(stripped, id_idx, bullet_idx)
-    prop_indices = _property_line_indices(stripped, id_idx, end)
-    if not prop_indices:
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="no_property_lines",
-            hint="No property lines found in the resolved block span.",
-            dry_run=dry_run,
-            match_count=0,
-            previews=[],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        for li in prop_indices:
+            original = new_lines[li]
+            core = original.rstrip("\n\r")
+            newline = original[len(core) :]
+            new_core, mc = _apply_pattern(
+                core,
+                search,
+                replacement,
+                use_regex=use_regex,
+                replace_all=replace_all,
+                case_sensitive=case_sensitive,
+            )
+            total_matches += mc
+            if mc and new_core != core:
+                lines_changed += 1
+                previews.append(f"L{li + 1}: `{core[:120]}` → `{new_core[:120]}`")
+            new_lines[li] = new_core + newline
 
-    blocked = [li for li in prop_indices if li in protected]
-    if blocked:
-        first = blocked[0] + 1
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="protected_fence",
-            hint=(
-                "A property line in this block sits inside a global Markdown / query / HTML "
-                f"dead zone (first hit: line {first})."
-            ),
-            dry_run=dry_run,
-            match_count=0,
-            previews=[],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        if total_matches == 0:
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="no_match",
+                hint="Search pattern did not match any allowed property line in the block span.",
+                dry_run=dry_run,
+                match_count=0,
+                previews=[],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
-    previews: list[str] = []
-    total_matches = 0
-    new_lines = list(lines)
-    lines_changed = 0
+        if not replace_all and total_matches > 1:
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="ambiguous_match",
+                hint=(
+                    "Multiple matches but replace_all=false; "
+                    "narrow the pattern or enable replace_all."
+                ),
+                dry_run=dry_run,
+                match_count=total_matches,
+                previews=previews[:10],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
-    for li in prop_indices:
-        original = new_lines[li]
-        core = original.rstrip("\n\r")
-        newline = original[len(core) :]
-        new_core, mc = _apply_pattern(
-            core,
-            search,
-            replacement,
-            use_regex=use_regex,
-            replace_all=replace_all,
-            case_sensitive=case_sensitive,
-        )
-        total_matches += mc
-        if mc and new_core != core:
-            lines_changed += 1
-            previews.append(f"L{li + 1}: `{core[:120]}` → `{new_core[:120]}`")
-        new_lines[li] = new_core + newline
+        new_text = "".join(new_lines)
+        new_bytes = new_text.encode("utf-8")
 
-    if total_matches == 0:
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="no_match",
-            hint="Search pattern did not match any allowed property line in the block span.",
-            dry_run=dry_run,
-            match_count=0,
-            previews=[],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        if dry_run:
+            return PropertyLineEditOutcome(
+                ok=True,
+                code="dry_run_ok",
+                hint="Re-run with dry_run=false to apply (writes atomically with .bak).",
+                dry_run=True,
+                match_count=total_matches,
+                previews=previews[:20],
+                previous_size_bytes=previous_size,
+                current_size_bytes=len(new_bytes),
+                lines_changed=lines_changed,
+            )
 
-    if not replace_all and total_matches > 1:
-        return PropertyLineEditOutcome(
-            ok=False,
-            code="ambiguous_match",
-            hint=(
-                "Multiple matches but replace_all=false; narrow the pattern or enable replace_all."
-            ),
-            dry_run=dry_run,
-            match_count=total_matches,
-            previews=previews[:10],
-            previous_size_bytes=previous_size,
-            current_size_bytes=previous_size,
-            lines_changed=0,
-        )
+        bak = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, bak)
+        atomic_write_bytes(path, new_bytes)
 
-    new_text = "".join(new_lines)
-    new_bytes = new_text.encode("utf-8")
-
-    if dry_run:
+        final_size = path.stat().st_size
         return PropertyLineEditOutcome(
             ok=True,
-            code="dry_run_ok",
-            hint="Re-run with dry_run=false to apply (writes atomically with .bak).",
-            dry_run=True,
+            code="applied",
+            hint=f"Backup at `{bak.name}` next to the page.",
+            dry_run=False,
             match_count=total_matches,
             previews=previews[:20],
             previous_size_bytes=previous_size,
-            current_size_bytes=len(new_bytes),
+            current_size_bytes=final_size,
             lines_changed=lines_changed,
         )
-
-    bak = path.with_suffix(path.suffix + ".bak")
-    shutil.copy2(path, bak)
-    atomic_write_bytes(path, new_bytes)
-
-    final_size = path.stat().st_size
-    return PropertyLineEditOutcome(
-        ok=True,
-        code="applied",
-        hint=f"Backup at `{bak.name}` next to the page.",
-        dry_run=False,
-        match_count=total_matches,
-        previews=previews[:20],
-        previous_size_bytes=previous_size,
-        current_size_bytes=final_size,
-        lines_changed=lines_changed,
-    )
 
 
 _ALIAS_LINE_ANY = re.compile(r"(?im)^(\s*)alias::(\s*)(.+)\s*$")

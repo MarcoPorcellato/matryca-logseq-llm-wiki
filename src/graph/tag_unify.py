@@ -10,6 +10,7 @@ from pathlib import Path
 from .global_fence_scanner import compute_page_protected_line_indices
 from .markdown_blocks import atomic_write_bytes, iter_graph_markdown_files
 from .mldoc_properties import double_quoted_spans_in_value, parse_logseq_property_line
+from .page_write_lock import page_rmw_lock
 
 _TAG_RE = re.compile(r"#([\w./-]+)", re.UNICODE)
 
@@ -254,32 +255,35 @@ def lint_unify_logseq_tags(
     total_rep = 0
     preview_count = 0
     for path in iter_graph_markdown_files(root):
-        try:
-            raw = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
+        with page_rmw_lock(path):
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                file_results.append(
+                    TagUnifyFileResult(
+                        relative_path=path.relative_to(root).as_posix(),
+                        replacements=0,
+                        preview=f"_read_error: {exc}_",
+                    ),
+                )
+                continue
+            protected = compute_page_protected_line_indices(raw)
+            new_text, n = unify_tags_in_text(raw, mapping, protected_line_indices=protected)
+            if n == 0:
+                continue
+            rel = path.relative_to(root).as_posix()
+            preview = None
+            if preview_count < max_files_preview:
+                preview = f"_{n} replacement(s) in `{rel}`_"
+                preview_count += 1
             file_results.append(
-                TagUnifyFileResult(
-                    relative_path=path.relative_to(root).as_posix(),
-                    replacements=0,
-                    preview=f"_read_error: {exc}_",
-                ),
+                TagUnifyFileResult(relative_path=rel, replacements=n, preview=preview),
             )
-            continue
-        protected = compute_page_protected_line_indices(raw)
-        new_text, n = unify_tags_in_text(raw, mapping, protected_line_indices=protected)
-        if n == 0:
-            continue
-        rel = path.relative_to(root).as_posix()
-        preview = None
-        if preview_count < max_files_preview:
-            preview = f"_{n} replacement(s) in `{rel}`_"
-            preview_count += 1
-        file_results.append(TagUnifyFileResult(relative_path=rel, replacements=n, preview=preview))
-        total_rep += n
-        if not dry_run:
-            bak = path.with_suffix(path.suffix + ".bak")
-            shutil.copy2(path, bak)
-            atomic_write_bytes(path, new_text.encode("utf-8"))
+            total_rep += n
+            if not dry_run:
+                bak = path.with_suffix(path.suffix + ".bak")
+                shutil.copy2(path, bak)
+                atomic_write_bytes(path, new_text.encode("utf-8"))
 
     if dry_run and total_rep == 0:
         return TagUnifyRunResult(

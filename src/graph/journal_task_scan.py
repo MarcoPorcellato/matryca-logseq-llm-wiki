@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .markdown_blocks import atomic_write_bytes
+from .page_write_lock import page_rmw_lock
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
 # Logseq markers (uppercase) after bullet
@@ -234,38 +235,40 @@ def append_journal_markdown_section(
         }
 
     section = markdown_body.rstrip() + "\n"
-    prev = ""
-    if path.is_file():
-        prev = path.read_text(encoding="utf-8", errors="replace")
-    new_text = prev.rstrip("\n") + ("\n\n" if prev.strip() else "") + section
 
-    if dry_run:
+    with page_rmw_lock(path):
+        prev = ""
+        if path.is_file():
+            prev = path.read_text(encoding="utf-8", errors="replace")
+        new_text = prev.rstrip("\n") + ("\n\n" if prev.strip() else "") + section
+
+        if dry_run:
+            return {
+                "ok": True,
+                "code": "dry_run_ok",
+                "hint": "Re-run with dry_run=false to append to the journal file on disk.",
+                "dry_run": True,
+                "relative_path": rel,
+                "bytes_before": len(prev.encode("utf-8")),
+                "bytes_after": len(new_text.encode("utf-8")),
+                "preview_tail": new_text[-400:],
+            }
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if path.is_file():
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        atomic_write_bytes(path, new_text.encode("utf-8"))
+
         return {
             "ok": True,
-            "code": "dry_run_ok",
-            "hint": "Re-run with dry_run=false to append to the journal file on disk.",
-            "dry_run": True,
+            "code": "applied",
+            "hint": f"Journal updated at `{rel}` (backup alongside if file existed).",
+            "dry_run": False,
             "relative_path": rel,
             "bytes_before": len(prev.encode("utf-8")),
-            "bytes_after": len(new_text.encode("utf-8")),
-            "preview_tail": new_text[-400:],
+            "bytes_after": path.stat().st_size,
         }
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if path.is_file():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-    atomic_write_bytes(path, new_text.encode("utf-8"))
-
-    return {
-        "ok": True,
-        "code": "applied",
-        "hint": f"Journal updated at `{rel}` (backup alongside if file existed).",
-        "dry_run": False,
-        "relative_path": rel,
-        "bytes_before": len(prev.encode("utf-8")),
-        "bytes_after": path.stat().st_size,
-    }
 
 
 __all__ = [

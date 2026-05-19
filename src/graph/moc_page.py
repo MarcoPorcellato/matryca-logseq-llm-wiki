@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from .markdown_blocks import atomic_write_bytes, graph_safe_page_path
+from .page_write_lock import page_rmw_lock
 
 
 def _safe_page_write_path(graph_root: Path, page_title: str) -> Path:
@@ -92,9 +93,10 @@ def write_moc_page(
         }
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-    atomic_write_bytes(path, md.encode("utf-8"))
+    with page_rmw_lock(path):
+        if path.is_file():
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        atomic_write_bytes(path, md.encode("utf-8"))
 
     return {
         "ok": True,

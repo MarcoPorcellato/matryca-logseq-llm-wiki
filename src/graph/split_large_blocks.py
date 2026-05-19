@@ -11,6 +11,7 @@ from pathlib import Path
 from .global_fence_scanner import compute_page_protected_line_indices
 from .markdown_blocks import atomic_write_bytes, bullet_indent_unit, read_page_lines
 from .mldoc_guards import bullet_first_line_refactor_blocked, pre_id_block_lines_protected
+from .page_write_lock import page_rmw_lock
 
 _BULLET = re.compile(r"^(\s*)([-*+])\s+(.*)$")
 _ID_LINE = re.compile(
@@ -148,46 +149,47 @@ def _process_page(
     if err or path is None or lines is None:
         return [], err, []
 
-    stripped = [ln.rstrip("\n") for ln in lines]
-    protected = compute_page_protected_line_indices("".join(lines))
-    hits: list[SplitHit] = []
-    cur_lines = list(lines)
-    cur_stripped = stripped
+    with page_rmw_lock(path):
+        stripped = [ln.rstrip("\n") for ln in lines]
+        protected = compute_page_protected_line_indices("".join(lines))
+        hits: list[SplitHit] = []
+        cur_lines = list(lines)
+        cur_stripped = stripped
 
-    while len(hits) < max_blocks:
-        candidates = _collect_candidates(cur_stripped, min_chars=min_chars, protected=protected)
-        if not candidates:
-            break
-        bullet_idx, id_line_idx, block_uuid, sents = candidates[0]
-        bm0 = _BULLET.match(cur_stripped[bullet_idx])
-        original_len = len(bm0.group(3).strip()) if bm0 else 0
-        cur_lines, cur_stripped = _apply_one_split(
-            cur_lines,
-            cur_stripped,
-            bullet_idx,
-            id_line_idx,
-            sents,
-        )
-        hits.append(
-            SplitHit(
-                page_ref=page_ref,
-                block_uuid=block_uuid,
-                before_len=original_len,
-                sentences=len(sents),
-            ),
-        )
+        while len(hits) < max_blocks:
+            candidates = _collect_candidates(cur_stripped, min_chars=min_chars, protected=protected)
+            if not candidates:
+                break
+            bullet_idx, id_line_idx, block_uuid, sents = candidates[0]
+            bm0 = _BULLET.match(cur_stripped[bullet_idx])
+            original_len = len(bm0.group(3).strip()) if bm0 else 0
+            cur_lines, cur_stripped = _apply_one_split(
+                cur_lines,
+                cur_stripped,
+                bullet_idx,
+                id_line_idx,
+                sents,
+            )
+            hits.append(
+                SplitHit(
+                    page_ref=page_ref,
+                    block_uuid=block_uuid,
+                    before_len=original_len,
+                    sentences=len(sents),
+                ),
+            )
 
-    if not hits:
-        return [], None, []
+        if not hits:
+            return [], None, []
 
-    new_text = "".join(cur_lines)
-    if dry_run:
+        new_text = "".join(cur_lines)
+        if dry_run:
+            return hits, None, [str(path)]
+
+        bak = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, bak)
+        atomic_write_bytes(path, new_text.encode("utf-8"))
         return hits, None, [str(path)]
-
-    bak = path.with_suffix(path.suffix + ".bak")
-    shutil.copy2(path, bak)
-    atomic_write_bytes(path, new_text.encode("utf-8"))
-    return hits, None, [str(path)]
 
 
 def refactor_large_blocks(

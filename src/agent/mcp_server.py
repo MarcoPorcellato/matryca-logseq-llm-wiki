@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Self, cast
 
@@ -45,8 +46,11 @@ from ..rag.matryca_hooks import get_page_spatial_context
 from .git_snapshot import snapshot_git_working_tree
 from .l1_memory import read_l1_memory_async
 from .mcp_telemetry import mcp_tool_info, mcp_tool_session, run_in_thread_with_mcp_context
+from .mcp_tool_guard import guard_mcp_tool
 from .quality_gate import (
     advanced_query_security_violations,
+    markdown_append_bounds_violations,
+    outline_bounds_violations,
     outline_security_violations,
 )
 from .routing_hint import (
@@ -143,7 +147,10 @@ def outline_block_count(outline: dict[str, Any]) -> int:
 
 
 def _validate_outline_for_write(outline: dict[str, Any]) -> OutlineNode:
-    """Run security scan and Pydantic validation (CPU-heavy; call via ``to_thread``)."""
+    """Run bounds, security scan, and Pydantic validation (CPU-heavy; call via ``to_thread``)."""
+    bounds = outline_bounds_violations(outline)
+    if bounds:
+        raise ValueError("; ".join(bounds))
     sec = outline_security_violations(outline)
     if sec:
         raise ValueError("; ".join(sec))
@@ -260,7 +267,15 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         mcp: The application instance created in :mod:`src.main`.
     """
 
-    @mcp.tool()
+    def safe_tool(*args: Any, **kwargs: Any) -> Callable[[Any], Any]:
+        """Register an MCP tool wrapped with :func:`guard_mcp_tool`."""
+
+        def decorator(fn: Any) -> Any:
+            return mcp.tool(*args, **kwargs)(guard_mcp_tool(fn))
+
+        return decorator
+
+    @safe_tool()
     async def traverse_logseq_structural_hops(
         ctx: Context[ServerSession, AppContext],
         seeds: str,
@@ -295,7 +310,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def report_structural_hubs_orphans(ctx: Context[ServerSession, AppContext]) -> str:
         """List high-degree hub pages and low-degree orphans (structural graph only)."""
         graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
@@ -303,7 +318,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             return "LOGSEQ_GRAPH_PATH is not set; cannot analyze the graph on disk."
         return await asyncio.to_thread(format_hub_orphan_markdown, graph_path)
 
-    @mcp.tool()
+    @safe_tool()
     async def patch_logseq_block_property_lines(
         ctx: Context[ServerSession, AppContext],
         page_ref: str,
@@ -350,7 +365,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def inject_logseq_advanced_query(
         ctx: Context[ServerSession, AppContext],
         parent_block_uuid: str,
@@ -411,7 +426,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return {"ok": True, "dry_run": False, **out}
 
-    @mcp.tool()
+    @safe_tool()
     async def analyze_journal_tasks(
         ctx: Context[ServerSession, AppContext],
         days: int = 7,
@@ -461,7 +476,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def append_logseq_journal_markdown(
         ctx: Context[ServerSession, AppContext],
         markdown_body: str,
@@ -478,6 +493,13 @@ def register_mcp_tools(mcp: FastMCP) -> None:
                 "code": "graph_missing",
                 "hint": "LOGSEQ_GRAPH_PATH is not set.",
             }
+        bounds = markdown_append_bounds_violations(markdown_body)
+        if bounds:
+            return {
+                "ok": False,
+                "code": "payload_too_large",
+                "error": "; ".join(bounds),
+            }
         return await asyncio.to_thread(
             append_journal_markdown_section,
             graph_path,
@@ -485,7 +507,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             dry_run=dry_run,
         )
 
-    @mcp.tool()
+    @safe_tool()
     async def resolve_logseq_entity(
         ctx: Context[ServerSession, AppContext],
         candidates: str,
@@ -511,7 +533,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def append_logseq_page_alias(
         ctx: Context[ServerSession, AppContext],
         page_ref: str,
@@ -532,7 +554,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def generate_logseq_flashcards(
         ctx: Context[ServerSession, AppContext],
         page_ref: str,
@@ -560,7 +582,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def lint_unify_logseq_tags(
         ctx: Context[ServerSession, AppContext],
         dry_run: bool = True,
@@ -580,7 +602,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def refactor_logseq_blocks(
         ctx: Context[ServerSession, AppContext],
         page_ref: str,
@@ -616,7 +638,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         out["git_snapshot"] = git_snap
         return out
 
-    @mcp.tool()
+    @safe_tool()
     async def resolve_unlinked_mentions(
         ctx: Context[ServerSession, AppContext],
         max_hits_per_file: int = 80,
@@ -639,7 +661,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def generate_moc_page(
         ctx: Context[ServerSession, AppContext],
         namespace: str,
@@ -682,7 +704,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def refactor_large_blocks(
         ctx: Context[ServerSession, AppContext],
         page_ref: str | None = None,
@@ -719,7 +741,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         out["git_snapshot"] = git_snap
         return out
 
-    @mcp.tool()
+    @safe_tool()
     async def snapshot_logseq_graph_git(
         message: str = "matryca: AI manual snapshot",
     ) -> dict[str, object]:
@@ -737,7 +759,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             }
         return await asyncio.to_thread(snapshot_git_working_tree, graph_path, message=message)
 
-    @mcp.tool()
+    @safe_tool()
     async def list_logseq_templates(ctx: Context[ServerSession, AppContext]) -> str:
         """List ``*.md`` in the graph ``templates/`` folder (Templater-style discovery)."""
         graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
@@ -757,7 +779,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def read_logseq_template(
         ctx: Context[ServerSession, AppContext],
         template_name: str,
@@ -783,7 +805,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         return await asyncio.to_thread(_run)
 
-    @mcp.tool()
+    @safe_tool()
     async def read_l1_memory(ctx: Context[ServerSession, AppContext]) -> str:
         """Load **L1** fast-context Markdown (session rules, identity, gotchas).
 
@@ -811,7 +833,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         logger.bind(files=len(labels)).info("read_l1_memory loaded L1 context")
         return body
 
-    @mcp.tool()
+    @safe_tool()
     async def lint_logseq_block_refs() -> str:
         """Scan ``pages/**/*.md`` for ``((uuid))`` refs without a graph-wide ``id::`` target.
 
@@ -839,7 +861,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         ).info("lint_logseq_block_refs completed")
         return result.format_report()
 
-    @mcp.tool()
+    @safe_tool()
     async def lint_matryca_wiki_pages(ctx: Context[ServerSession, AppContext]) -> str:
         """Lint prefixed wiki pages (``wiki_file_prefix`` from ``matryca-wiki.yml``).
 
@@ -868,7 +890,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         logger.bind(graph=graph_path).info("lint_matryca_wiki_pages completed")
         return report
 
-    @mcp.tool()
+    @safe_tool()
     async def render_logseq_dashboard(ctx: Context[ServerSession, AppContext]) -> str:
         """Build a **[[Matryca Dashboard]]**-style outline: page counts, ``id::`` tally, ref health.
 
@@ -900,7 +922,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         logger.bind(graph=graph_path).info("render_logseq_dashboard completed")
         return markdown
 
-    @mcp.tool()
+    @safe_tool()
     async def list_logseq_namespace_index(ctx: Context[ServerSession, AppContext]) -> str:
         """Group ``pages/*.md`` by first ``___`` segment for hub-style navigation."""
         graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
@@ -917,7 +939,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             wiki_config,
         )
 
-    @mcp.tool()
+    @safe_tool()
     async def query_logseq_pages_local(
         ctx: Context[ServerSession, AppContext],
         keyword: str,
@@ -955,7 +977,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         await mcp_tool_info(ctx, "Local page query complete.")
         return result
 
-    @mcp.tool()
+    @safe_tool()
     async def write_logseq_outline(
         outline: dict[str, Any],
         parent_block_uuid: str,
@@ -988,7 +1010,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
             parent_block_uuid=parent_block_uuid,
         )
 
-    @mcp.tool()
+    @safe_tool()
     async def read_logseq_page(page_name: str) -> str:
         """Read a Logseq **page** from the on-disk Markdown graph (spatial / eyes).
 

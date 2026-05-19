@@ -15,6 +15,7 @@ from .markdown_blocks import (
     read_page_lines,
 )
 from .mldoc_properties import is_logseq_block_property_line
+from .page_write_lock import page_rmw_lock
 
 # Obsidian-style basic card: "question :: answer" in bullet body (not Logseq ``key::`` lines).
 _SRS_PAIR = re.compile(
@@ -96,74 +97,75 @@ def append_logseq_flashcards_under_block(
             path=None,
         )
 
-    stripped = [ln.rstrip("\n") for ln in lines]
-    loc = locate_block_by_uuid(stripped, source_block_uuid)
-    if loc is None:
-        return FlashcardAppendResult(
-            ok=False,
-            code="uuid_not_found",
-            hint="No matching `id::` for source_block_uuid.",
-            dry_run=dry_run,
-            cards_preview=[],
-            inserted_line_count=0,
-            path=str(path),
-        )
-    bullet_idx, id_idx, end = loc
-    unit = bullet_indent_unit(lines, bullet_idx)
-    bm = re.match(r"^(\s*)[-*+]\s+", stripped[bullet_idx])
-    base_indent = bm.group(1) if bm else ""
-    child_indent = base_indent + unit
+    with page_rmw_lock(path):
+        stripped = [ln.rstrip("\n") for ln in lines]
+        loc = locate_block_by_uuid(stripped, source_block_uuid)
+        if loc is None:
+            return FlashcardAppendResult(
+                ok=False,
+                code="uuid_not_found",
+                hint="No matching `id::` for source_block_uuid.",
+                dry_run=dry_run,
+                cards_preview=[],
+                inserted_line_count=0,
+                path=str(path),
+            )
+        bullet_idx, id_idx, end = loc
+        unit = bullet_indent_unit(lines, bullet_idx)
+        bm = re.match(r"^(\s*)[-*+]\s+", stripped[bullet_idx])
+        base_indent = bm.group(1) if bm else ""
+        child_indent = base_indent + unit
 
-    chunk = stripped[bullet_idx:end]
-    pairs = _extract_pairs_from_block_text(chunk)[: max(1, min(max_cards, 200))]
+        chunk = stripped[bullet_idx:end]
+        pairs = _extract_pairs_from_block_text(chunk)[: max(1, min(max_cards, 200))]
 
-    if not pairs:
-        return FlashcardAppendResult(
-            ok=False,
-            code="no_pairs",
-            hint=("No question :: answer patterns in this block subtree (non-property lines)."),
-            dry_run=dry_run,
-            cards_preview=[],
-            inserted_line_count=0,
-            path=str(path),
-        )
+        if not pairs:
+            return FlashcardAppendResult(
+                ok=False,
+                code="no_pairs",
+                hint=("No question :: answer patterns in this block subtree (non-property lines)."),
+                dry_run=dry_run,
+                cards_preview=[],
+                inserted_line_count=0,
+                path=str(path),
+            )
 
-    previews: list[str] = []
-    insert_lines: list[str] = []
-    for q, a in pairs:
-        cid = str(uuid.uuid4())
-        card_line = f"{child_indent}- {q} #card {a}\n"
-        id_line = f"{child_indent}  id:: {cid}\n"
-        insert_lines.extend([card_line, id_line])
-        previews.append(f"- {q} #card {a}")
+        previews: list[str] = []
+        insert_lines: list[str] = []
+        for q, a in pairs:
+            cid = str(uuid.uuid4())
+            card_line = f"{child_indent}- {q} #card {a}\n"
+            id_line = f"{child_indent}  id:: {cid}\n"
+            insert_lines.extend([card_line, id_line])
+            previews.append(f"- {q} #card {a}")
 
-    new_lines = lines[:end] + insert_lines + lines[end:]
-    new_text = "".join(new_lines)
+        new_lines = lines[:end] + insert_lines + lines[end:]
+        new_text = "".join(new_lines)
 
-    if dry_run:
+        if dry_run:
+            return FlashcardAppendResult(
+                ok=True,
+                code="dry_run_ok",
+                hint="Re-run with dry_run=false to append cards after this block.",
+                dry_run=True,
+                cards_preview=previews,
+                inserted_line_count=len(insert_lines),
+                path=str(path),
+            )
+
+        bak = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, bak)
+        atomic_write_bytes(path, new_text.encode("utf-8"))
+
         return FlashcardAppendResult(
             ok=True,
-            code="dry_run_ok",
-            hint="Re-run with dry_run=false to append cards after this block.",
-            dry_run=True,
+            code="applied",
+            hint=f"Backup `{bak.name}`; appended {len(pairs)} cards.",
+            dry_run=False,
             cards_preview=previews,
             inserted_line_count=len(insert_lines),
             path=str(path),
         )
-
-    bak = path.with_suffix(path.suffix + ".bak")
-    shutil.copy2(path, bak)
-    atomic_write_bytes(path, new_text.encode("utf-8"))
-
-    return FlashcardAppendResult(
-        ok=True,
-        code="applied",
-        hint=f"Backup `{bak.name}`; appended {len(pairs)} cards.",
-        dry_run=False,
-        cards_preview=previews,
-        inserted_line_count=len(insert_lines),
-        path=str(path),
-    )
 
 
 __all__ = ["FlashcardAppendResult", "append_logseq_flashcards_under_block"]
