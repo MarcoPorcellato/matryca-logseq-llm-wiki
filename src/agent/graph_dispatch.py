@@ -5,8 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Any, cast
+import tempfile
+import uuid as uuid_module
+from pathlib import Path
+from typing import Any, cast
 
+from logseq_matryca_parser.agent_writer import _deepest_line_end, append_child_to_node
+from logseq_matryca_parser.graph import LogseqGraph
+from logseq_matryca_parser.logos_core import LogseqNode
 from loguru import logger
 
 from ..config import MatrycaWikiConfig
@@ -23,6 +29,7 @@ from ..graph.journal_task_scan import (
     scan_journal_tasks,
 )
 from ..graph.link_tag_hop import format_hop_report_markdown
+from ..graph.page_write_lock import page_rmw_lock
 from ..graph.property_line_edit import edit_block_property_lines
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
 from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
@@ -50,10 +57,180 @@ from .graph_tool_helpers import (
 )
 from .l1_memory import read_l1_memory_async
 from .quality_gate import advanced_query_security_violations, markdown_append_bounds_violations
-from .routing_hint import append_read_page_routing_hint, routing_hint_for_write_outline
+from .routing_hint import (
+    append_read_page_routing_hint,
+    routing_hint_for_entity_alias_preflight,
+    routing_hint_for_write_outline,
+)
 
-if TYPE_CHECKING:
-    from .mcp_server import MatrycaMCPServer
+
+def _resolve_graph_node(graph: LogseqGraph, block_uuid: str) -> LogseqNode | None:
+    """Resolve a block UUID against parser registry keys and on-disk ``id::`` values."""
+    node = graph.get_node_by_uuid(block_uuid)
+    if node is not None:
+        return node
+    return graph.get_node_by_embed_ref(block_uuid)
+
+
+def _property_lines(properties: dict[str, str], block_uuid: str) -> list[str]:
+    lines: list[str] = []
+    for key, value in properties.items():
+        prop_key = key if key.endswith("::") else f"{key}::"
+        lines.append(f"{prop_key} {value}")
+    if not any(line.strip().startswith("id::") for line in lines):
+        lines.append(f"id:: {block_uuid}")
+    return lines
+
+
+def _resolve_chain_parent_uuid(
+    graph_path: str | Path,
+    parent_uuid: str,
+    block_text: str,
+    written_id: str,
+) -> str:
+    """Return a parent key the parser registry accepts for the next append."""
+    graph_root = Path(graph_path).expanduser().resolve()
+    graph = LogseqGraph.load_directory(graph_root)
+    by_id = graph.get_node_by_embed_ref(written_id)
+    if by_id is not None:
+        return written_id
+    parent = _resolve_graph_node(graph, parent_uuid)
+    if parent is not None:
+        for child in reversed(parent.children):
+            if child.clean_text.strip() == block_text.strip():
+                return str(child.uuid)
+    return written_id
+
+
+def _headless_append_child(
+    graph_path: str | Path,
+    parent_uuid: str,
+    content: str,
+    *,
+    properties: dict[str, str] | None = None,
+) -> str:
+    """Append a child block on disk under ``parent_uuid``; return the new block UUID."""
+    graph_root = Path(graph_path).expanduser().resolve()
+    new_uuid = str(uuid_module.uuid4())
+    graph = LogseqGraph.load_directory(graph_root)
+    parent = _resolve_graph_node(graph, parent_uuid)
+    if parent is None:
+        msg = f"No node registered for uuid={parent_uuid}"
+        raise ValueError(msg)
+    source_path = parent.source_path
+    if not source_path:
+        msg = f"Node uuid={parent_uuid} has no source_path"
+        raise ValueError(msg)
+
+    props = _property_lines(dict(properties or {}), new_uuid)
+    content_lines = content.splitlines()
+    head = content_lines[0] if content_lines else ""
+    tail = content_lines[1:]
+
+    with page_rmw_lock(source_path):
+        graph = LogseqGraph.load_directory(graph_root)
+        parent = _resolve_graph_node(graph, parent_uuid)
+        if parent is None:
+            msg = f"No node registered for uuid={parent_uuid}"
+            raise ValueError(msg)
+        parent_uuid_resolved = parent.uuid
+
+        if not props and not tail:
+            append_child_to_node(graph, parent_uuid_resolved, content)
+            return new_uuid
+
+        target_node = graph.get_node_by_uuid(parent_uuid_resolved)
+        if target_node is None:
+            msg = f"No node registered for uuid={parent_uuid_resolved}"
+            raise ValueError(msg)
+        insert_after_line = _deepest_line_end(target_node)
+        child_level = target_node.indent_level + 1
+        bullet_indent = " " * (child_level * graph.tab_size)
+        body_indent = " " * ((child_level + 1) * graph.tab_size)
+        path = Path(target_node.source_path or source_path)
+        raw_text = path.read_text(encoding="utf-8")
+        file_lines = raw_text.splitlines(keepends=True)
+        insert_index = insert_after_line
+
+        new_lines = [f"{bullet_indent}- {head.rstrip()}\n"]
+        new_lines.extend(f"{body_indent}{line.rstrip()}\n" for line in tail)
+        new_lines.extend(f"{body_indent}{line}\n" for line in props)
+
+        for offset, line in enumerate(new_lines):
+            file_lines.insert(insert_index + offset, line)
+
+        updated = "".join(file_lines)
+        fd, temp_path = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            os.replace(temp_path, path)
+        except OSError:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+
+    return new_uuid
+
+
+def _headless_write_outline(
+    graph_path: str,
+    parent_block_uuid: str,
+    outline: dict[str, Any],
+) -> dict[str, Any]:
+    """Depth-first headless outline write using the parser's atomic splice engine."""
+    from .mcp_server import OutlineNode, _validate_outline_for_write, outline_block_count
+
+    root = _validate_outline_for_write(outline)
+    git_snap: dict[str, object] = {
+        "enabled": False,
+        "skipped": True,
+        "reason": "LOGSEQ_GRAPH_PATH unset",
+        "committed": False,
+    }
+    if graph_path:
+        git_snap = snapshot_git_working_tree(
+            graph_path,
+            message="matryca: AI pre-edit snapshot",
+        )
+
+    created_ids: list[str] = []
+
+    def walk(node: OutlineNode, parent_uuid: str) -> None:
+        new_uuid = _headless_append_child(
+            graph_path,
+            parent_uuid,
+            node.text,
+            properties=dict(node.properties),
+        )
+        created_ids.append(new_uuid)
+        chain_parent = _resolve_chain_parent_uuid(
+            graph_path,
+            parent_uuid,
+            node.text,
+            new_uuid,
+        )
+        for child in node.children:
+            walk(child, chain_parent)
+
+    walk(root, parent_block_uuid)
+    logger.bind(
+        blocks=len(created_ids),
+        root_parent=parent_block_uuid,
+    ).info("Applied headless Logseq outline with parent-chained UUIDs")
+    join_hint = routing_hint_for_write_outline()
+    if root.properties.get("type::") == "entity":
+        join_hint = f"{join_hint}\n{routing_hint_for_entity_alias_preflight()}"
+    return {
+        "uuids": created_ids,
+        "routing_hint": join_hint,
+        "outline_block_count": outline_block_count(outline),
+        "git_snapshot": git_snap,
+    }
 
 
 async def dispatch_read(
@@ -248,26 +425,32 @@ async def dispatch_search(
 
 
 async def dispatch_mutate(
-    bridge: MatrycaMCPServer,
     action: MutateGraphAction,
     target: str,
     payload: str,
 ) -> dict[str, Any]:
-    """Route ``mutate_graph`` by ``action``."""
+    """Route ``mutate_graph`` by ``action`` (headless on-disk writes)."""
     graph_path = graph_path_from_env()
     resolved_target = (
         resolve_target(graph_path, target) if graph_path and action != "append_journal" else target
     )
 
     if action == "write_outline":
+        if not graph_path:
+            return graph_missing_dict()
         parent_uuid = resolved_target.strip()
         if not parent_uuid:
             return {"ok": False, "error": "`target` must be the parent block UUID."}
         outline = parse_json_object(payload, field_name="payload")
-        return await bridge.write_logseq_outline(
-            outline,
-            parent_block_uuid=parent_uuid,
-        )
+        try:
+            return await asyncio.to_thread(
+                _headless_write_outline,
+                graph_path,
+                parent_uuid,
+                outline,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
     if action == "edit_property":
         if not graph_path:
@@ -376,15 +559,26 @@ async def dispatch_mutate(
             "routing_hint": routing_hint_for_write_outline(),
         }
 
+    if not graph_path:
+        return graph_missing_dict()
+
     try:
-        out = await bridge.inject_logseq_advanced_query_block(
-            parent_block_uuid=parent_block,
-            query_edn=inner,
+        new_uuid = await asyncio.to_thread(
+            _headless_append_child,
+            graph_path,
+            parent_block,
+            markdown,
         )
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
-    return {"ok": True, "dry_run": False, **out}
+    return {
+        "ok": True,
+        "dry_run": False,
+        "uuid": new_uuid,
+        "markdown": markdown,
+        "routing_hint": routing_hint_for_write_outline(),
+    }
 
 
 async def dispatch_refactor(
@@ -392,7 +586,7 @@ async def dispatch_refactor(
     target_uuid: str,
     payload: str = "",
 ) -> dict[str, Any]:
-    """Route ``refactor_blocks`` by ``action``."""
+    """Route ``refactor_blocks`` by ``action`` (headless on-disk rewrites)."""
     graph_path = graph_path_from_env()
     if not graph_path:
         return graph_missing_dict()
@@ -400,11 +594,10 @@ async def dispatch_refactor(
     refactor_opts = parse_optional_json_query(payload)
     dry_run = bool(refactor_opts.get("dry_run", True))
     resolved_uuid = target_uuid
-    if graph_path:
-        if "|" in target_uuid:
-            resolved_uuid = resolve_pipe_target(graph_path, target_uuid)
-        elif target_uuid.strip():
-            resolved_uuid = resolve_target(graph_path, target_uuid)
+    if "|" in target_uuid:
+        resolved_uuid = resolve_pipe_target(graph_path, target_uuid)
+    elif target_uuid.strip():
+        resolved_uuid = resolve_target(graph_path, target_uuid)
 
     if action == "split_large":
         page_ref = resolved_uuid.strip() or None
@@ -527,25 +720,7 @@ async def dispatch_lint(
     return wiki_report
 
 
-def build_logseq_bridge() -> MatrycaMCPServer:
-    """Construct :class:`MatrycaMCPServer` from ``LOGSEQ_API_*`` environment variables."""
-    from ..bridge.logseq_client import LogseqClient
-    from .mcp_server import MatrycaMCPServer
-
-    api_url = os.environ.get("LOGSEQ_API_URL", "http://localhost:12315").rstrip("/")
-    token = os.environ.get("LOGSEQ_API_TOKEN", "").strip()
-    if not token:
-        msg = (
-            "LOGSEQ_API_TOKEN is not set. Add it to your environment or `.env` file "
-            "before running mutate commands that use the Logseq API."
-        )
-        raise ValueError(msg)
-    client = LogseqClient(api_url=api_url, token=token)
-    return MatrycaMCPServer(client=client)
-
-
 __all__ = [
-    "build_logseq_bridge",
     "dispatch_lint",
     "dispatch_mutate",
     "dispatch_read",

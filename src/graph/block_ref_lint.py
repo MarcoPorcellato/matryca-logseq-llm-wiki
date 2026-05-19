@@ -1,45 +1,18 @@
-"""Scan Logseq Markdown for ``((uuid))`` block refs missing a defining ``id::``."""
+"""Scan Logseq Markdown for broken ``((uuid))`` block refs via the parser graph index."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from logseq_matryca_parser.graph import LogseqGraph
+
 from .logseq_uuid import is_logseq_block_uuid
-
-# Logseq block references: ((xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx))
-_BLOCK_REF_RE = re.compile(
-    r"\(\(([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)\)",
-)
-# Block ids declared as Logseq properties (line-oriented; avoids parsing full outline).
-_ID_DECL_RE = re.compile(
-    r"(?im)^\s*id::\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*$",
-)
-
-
-def collect_id_declarations(text: str) -> set[str]:
-    """Return lowercase UUID v4/v5 strings declared via ``id::`` properties."""
-    found: set[str] = set()
-    for match in _ID_DECL_RE.finditer(text):
-        raw = match.group(1).strip()
-        if is_logseq_block_uuid(raw):
-            found.add(raw.lower())
-    return found
-
-
-def collect_block_ref_targets(text: str) -> list[tuple[str, bool]]:
-    """Return each ``((uuid))`` target with whether the bracketed string is UUID v4/v5."""
-    out: list[tuple[str, bool]] = []
-    for match in _BLOCK_REF_RE.finditer(text):
-        raw = match.group(1)
-        out.append((raw.lower(), is_logseq_block_uuid(raw)))
-    return out
 
 
 @dataclass(frozen=True, slots=True)
 class BrokenBlockRef:
-    """A block reference that is not backed by any scanned ``id::``."""
+    """A block reference that is not backed by any node in the global registry."""
 
     file_path: str
     ref_uuid: str
@@ -61,13 +34,13 @@ class BlockRefLintResult:
             "# Block reference lint (`((uuid))`)",
             "",
             f"- **Pages scanned:** {self.pages_scanned}",
-            f"- **Distinct `id::` (v4/v5) seen:** {self.defined_ids}",
+            f"- **Distinct block nodes indexed:** {self.defined_ids}",
             f"- **Block refs parsed:** {self.refs_checked}",
             f"- **Issues:** {len(self.broken)}",
             "",
         ]
         if not self.broken:
-            lines.append("No broken `((uuid))` references detected (among declared `id::`).")
+            lines.append("No broken `((uuid))` references detected in the graph index.")
             return "\n".join(lines)
 
         lines.append("## Findings")
@@ -84,20 +57,27 @@ class BlockRefLintResult:
                 )
         lines.append("")
         lines.append(
-            "_Note: only `pages/**/*.md` are scanned; journals or other folders are ignored._"
+            "_Note: structural lint via `LogseqGraph.get_broken_references()`; "
+            "journals and non-indexed paths follow parser discovery rules._"
         )
         return "\n".join(lines)
 
 
+def _relative_source_path(graph_root: Path, source_path: str | None) -> str:
+    if not source_path:
+        return ""
+    try:
+        return Path(source_path).resolve().relative_to(graph_root).as_posix()
+    except ValueError:
+        return Path(source_path).name
+
+
+def _ref_registered(graph: LogseqGraph, ref: str) -> bool:
+    return graph.get_node_by_embed_ref(ref) is not None
+
+
 def lint_block_refs_in_graph(graph_root: str | Path) -> BlockRefLintResult:
-    """Two-pass scan: collect all ``id::`` v4/v5 ids, then flag ``((uuid))`` refs not in that set.
-
-    Args:
-        graph_root: Logseq graph directory (must contain ``pages/``).
-
-    Returns:
-        :class:`BlockRefLintResult` suitable for :meth:`BlockRefLintResult.format_report`.
-    """
+    """Flag ``((uuid))`` refs whose targets are absent from the parser's global node registry."""
     root = Path(graph_root).expanduser().resolve(strict=False)
     pages = root / "pages"
     if not pages.is_dir():
@@ -114,49 +94,30 @@ def lint_block_refs_in_graph(graph_root: str | Path) -> BlockRefLintResult:
             ],
         )
 
-    global_ids: set[str] = set()
-    file_texts: list[tuple[Path, str]] = []
-    scanned = 0
-
-    for path in sorted(pages.rglob("*.md")):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        scanned += 1
-        global_ids |= collect_id_declarations(text)
-        file_texts.append((path, text))
+    graph = LogseqGraph.load_directory(root)
+    pages_scanned = sum(1 for path in pages.rglob("*.md") if path.is_file())
+    all_nodes = graph.query().execute()
+    defined_ids = len(all_nodes)
+    refs_checked = sum(len(node.block_refs) for node in all_nodes)
 
     broken: list[BrokenBlockRef] = []
-    refs_checked = 0
-
-    for path, text in file_texts:
-        rel = str(path.relative_to(root))
-        for ref_lower, is_valid in collect_block_ref_targets(text):
-            refs_checked += 1
-            if not is_valid:
-                broken.append(
-                    BrokenBlockRef(
-                        file_path=rel,
-                        ref_uuid=ref_lower,
-                        reason="invalid_uuid",
-                    ),
-                )
+    for node in graph.get_broken_references():
+        rel = _relative_source_path(root, node.source_path)
+        for ref in node.block_refs:
+            if _ref_registered(graph, ref):
                 continue
-            if ref_lower not in global_ids:
-                broken.append(
-                    BrokenBlockRef(
-                        file_path=rel,
-                        ref_uuid=ref_lower,
-                        reason="unresolved",
-                    ),
-                )
+            reason = "invalid_uuid" if not is_logseq_block_uuid(ref) else "unresolved"
+            broken.append(
+                BrokenBlockRef(
+                    file_path=rel,
+                    ref_uuid=ref.lower(),
+                    reason=reason,
+                ),
+            )
 
     return BlockRefLintResult(
-        pages_scanned=scanned,
-        defined_ids=len(global_ids),
+        pages_scanned=pages_scanned,
+        defined_ids=defined_ids,
         refs_checked=refs_checked,
         broken=broken,
     )
@@ -165,7 +126,5 @@ def lint_block_refs_in_graph(graph_root: str | Path) -> BlockRefLintResult:
 __all__ = [
     "BlockRefLintResult",
     "BrokenBlockRef",
-    "collect_block_ref_targets",
-    "collect_id_declarations",
     "lint_block_refs_in_graph",
 ]

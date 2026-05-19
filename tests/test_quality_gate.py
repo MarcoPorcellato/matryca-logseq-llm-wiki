@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from src.agent.graph_dispatch import _headless_write_outline
 from src.agent.quality_gate import advanced_query_security_violations, outline_security_violations
 
 
@@ -25,43 +28,32 @@ def test_advanced_query_security_flags_sk_pattern() -> None:
     assert advanced_query_security_violations(bad)
 
 
-@pytest.mark.asyncio
-async def test_write_entity_includes_alias_routing_hint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.agent.mcp_server import MatrycaMCPServer
-    from src.bridge.logseq_client import LogseqClient
-
-    client = LogseqClient(api_url="http://127.0.0.1:9", token="t")
-
-    async def fake_append(
-        parent_uuid: str,
-        content: str,
-        properties: dict[str, str],
-    ) -> str:
-        return "uuid-1"
-
-    monkeypatch.setattr(client, "append_block", fake_append)
-    monkeypatch.setenv("LOGSEQ_GRAPH_PATH", "")
-
-    server = MatrycaMCPServer(client=client)
+def test_headless_write_entity_includes_alias_routing_hint(tmp_path: Path) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    (pages / "Demo.md").write_text(
+        f"- Root\n  id:: {parent_id}\n",
+        encoding="utf-8",
+    )
     outline = {
         "text": "Entity root",
         "page_type": "entity",
         "entity_type": "tool",
         "children": [],
     }
-    out = await server.write_logseq_outline(outline, parent_block_uuid="root")
+    out = _headless_write_outline(str(tmp_path), parent_id, outline)
     assert "resolve_logseq_entity" in out["routing_hint"]
 
 
-@pytest.mark.asyncio
-async def test_write_rejects_outline_with_secret() -> None:
-    from src.agent.mcp_server import MatrycaMCPServer
-    from src.bridge.logseq_client import LogseqClient
-
-    client = LogseqClient(api_url="http://127.0.0.1:9", token="t")
-    server = MatrycaMCPServer(client=client)
+def test_headless_write_rejects_outline_with_secret(tmp_path: Path) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    (pages / "Demo.md").write_text(
+        f"- Root\n  id:: {parent_id}\n",
+        encoding="utf-8",
+    )
     bad = {"text": "leak", "properties": {"password::": "x"}, "children": []}
     with pytest.raises(ValueError, match="credential-like"):
-        await server.write_logseq_outline(bad, parent_block_uuid="root")
+        _headless_write_outline(str(tmp_path), parent_id, bad)

@@ -339,7 +339,7 @@ wheels = [
 
 [[package]]
 name = "logseq-matryca-parser"
-version = "0.3.0"
+version = "0.3.3"
 source = { editable = "../logseq-matryca-parser" }
 dependencies = [
     { name = "pydantic" },
@@ -402,7 +402,6 @@ name = "matryca-logseq-llm-wiki"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "logseq-matryca-parser" },
     { name = "loguru" },
     { name = "mcp" },
@@ -421,7 +420,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
     { name = "logseq-matryca-parser", editable = "../logseq-matryca-parser" },
     { name = "loguru", specifier = ">=0.7.0,<1.0.0" },
     { name = "mcp", specifier = ">=1.0.0,<2.0.0" },

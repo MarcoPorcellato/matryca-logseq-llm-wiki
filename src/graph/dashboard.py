@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from logseq_matryca_parser.graph import LogseqGraph
+
 from ..config import MatrycaWikiConfig
-from .block_ref_lint import collect_id_declarations, lint_block_refs_in_graph
+from .block_ref_lint import lint_block_refs_in_graph
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +39,15 @@ def collect_dashboard_stats(graph_root: str | Path) -> DashboardStats:
     newest: float | None = None
     for path in paths:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
             st = path.stat()
         except OSError:
             continue
-        id_tally += len(collect_id_declarations(text))
         newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
+
+    graph = LogseqGraph.load_directory(root)
+    id_tally = sum(
+        1 for node in graph.query().execute() if node.source_uuid or node.properties.get("id")
+    )
 
     lint = lint_block_refs_in_graph(root)
     broken = sum(1 for b in lint.broken if b.reason in {"invalid_uuid", "unresolved"})

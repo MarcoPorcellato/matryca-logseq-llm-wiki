@@ -14,7 +14,6 @@ from typing import Any
 from dotenv import load_dotenv
 
 from .agent.graph_dispatch import (
-    build_logseq_bridge,
     dispatch_lint,
     dispatch_mutate,
     dispatch_read,
@@ -175,16 +174,11 @@ async def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if command == "mutate":
-        bridge = build_logseq_bridge()
-        try:
-            mutate_out: dict[str, Any] = await dispatch_mutate(
-                bridge,
-                args.action,
-                args.target,
-                args.payload,
-            )
-        finally:
-            await bridge.aclose()
+        mutate_out: dict[str, Any] = await dispatch_mutate(
+            args.action,
+            args.target,
+            args.payload,
+        )
         _emit_result(mutate_out)
         if mutate_out.get("ok") is False:
             return 1

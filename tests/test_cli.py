@@ -9,9 +9,9 @@ import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+from logseq_matryca_parser.agent_press import XRAY_STATE_FILENAME
 from src.cli import build_parser, main, run_cli
 
 BLOCK_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -158,20 +158,17 @@ def test_main_invalid_json_payload_exits_one(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("LOGSEQ_GRAPH_PATH", "/tmp/unused")
-    monkeypatch.setenv("LOGSEQ_API_TOKEN", "test-token")
-    with patch("src.cli.build_logseq_bridge") as mock_bridge:
-        mock_bridge.return_value.aclose = lambda: None
-        with pytest.raises(SystemExit) as exc:
-            main(
-                [
-                    "mutate",
-                    "write_outline",
-                    "--target",
-                    "parent-uuid",
-                    "--payload",
-                    "not-json",
-                ],
-            )
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "mutate",
+                "write_outline",
+                "--target",
+                "parent-uuid",
+                "--payload",
+                "not-json",
+            ],
+        )
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert err
@@ -200,7 +197,7 @@ def _write_xray_fixture_page(graph_root: Path, page_title: str = "Alias Demo") -
 def test_subprocess_xray_page_then_mutate_alias_across_invocations(tmp_path: Path) -> None:
     """X-Ray read persists aliases; a later CLI mutate can target ``[0]``."""
     _write_xray_fixture_page(tmp_path)
-    env = {"LOGSEQ_GRAPH_PATH": str(tmp_path), "LOGSEQ_API_TOKEN": "unused-for-edit-property"}
+    env = {"LOGSEQ_GRAPH_PATH": str(tmp_path)}
 
     read_proc = subprocess.run(
         [sys.executable, "-m", "src.cli", "read", "xray_page", "Alias Demo"],
@@ -212,7 +209,7 @@ def test_subprocess_xray_page_then_mutate_alias_across_invocations(tmp_path: Pat
     assert read_proc.returncode == 0, read_proc.stderr
     assert "[0]" in read_proc.stdout
     assert "Parent bullet" in read_proc.stdout
-    assert (tmp_path / ".matryca_aliases.json").is_file()
+    assert (tmp_path / XRAY_STATE_FILENAME).is_file()
 
     mutate_proc = subprocess.run(
         [

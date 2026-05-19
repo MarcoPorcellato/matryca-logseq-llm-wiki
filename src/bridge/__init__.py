@@ -1,1 +1,1 @@
-"""HTTP / JSON-RPC bridge to the local Logseq API."""
+"""Legacy bridge package (HTTP client removed; graph writes are headless)."""

@@ -108,7 +108,7 @@ def read_xray_page_markdown(graph_path: str, page_name: str) -> str:
     from logseq_matryca_parser.agent_press import SessionAliasRegistry, to_xray_markdown
 
     from ..rag.matryca_hooks import get_spatial_context, resolve_logseq_page_md
-    from .alias_state import save_alias_map
+    from .alias_state import alias_file_path, save_alias_registry
 
     title = page_name.strip()
     if not title:
@@ -123,14 +123,19 @@ def read_xray_page_markdown(graph_path: str, page_name: str) -> str:
 
     registry = SessionAliasRegistry()
     parser_alias_map = registry.generate_aliases(roots)
-    alias_map = _persistable_alias_map(roots, parser_alias_map)
-    save_alias_map(graph_path, alias_map)
     body = to_xray_markdown(roots, registry)
-    alias_count = len(alias_map)
+    persistable = _persistable_alias_map(roots, parser_alias_map)
+    persist_registry = SessionAliasRegistry()
+    for alias, block_uuid in persistable.items():
+        persist_registry._alias_to_uuid[alias] = block_uuid  # noqa: SLF001
+        persist_registry._uuid_to_alias[block_uuid] = alias  # noqa: SLF001
+    save_alias_registry(graph_path, persist_registry)
+    alias_count = len(persistable)
+    state_name = alias_file_path(graph_path).name
     return (
         f"# X-Ray: [[{title}]]\n\n"
         f"**Aliases:** {alias_count} block(s) mapped to `[0]`…`[{alias_count - 1}]` "
-        f"in `.matryca_aliases.json` at the graph root. "
+        f"in `{state_name}` at the graph root. "
         "Pass `[n]` as `target` or in `Page Title|[n]` for `mutate_graph` / `refactor_blocks`.\n\n"
         f"{body}\n"
     )

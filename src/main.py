@@ -1,4 +1,4 @@
-"""Application entrypoint: load config, wire Logseq, and run the MCP server (stdio)."""
+"""Application entrypoint: load config and run the headless MCP server (stdio)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,8 @@ from dotenv import load_dotenv
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
-from .agent.mcp_server import AppContext, MatrycaMCPServer, register_mcp_tools
+from .agent.mcp_server import AppContext, register_mcp_tools
 from .agent.mcp_telemetry import install_loguru_mcp_bridge
-from .bridge.logseq_client import LogseqClient
 from .config import load_matryca_wiki_config
 from .graph.markdown_blocks import sweep_dangling_atomic_tmp_files
 from .graph.page_write_lock import clear_page_write_locks
@@ -23,29 +22,15 @@ install_loguru_mcp_bridge()
 
 @asynccontextmanager
 async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
-    """Create the Logseq client and MCP bridge for the stdio session lifetime.
+    """Prepare wiki config and graph hygiene for the stdio session lifetime.
 
     Args:
         _server: FastMCP instance (unused; reserved for future hooks).
 
     Yields:
-        Application context holding the live :class:`MatrycaMCPServer`.
-
-    Raises:
-        ValueError: If ``LOGSEQ_API_TOKEN`` is unset (required for authenticated calls).
+        Application context holding :class:`MatrycaWikiConfig`.
     """
     load_dotenv()
-    api_url = os.environ.get("LOGSEQ_API_URL", "http://localhost:12315").rstrip("/")
-    token = os.environ.get("LOGSEQ_API_TOKEN", "").strip()
-    if not token:
-        msg = (
-            "LOGSEQ_API_TOKEN is not set. Add it to your environment or `.env` file "
-            "before starting the MCP server."
-        )
-        raise ValueError(msg)
-
-    client = LogseqClient(api_url=api_url, token=token)
-    bridge = MatrycaMCPServer(client=client)
     wiki_config = load_matryca_wiki_config()
     graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
     if graph_path:
@@ -54,13 +39,12 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
             logger.bind(graph=graph_path, removed=swept).info(
                 "Swept dangling atomic-write temp files at startup",
             )
-    logger.bind(api_url=api_url, namespaces=len(wiki_config.namespaces)).info(
-        "Matryca MCP lifespan started (stdio)",
+    logger.bind(namespaces=len(wiki_config.namespaces)).info(
+        "Matryca MCP lifespan started (headless stdio)",
     )
     try:
-        yield AppContext(bridge=bridge, wiki_config=wiki_config)
+        yield AppContext(wiki_config=wiki_config)
     finally:
-        await client.aclose()
         clear_page_write_locks()
         logger.info("Matryca MCP lifespan stopped")
 

@@ -1,22 +1,16 @@
-"""Agent-facing MCP server scaffolding (tools bridge to Logseq)."""
+"""Agent-facing MCP server scaffolding (headless graph tools)."""
 
 from __future__ import annotations
 
-import asyncio
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Self, cast
 
-from loguru import logger
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..bridge.logseq_client import LogseqClient
 from ..config import MatrycaWikiConfig
-from ..graph.advanced_query_block import wrap_logseq_advanced_query
-from .git_snapshot import snapshot_git_working_tree
 from .graph_dispatch import (
     dispatch_lint,
     dispatch_mutate,
@@ -34,13 +28,8 @@ from .graph_tool_helpers import (
 from .mcp_telemetry import mcp_tool_info, mcp_tool_session
 from .mcp_tool_guard import guard_mcp_tool
 from .quality_gate import (
-    advanced_query_security_violations,
     outline_bounds_violations,
     outline_security_violations,
-)
-from .routing_hint import (
-    routing_hint_for_entity_alias_preflight,
-    routing_hint_for_write_outline,
 )
 
 
@@ -48,7 +37,6 @@ from .routing_hint import (
 class AppContext:
     """Dependencies available for the MCP server lifetime."""
 
-    bridge: MatrycaMCPServer
     wiki_config: MatrycaWikiConfig
 
 
@@ -141,114 +129,6 @@ def _validate_outline_for_write(outline: dict[str, Any]) -> OutlineNode:
     return OutlineNode.model_validate(outline)
 
 
-class MatrycaMCPServer:
-    """MCP-oriented bridge: validates tool payloads and drives :class:`LogseqClient`."""
-
-    def __init__(self, client: LogseqClient | None = None) -> None:
-        """Store the Logseq client used for async block creation.
-
-        Args:
-            client: Live Logseq API client; required for :meth:`write_logseq_outline`.
-        """
-        self._client = client
-
-    async def write_logseq_outline(
-        self,
-        outline: dict[str, Any],
-        *,
-        parent_block_uuid: str,
-    ) -> dict[str, Any]:
-        """Create blocks depth-first, awaiting each parent UUID before writing children.
-
-        Args:
-            outline: Nested mapping matching :class:`OutlineNode`
-                (``text`` / ``properties`` / ``children``).
-            parent_block_uuid: Existing Logseq block UUID to attach the root node under.
-
-        Returns:
-            Mapping with ``uuids`` (DFS-ordered new block ids) and a machine-readable
-            ``routing_hint`` comment for L1/L2 traceability.
-
-        Raises:
-            ValueError: If no :class:`LogseqClient` was configured, outline fails
-                validation, or credential-like content is detected.
-        """
-        client = self._client
-        if client is None:
-            msg = "write_logseq_outline requires a configured LogseqClient"
-            raise ValueError(msg)
-
-        root = await asyncio.to_thread(_validate_outline_for_write, outline)
-
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        git_snap: dict[str, object] = {
-            "enabled": False,
-            "skipped": True,
-            "reason": "LOGSEQ_GRAPH_PATH unset",
-            "committed": False,
-        }
-        if graph_path:
-            git_snap = await asyncio.to_thread(
-                snapshot_git_working_tree,
-                graph_path,
-                message="matryca: AI pre-edit snapshot",
-            )
-
-        created_ids: list[str] = []
-
-        async def walk(node: OutlineNode, parent_uuid: str) -> None:
-            new_uuid = await client.append_block(
-                parent_uuid,
-                node.text,
-                dict(node.properties),
-            )
-            created_ids.append(new_uuid)
-            for child in node.children:
-                await walk(child, new_uuid)
-
-        await walk(root, parent_block_uuid)
-        logger.bind(
-            blocks=len(created_ids),
-            root_parent=parent_block_uuid,
-        ).info("Applied Logseq outline with parent-chained UUIDs")
-        join_hint = routing_hint_for_write_outline()
-        if root.properties.get("type::") == "entity":
-            join_hint = f"{join_hint}\n{routing_hint_for_entity_alias_preflight()}"
-        return {
-            "uuids": created_ids,
-            "routing_hint": join_hint,
-            "outline_block_count": outline_block_count(outline),
-            "git_snapshot": git_snap,
-        }
-
-    async def inject_logseq_advanced_query_block(
-        self,
-        *,
-        parent_block_uuid: str,
-        query_edn: str,
-    ) -> dict[str, Any]:
-        """Append one advanced-query fence block under ``parent_block_uuid`` via Logseq API."""
-        client = self._client
-        if client is None:
-            msg = "inject_logseq_advanced_query_block requires a configured LogseqClient"
-            raise ValueError(msg)
-        sec = advanced_query_security_violations(query_edn)
-        if sec:
-            raise ValueError("; ".join(sec))
-        content = wrap_logseq_advanced_query(query_edn)
-        new_uuid = await client.append_block(parent_block_uuid, content, {})
-        return {
-            "uuid": new_uuid,
-            "markdown": content,
-            "routing_hint": routing_hint_for_write_outline(),
-        }
-
-    async def aclose(self) -> None:
-        """Close the underlying :class:`LogseqClient` when configured."""
-        if self._client is not None:
-            await self._client.aclose()
-
-
 def register_mcp_tools(mcp: FastMCP) -> None:
     """Register five consolidated MCP mega-tools on the FastMCP application.
 
@@ -287,7 +167,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         (``MATRYCA_L1_PATH``, ``memory_path`` in ``matryca-wiki.yml``, or ``matryca-l1/*.md``).
 
         **``target_type=block_ast``** — ``query`` = ``Page Title|block-uuid`` (pipe-separated).
-        Raw on-disk bullet subtree for that ``id::`` block (no Logseq HTTP API).
+        Raw on-disk bullet subtree for that ``id::`` block (headless; no Logseq HTTP API).
 
         **``target_type=structural_hops``** — ``query`` = comma-separated seed page titles,
         or JSON ``{"seeds":"A, B", "max_depth": 3, "max_per_level": 40}``. BFS over wikilinks,
@@ -297,7 +177,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         page counts, ``id::`` tally, block-ref health under ``pages/``.
 
         **``target_type=xray_page``** — ``query`` = Logseq **page title**. Ultra-dense
-        ``[n]`` outline (X-Ray mode); persists alias→UUID map to ``.matryca_aliases.json`` at
+        ``[n]`` outline (X-Ray mode); persists alias→UUID map to ``.matryca_xray_state.json`` at
         the graph root. Use ``[n]`` in ``target`` / ``target_uuid`` on later mutations.
 
         **Requires:** ``LOGSEQ_GRAPH_PATH`` for every target except ``memory`` (still recommended).
@@ -353,9 +233,9 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         target: str,
         payload: str,
     ) -> dict[str, Any]:
-        """Create or patch durable graph content (Logseq API or on-disk).
+        """Create or patch durable graph content via headless on-disk writes.
 
-        **``action=write_outline``** — ``target`` = parent **block UUID** in Logseq.
+        **``action=write_outline``** — ``target`` = parent **block UUID** (or X-Ray ``[n]`` alias).
         ``payload`` = JSON outline tree (``text``, optional ``properties`` / schema fields,
         nested ``children``) matching ``OutlineNode``.
 
@@ -367,12 +247,12 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         ``payload`` = Markdown to append to today's ``journals/YYYY_MM_DD.md``, or JSON
         ``{"markdown_body":"...", "dry_run":true}``.
 
-        **``action=inject_query``** — ``target`` = parent block UUID.
+        **``action=inject_query``** — ``target`` = parent block UUID (or ``[n]`` alias).
         ``payload`` = JSON with inner EDN in ``query_edn`` and/or ``query_preset``
         (``open_markers``, ``pages_tagged``) plus optional ``tag``, ``dry_run`` (default true).
         """
-        bridge = ctx.request_context.lifespan_context.bridge
-        return await dispatch_mutate(bridge, action, target, payload)
+        _ = ctx
+        return await dispatch_mutate(action, target, payload)
 
     @safe_tool()
     async def refactor_blocks(
@@ -405,7 +285,7 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         **``linter_name=unify_tags``** — Preview-only tag clustering (``dry_run=true``).
         Cluster ``#tag`` spellings vault-wide; apply only after explicit operator consent.
 
-        **``linter_name=block_refs``** — Markdown report: ``((uuid))`` vs graph-wide ``id::``.
+        **``linter_name=block_refs``** — Markdown report: ``((uuid))`` vs graph-wide node index.
 
         **``linter_name=full_wiki_scan``** — Lint wiki-prefixed pages per ``matryca-wiki.yml``
         (``type::``, stale knowledge, credentials, wikilinks).
@@ -427,10 +307,9 @@ __all__ = [
     "AppContext",
     "Domain",
     "EntityType",
-    "MatrycaMCPServer",
-    "MutateGraphAction",
     "OutlineNode",
     "PageType",
+    "MutateGraphAction",
     "ReadGraphTarget",
     "RefactorBlocksAction",
     "RunLinterName",

@@ -1,31 +1,64 @@
-# Matryca Logseq LLM Wiki
+# Matryca Logseq LLM Wiki (v1.4.0 — Headless Edition)
 
 > Agentic Knowledge Management for Logseq OG. An MCP server that turns your favorite AI into a spatial Knowledge Architect. It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-144%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 ![Matryca Logseq LLM Wiki — Agentic Knowledge Management for Logseq OG](images/20260519%20Logseq%20Matryca%20LLM%20Wiki%20copertina%20github.jpg)
 
-As the PKM ecosystem pivots heavily toward opaque SQLite databases to accommodate AI, many of us want to keep our Second Brain in pure, local Markdown. But standard LLM RAG pipelines destroy Markdown: they blindly chunk files, severing the crucial parent-child relationship of your bullet points.
+Matryca is a **100% Headless, sandboxed** MCP server and CLI built to turn your local Logseq graph into a high token-density agentic workspace — **with no network APIs and no background desktop app required**.
 
-Matryca solves the context-fragmentation problem. Powered by the [Logseq Matryca Parser](https://github.com/MarcoPorcellato/logseq-matryca-parser) and [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), this architecture allows agents like Claude Desktop or Cursor to read the exact Abstract Syntax Tree (AST) of your thoughts. It understands nested bullets, `id::` UUIDs, and `[[wikilinks]]`, allowing the AI to organically grow, synthesize, and garden your graph alongside you.
+The shift from a **stateful, network-bounded** architecture (Logseq Electron + JSON-RPC) to a **local-first, zero-dependency** model is the milestone of **v1.4.0 — The Headless Revolution**: one required variable (`LOGSEQ_GRAPH_PATH`), atomic AST writes via `logseq-matryca-parser==0.3.3`, and X-Ray persistence in `.matryca_xray_state.json`.
 
 ---
 
-## 🧠 Why this is different
+## ✨ Core Features
 
-**Compiler-Grade AST Awareness:** The agent reads the exact spatial indentation of your blocks. It knows if a bullet is a root project, a task, or a sub-note.
+* 🌌 **AST Spatial Intelligence:** understands Logseq’s native parent-child block structure via a deterministic parser.
+* 🤖 **100% Headless & Local-First:** does not require the Logseq desktop app to be open. Mutations use atomic file I/O directly on `.md` sources.
+* 🩻 **X-Ray Token Economy (Printing Press Mode):** compresses Markdown trees and maps UUIDs to persistent aliases like `[0]`, `[1]` — up to ~35× less context noise.
+* 🔒 **Sandboxed Privacy:** mathematically blocks path-traversal attempts outside the graph root (`path_sandbox.py`).
+* ⚡ **Agent-Native CLI:** fast, minimal `matryca` command optimized for terminal scripts and local LLMs.
+* 🧱 **Ironclad Data Plane:** transactional swaps, code-block fence scanning, optional Git snapshots before mutations.
+* 📊 **Zero-DB Lexical Engine:** in-memory Okapi BM25 and structural BFS traversals — no vector store.
 
-**Zero-DB / In-Memory Lexical Engine:** No bloated vector databases. It uses instantaneous in-memory Okapi BM25 and structural BFS graph traversals directly over your `pages/` directory.
+---
 
-**Ironclad Data Plane:** AI agents can be destructive. Matryca features ACID-inspired transactional file swaps, dead-zone fence scanning (to protect code blocks), and automated Git snapshots before mutating your graph.
+## ⚙️ Configuration (Zero-Friction)
 
-**Sandboxed & Privacy-First by Design:** A centralized path sandbox (`path_sandbox.py`) enforces `Path.resolve().is_relative_to(graph_root)` on every disk read and write. Prompt-injected traversal attempts (e.g. `../../../etc/passwd`) are blocked with an explicit security error before any file is touched — your graph root is the hard boundary.
+Forget API tokens and port configuration. The only **required** variable is the absolute path to your graph:
 
-**Network Deadlock Protection:** The Logseq HTTP client uses strict `httpx` timeouts (5s connect, 15s read/write). If the local Logseq API freezes during indexing, the MCP session returns a safe “API unresponsive” tool error instead of hanging worker threads indefinitely.
+### Claude Desktop
+
+Add this block to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "matryca-logseq-llm-wiki": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "src.main"],
+      "cwd": "/absolute/path/to/matryca-logseq-llm-wiki",
+      "env": {
+        "LOGSEQ_GRAPH_PATH": "/absolute/path/to/your/Logseq/graph"
+      }
+    }
+  }
+}
+```
+
+Restart the MCP host after edits. Optional: `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true` for automatic commits before writes on git-backed graphs.
+
+---
+
+## 🧪 Stability Markers
+
+* **144 strict passing tests** (unit, integration, subprocess).
+* **100% strict MyPy** type checking and **Ruff** compliance on `src/` and `tests/`.
+* The same bar on `main` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — run `make check` locally.
 
 ---
 
@@ -35,22 +68,25 @@ Matryca solves the context-fragmentation problem. Powered by the [Logseq Matryca
 flowchart TB
   subgraph host["Host machine"]
     IDE["MCP client\n(Claude Desktop, Cursor, …)"]
-    LQ["Logseq\nHTTP JSON-RPC"]
   end
   subgraph proc["matryca-logseq-llm-wiki process"]
     MCP["FastMCP stdio"]
     SRV["MatrycaMCPServer\n+ Pydantic validators"]
+    GD["graph_dispatch.py\n(headless CRUD)"]
     QG["quality_gate\n(credential / key scans)"]
     MCP --> SRV
+    SRV --> GD
     SRV --> QG
   end
-  subgraph data["Data plane"]
+  subgraph data["Data plane (headless)"]
     FS[("LOGSEQ_GRAPH_PATH\npages/ · journals/ · templates/")]
-    PAR["logseq-matryca-parser\n(spatial read)"]
+    PAR["logseq-matryca-parser==0.3.3\n(spatial read + agent_writer)"]
     SBX["path_sandbox\n(is_relative_to graph root)"]
+    LOCK["page_rmw_lock\n(per-page RMW)"]
     GFS["global_fence_scanner\n(dead-zone line index)"]
     ATW["atomic_write_bytes\n(tmp + fsync + replace)"]
     GC["generational_cache\n(mtime_ns signatures)"]
+    XRAY[".matryca_xray_state.json\n(SessionAliasRegistry)"]
   end
   subgraph delivery["Delivery gates (repo)"]
     CI["GitHub Actions\nRuff · Mypy · Pytest"]
@@ -58,14 +94,14 @@ flowchart TB
     REL["tag v* → uv build\ngh release create"]
   end
   IDE <-->|JSON-RPC MCP| MCP
-  SRV <-->|Bearer JSON-RPC| LQ
-  SRV <-->|read / mutate| FS
-  SRV --> PAR
+  GD <-->|AST splice + read| FS
+  GD --> PAR
+  GD --> LOCK
   SRV --> SBX
   SRV --> GFS
   SRV --> ATW
   SRV --> GC
-  LQ --> FS
+  SRV --> XRAY
   CI -.->|enforces| proc
   DB -.->|updates| delivery
   REL -.->|artifacts| delivery
@@ -94,7 +130,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   S[Search\nBM25 / hops] --> C[Scan\nread_logseq_page · lint]
-  C --> U[Refactor\nAPI + disk mutators]
+  C --> U[Refactor\nheadless AST mutators]
   U --> G[Garden\nMOC · tags · split]
   G --> Q[Quality gate\nsecrets · fan-out · routing_hint]
   subgraph iron["Ironclad sub-loop"]
@@ -107,13 +143,13 @@ flowchart LR
 
 ---
 
-## Feature matrix: ten architectural phases
+## Feature matrix: architectural phases
 
 Each phase adds capabilities; later phases **harden** earlier tools without necessarily renaming the MCP surface. **Phase** is the product narrative; **modules** are what you grep in `src/`.
 
 | Phase | Core capabilities | MCP tools (exposed names) |
 |:-----:|-------------------|---------------------------|
-| **1 — Baseline bridge** | FastMCP server, async Logseq JSON-RPC client, **`OutlineNode`** validation, DFS **`write_logseq_outline`**, spatial **`read_logseq_page`**, block-ref integrity scan, dashboard aggregation | `read_logseq_page`, `write_logseq_outline`, `lint_logseq_block_refs`, `render_logseq_dashboard` |
+| **1 — Baseline bridge** | FastMCP server, **`OutlineNode`** validation, DFS **`write_logseq_outline`**, spatial **`read_logseq_page`**, block-ref integrity scan, dashboard aggregation | `read_logseq_page`, `write_logseq_outline`, `lint_logseq_block_refs`, `render_logseq_dashboard` |
 | **2 — L1 / L2 routing** | Capped **`read_l1_memory`** from configurable paths; **routing hints** on read/write responses for traceability (`routing_hint.py`) | `read_l1_memory` *(hints on other tools’ payloads)* |
 | **3 — PKM refinements** | BM25 and substring local query; structural BFS hops and hub/orphan reports; surgical **`key::`** property edits; templates; wiki-prefix lint; namespace index; optional **git snapshot** on outline and heavy mutators | `query_logseq_pages_local`, `traverse_logseq_structural_hops`, `report_structural_hubs_orphans`, `patch_logseq_block_property_lines`, `list_logseq_templates`, `read_logseq_template`, `lint_matryca_wiki_pages`, `list_logseq_namespace_index`, `snapshot_logseq_graph_git` |
 | **4 — Logseq superpowers** | Advanced Query injection with preset or raw EDN; journal task mining; entity resolution via alias index; page alias append | `inject_logseq_advanced_query`, `analyze_journal_tasks`, `append_logseq_journal_markdown`, `resolve_logseq_entity`, `append_logseq_page_alias` |
@@ -123,7 +159,8 @@ Each phase adds capabilities; later phases **harden** earlier tools without nece
 | **8 — Ironclad data plane** | **`compute_page_protected_line_indices`** (global fence lexer); **`atomic_write_bytes`** on mutators; **`generational_cache`** (`st_mtime_ns` keyed alias + BM25 corpus reuse, Salsa-style invalidation) | *Same tool names; dead-zone and cache behavior upgraded* |
 | **9 — Trust and policy plane** | **`quality_gate`**: blocks credential-like outline properties and raw query EDN; **`lint_matryca_wiki_pages`** for configurable wiki discipline; structured dry-run / apply responses | Enforcement inside `write_logseq_outline`, `inject_logseq_advanced_query`; governance tools listed in phase 3 |
 | **10 — Delivery and community** | **GitHub Actions** (`ci.yml`): `uv sync --locked`, Ruff lint + format check, **Mypy** on `src` and `tests`, Pytest; **Dependabot** (pip + Actions); **`release.yml`** on `v*` tags (`uv build`, `gh release create`); **`SECURITY.md`**; **Contributor Covenant** (`CODE_OF_CONDUCT.md`); issue and PR templates | *Repository operations — no additional MCP tools* |
-| **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** traversal gate on all FS paths; **`LogseqClient`** bounded HTTP timeouts; **`mcp_tool_guard`** LLM-safe errors; lifespan lock and telemetry teardown | *Same MCP tool names; adversarial path and network hardening* |
+| **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** traversal gate on all FS paths; **`mcp_tool_guard`** LLM-safe errors; lifespan lock and telemetry teardown | *Same MCP tool names; adversarial path hardening* |
+| **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`**; **`graph_dispatch.py`** + **`agent_writer.append_child_to_node`** for atomic AST writes; **`.matryca_xray_state.json`** via **`SessionAliasRegistry`**; **`LogseqGraph.get_broken_references()`** for in-memory ref lint | *Same MCP tool names; 100% disk-native persistence* |
 
 **Roadmaps and design history:** [`docs/roadmaps/`](docs/roadmaps/) (LLM Wiki, Phase 3, Logseq superpowers, Phase 5–6, mldoc compliance, Ironclad Shield).
 
@@ -137,40 +174,17 @@ You do **not** need to clone this repository to run the published console script
 uvx --from git+https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki.git matryca-logseq-llm-wiki
 ```
 
-Configure **`LOGSEQ_API_TOKEN`**, **`LOGSEQ_GRAPH_PATH`**, and related variables in your MCP host’s server definition alongside this command. For **responsible vulnerability disclosure**, see [`SECURITY.md`](SECURITY.md).
+Set **`LOGSEQ_GRAPH_PATH`** to the absolute root of your Logseq graph (the folder containing `pages/`) in your MCP host’s server definition. For **responsible vulnerability disclosure**, see [`SECURITY.md`](SECURITY.md).
 
 ---
 
-## ⚠️ CRITICAL SAFETY WARNING: The Sandbox Rule
+## Safe testing on a copy of your graph
 
-Matryca uses **two different paths** to reach your vault:
+Because Matryca reads and writes **the same folder** pointed to by `LOGSEQ_GRAPH_PATH`, always point agents at a **dedicated test graph** before experimenting:
 
-| Path | Mechanism | What it controls |
-|------|-----------|------------------|
-| **Reads** (search, spatial reads, disk mutators) | Direct filesystem access via **`LOGSEQ_GRAPH_PATH`** | Whatever folder you point at in `.env` |
-| **Writes** (outline insert, block API, query injection) | Logseq’s **local HTTP API** | **Only the graph currently open in the Logseq app** |
-
-This creates a **Split-Brain** hazard. If you set `LOGSEQ_GRAPH_PATH` to a test folder but leave your **real** vault open in Logseq, the AI will **read** from the sandbox and **write** destructive changes to your production graph. There is no server-side guard: Logseq’s API always targets the active UI graph, not the path in your `.env`.
-
-**Before dogfooding, testing, or pointing Matryca at any non-production folder, follow all four steps below. Skipping step 2 is the most common way to corrupt real data.**
-
-### Safe test environment (4 steps)
-
-1. **Clone the graph.** Copy your real Logseq folder to a dedicated location (for example `Logseq_Matryca_Test`). Use a full copy, not a symlink, so reads and writes stay isolated.
-
-2. **Isolate the Logseq UI (CRITICAL).** Open the Logseq app. Click your **current graph name** in the sidebar, choose **Add new graph**, and open the **`Logseq_Matryca_Test`** folder. ⚠️ **The Logseq window MUST be focused on the test folder** — not your daily driver vault. If the title bar or graph picker still shows your real graph, **stop** and switch graphs before running any MCP tools. Writes always land on whatever graph Logseq has open, regardless of `LOGSEQ_GRAPH_PATH`.
-
-3. **Enable API and get token.** In Logseq: **Settings → Advanced → Enable HTTP APIs server**. Copy the **Authorization** token shown there.
-
-4. **Align the `.env`.** Ensure your project `.env` (or MCP host `env` block) matches the **same** test folder and token:
-
-   ```env
-   LOGSEQ_GRAPH_PATH=/absolute/path/to/Logseq_Matryca_Test
-   LOGSEQ_API_TOKEN=your_token_here
-   MATRYCA_GIT_SNAPSHOT_ON_WRITE=true
-   ```
-
-   Use an **absolute** path. With `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`, selected writes also create a local **git commit** on the test graph so you can revert experiments.
+1. **Clone the graph.** Copy your real Logseq folder to a dedicated location (for example `Logseq_Matryca_Test`). Use a full copy, not a symlink.
+2. **Set the path.** In `.env` or your MCP host `env` block, set `LOGSEQ_GRAPH_PATH` to that copy’s absolute path.
+3. **Optional rollback.** With `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`, selected writes also create a local **git commit** on the test graph so you can revert experiments.
 
 <details>
 <summary><b>🛠️ Using Logseq Sync? Click here if Logseq refuses to open the test folder.</b></summary>
@@ -185,8 +199,6 @@ If you use Logseq Sync, the app tracks graphs by hidden UUIDs, not folder paths.
 </ol>
 </details>
 
-**Sanity check:** After setup, change one harmless block via the API (or a single MCP write) and confirm the edit appears **only** under `Logseq_Matryca_Test` on disk — not in your production vault.
-
 ---
 
 ## Quickstart (clone and develop)
@@ -195,7 +207,7 @@ If you use Logseq Sync, the app tracks graphs by hidden UUIDs, not folder paths.
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/)**
-- **Logseq** with the **HTTP API** enabled and a **Bearer token**
+- A **Logseq OG** graph on disk (the directory containing `pages/`)
 
 ### Install
 
@@ -211,9 +223,7 @@ Copy **`.env.example`** to **`.env`** and set at minimum:
 
 | Variable | Role |
 |----------|------|
-| `LOGSEQ_API_TOKEN` | **Required.** Bearer token for Logseq’s HTTP API |
-| `LOGSEQ_API_URL` | Default `http://localhost:12315` |
-| `LOGSEQ_GRAPH_PATH` | **Required for disk tools.** Absolute graph root (directory containing `pages/`) |
+| `LOGSEQ_GRAPH_PATH` | **Required.** Absolute graph root (directory containing `pages/`) |
 | `MATRYCA_L1_PATH` | Optional: file or directory of small Markdown “L1” session rules |
 | `MATRYCA_WIKI_CONFIG` | Optional: path to `matryca-wiki.yml` (else `$LOGSEQ_GRAPH_PATH/matryca-wiki.yml`) |
 | `MATRYCA_GIT_SNAPSHOT_ON_WRITE` | `true` or `false` — opt-in automatic **`git add -A` + `git commit`** before selected writes when the graph is a git checkout |
@@ -226,31 +236,7 @@ Optional graph orchestration: copy [`matryca-wiki.example.yml`](matryca-wiki.exa
 make check
 ```
 
-Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**123** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-
-### Claude Desktop (stdio MCP)
-
-Example fragment for **`claude_desktop_config.json`**:
-
-```json
-{
-  "mcpServers": {
-    "matryca-logseq-llm-wiki": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "src.main"],
-      "cwd": "/absolute/path/to/matryca-logseq-llm-wiki",
-      "env": {
-        "LOGSEQ_API_TOKEN": "your-token",
-        "LOGSEQ_API_URL": "http://localhost:12315",
-        "LOGSEQ_GRAPH_PATH": "/absolute/path/to/your/Logseq/graph",
-        "MATRYCA_GIT_SNAPSHOT_ON_WRITE": "false"
-      }
-    }
-  }
-}
-```
-
-Restart the MCP host after edits. Keep **Logseq running** when tools call live **`insertBlock`** or query injection.
+Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**144** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
@@ -259,7 +245,7 @@ Restart the MCP host after edits. Keep **Logseq running** when tools call live *
 | Document | Audience |
 |----------|----------|
 | [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md) | Agent operators — outline discipline, Search → Scan → Update, dry-run-first mutators |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engineers — bounded-work parsing, Ironclad data plane, phase history |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engineers — headless CRUD plane, Ironclad data plane, phase history |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributors — `uv`, `make check`, MCP testing notes |
 | [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) | Community standards (Contributor Covenant 2.1) |
 | [`SECURITY.md`](SECURITY.md) | Private reporting via GitHub Security Advisories |

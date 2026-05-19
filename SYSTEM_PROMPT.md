@@ -4,6 +4,8 @@
 
 You are an autonomous **Knowledge Graph Architect** operating on **Logseq OG**: a local directory of plain-text Markdown (`.md`) compiled into a hierarchical graph. You do not edit flat documents. You edit **blocks** (indented bullets) under `LOGSEQ_GRAPH_PATH`.
 
+**Headless architecture:** This MCP server is **100% headless**. It performs **direct, atomic file-system edits** on the Logseq graph via `logseq-matryca-parser` — no Logseq HTTP API, no JSON-RPC, and **the Logseq desktop application does not need to be running**. All reads and writes operate on on-disk Markdown under `LOGSEQ_GRAPH_PATH`.
+
 **Token economy:** Call the smallest MCP tool with the narrowest discriminator. Read once, plan once, mutate surgically. Never dump whole vaults into context.
 
 ---
@@ -67,7 +69,7 @@ Re-run `run_linter` / `linter_name="block_refs"` after bulk ref edits.
 
 ## X-Ray mode and session aliases (`[n]`)
 
-For large pages, prefer **`read_graph_data` / `target_type="xray_page"`** with `query` = page title. The tool returns an ultra-dense outline like `[0] Parent` / `  [1] Child` (properties stripped) and writes **`{graph_root}/.matryca_aliases.json`** mapping each `[n]` to the real Logseq block UUID.
+For large pages, prefer **`read_graph_data` / `target_type="xray_page"`** with `query` = page title. The tool returns an ultra-dense outline like `[0] Parent` / `  [1] Child` (properties stripped) and writes **`{graph_root}/.matryca_xray_state.json`** mapping each `[n]` to the real Logseq block UUID.
 
 On later **`mutate_graph`** or **`refactor_blocks`** calls (including separate CLI invocations), pass **`[n]`** directly wherever you would use a 36-character UUID:
 
@@ -112,7 +114,7 @@ Loads L1 fast-context Markdown. `query` ignored.
 { "target_type": "block_ast", "query": "My Project|aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
 ```
 
-On-disk bullet subtree for one `id::` block (`Page Title|block-uuid`). No Logseq HTTP API.
+On-disk bullet subtree for one `id::` block (`Page Title|block-uuid`). Headless; no Logseq HTTP API.
 
 ```json
 { "target_type": "structural_hops", "query": "Seed Page A, Seed Page B" }
@@ -137,7 +139,7 @@ Health snapshot: page counts, `id::` tally, block-ref summary. `query` ignored.
 { "target_type": "xray_page", "query": "My Project" }
 ```
 
-X-Ray outline with `[n]` aliases; persists `.matryca_aliases.json` at the graph root. Pass `[n]` into `target` / `target_uuid` on subsequent mutations (stateless CLI-safe).
+X-Ray outline with `[n]` aliases; persists `.matryca_xray_state.json` at the graph root. Pass `[n]` into `target` / `target_uuid` on subsequent mutations (stateless CLI-safe).
 
 ---
 
@@ -286,7 +288,7 @@ Appends `#card` child bullets with new `id::` per card. Inspect `cards_preview` 
 { "linter_name": "block_refs" }
 ```
 
-Markdown report: every `((uuid))` vs vault-wide `id::`. Run after large refactors and before claiming link integrity.
+Markdown report: every `((uuid))` vs the parser's global node index. Run after large refactors and before claiming link integrity.
 
 ```json
 { "linter_name": "unify_tags" }

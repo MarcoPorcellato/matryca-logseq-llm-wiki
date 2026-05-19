@@ -6,19 +6,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from logseq_matryca_parser.agent_press import XRAY_STATE_FILENAME
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
+from src.agent.graph_dispatch import _headless_write_outline
 from src.agent.graph_tool_helpers import (
     format_regex_search_markdown,
     parse_optional_json_query,
     read_block_ast_markdown,
 )
-from src.agent.mcp_server import (
-    MatrycaMCPServer,
-    OutlineNode,
-    register_mcp_tools,
-)
-from src.bridge.logseq_client import LogseqClient
+from src.agent.mcp_server import OutlineNode, register_mcp_tools
 
 
 def test_mcp_registers_five_mega_tools() -> None:
@@ -118,36 +115,46 @@ def test_outline_child_without_schema_fields() -> None:
     assert node.children[0].properties.get("source::") == "[[Paper]]"
 
 
-@pytest.mark.asyncio
-async def test_write_logseq_outline_chains_parent_uuids(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each child append must use the UUID returned from its parent's ``append_block``."""
-    client = LogseqClient(api_url="http://127.0.0.1:9", token="test-token")
-    calls: list[tuple[str, str]] = []
+def test_headless_write_outline_chains_parent_uuids(tmp_path: Path) -> None:
+    """Headless outline write creates nested blocks with chained UUIDs on disk."""
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    (pages / "Demo.md").write_text(
+        f"- Root page block\n  id:: {parent_id}\n",
+        encoding="utf-8",
+    )
 
-    async def fake_append(
-        parent_uuid: str,
-        content: str,
-        properties: dict[str, str],
-    ) -> str:
-        calls.append((parent_uuid, content))
-        return f"uuid-{len(calls)}"
-
-    monkeypatch.setattr(client, "append_block", fake_append)
-
-    server = MatrycaMCPServer(client=client)
     outline: dict[str, Any] = {
         "text": "Root",
         "children": [{"text": "Child", "children": [{"text": "Grandchild"}]}],
     }
-    uuids = await server.write_logseq_outline(outline, parent_block_uuid="page-root")
+    out = _headless_write_outline(str(tmp_path), parent_id, outline)
 
-    assert uuids["uuids"] == ["uuid-1", "uuid-2", "uuid-3"]
-    assert "routing_hint" in uuids
-    assert "L2" in uuids["routing_hint"]
-    assert uuids.get("outline_block_count") == 3
-    assert "git_snapshot" in uuids
-    assert calls[0] == ("page-root", "Root")
-    assert calls[1] == ("uuid-1", "Child")
-    assert calls[2] == ("uuid-2", "Grandchild")
+    assert len(out["uuids"]) == 3
+    assert "routing_hint" in out
+    assert "L2" in out["routing_hint"]
+    assert out.get("outline_block_count") == 3
+    assert "git_snapshot" in out
+
+    page_text = (pages / "Demo.md").read_text(encoding="utf-8")
+    assert "Root" in page_text
+    assert "Child" in page_text
+    assert "Grandchild" in page_text
+    for block_uuid in out["uuids"]:
+        assert block_uuid in page_text
+
+
+def test_xray_page_persists_state_file(tmp_path: Path) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    block_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    (pages / "Alias Demo.md").write_text(
+        f"- Parent bullet\n  id:: {block_id}\n",
+        encoding="utf-8",
+    )
+    from src.agent.graph_tool_helpers import read_xray_page_markdown
+
+    md = read_xray_page_markdown(str(tmp_path), "Alias Demo")
+    assert "[0]" in md
+    assert (tmp_path / XRAY_STATE_FILENAME).is_file()

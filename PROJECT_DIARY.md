@@ -28,6 +28,31 @@ Concrete follow-ups: implementation tasks, documentation updates, experiments, o
 
 ---
 
+## [2026-05-19] - V1.4.0 The Headless Revolution: Deprecating HTTP JSON-RPC for Native AST Splicing
+
+### Context
+
+In earlier versions, Matryca depended on the Logseq desktop app’s local HTTP JSON-RPC interface (ports 8080/12315). That introduced technical debt: network latency, timeout fragility, the need to keep the Electron app open in the background, and API token configuration. The prior architecture split reads (filesystem via `LOGSEQ_GRAPH_PATH`) from writes (HTTP API to whichever graph was open in the UI), creating a **split-brain** risk when the configured path and the active Logseq graph diverged. Server automation, remote execution (SSH/Docker), and token efficiency required a zero-dependency model.
+
+### Decisions Made
+
+1. **Pure Headless architecture:** removed the entire `httpx` layer and `LogseqClient` module (`src/bridge/` deleted). Matryca now interacts directly with the file system.
+2. **Upgrade to `logseq-matryca-parser==0.3.3`:** adopted the atomic CRUD engine for AST-based rewrites on `.md` files using `append_child_to_node` (`logseq_matryca_parser.agent_writer`), orchestrated by `src/agent/graph_dispatch.py` under `page_rmw_lock` safety boundaries.
+3. **Native X-Ray persistence:** use `SessionAliasRegistry` disk serialization in `.matryca_xray_state.json` (`src/agent/alias_state.py`) so the CLI stays stateless yet context-aware across consecutive invocations.
+4. **Topological linter:** replaced legacy regex scans with direct in-memory graph index queries via `LogseqGraph.get_broken_references()` (`src/graph/block_ref_lint.py`).
+
+### Consequences & Celebration
+
+* **Dependencies stripped to the bone:** API tokens are no longer required. The only required variable is `LOGSEQ_GRAPH_PATH`.
+* **Absolute resilience:** the MCP server and CLI run on machines without an active Logseq GUI, eliminating network latency and network-related crashes.
+* **Hardened test suite:** **144 passing tests** under strict MyPy and Ruff.
+
+### Status
+
+Approved & Shipped.
+
+---
+
 ## [2026-05-19] - V1.3.0 Fortress Release: Path Traversal Sandbox & Network Resiliency
 
 ### Context
