@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 from loguru import logger
@@ -15,7 +18,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..bridge.logseq_client import LogseqClient
 from ..config import MatrycaWikiConfig
-from ..graph import templates as graph_templates
 from ..graph.advanced_query_block import (
     resolve_advanced_query_preset,
     wrap_logseq_advanced_query,
@@ -23,19 +25,15 @@ from ..graph.advanced_query_block import (
 from ..graph.block_ref_lint import lint_block_refs_in_graph
 from ..graph.dashboard import build_dashboard_markdown
 from ..graph.flashcards import append_logseq_flashcards_under_block
-from ..graph.generational_cache import cached_build_alias_index
-from ..graph.hubs import build_namespace_index_markdown
 from ..graph.journal_task_scan import (
     append_journal_markdown_section,
     format_journal_task_review_markdown,
     scan_journal_tasks,
 )
-from ..graph.link_tag_hop import format_hop_report_markdown, format_hub_orphan_markdown
-from ..graph.moc_page import build_moc_markdown, write_moc_page
-from ..graph.property_line_edit import (
-    append_page_alias_line,
-    edit_block_property_lines,
-)
+from ..graph.link_tag_hop import format_hop_report_markdown
+from ..graph.markdown_blocks import locate_block_by_uuid
+from ..graph.path_sandbox import graph_safe_page_path
+from ..graph.property_line_edit import edit_block_property_lines
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
 from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
 from ..graph.tag_unify import lint_unify_logseq_tags as core_lint_unify_logseq_tags
@@ -260,8 +258,136 @@ class MatrycaMCPServer:
         }
 
 
+ReadGraphTarget = Literal["page", "memory", "block_ast", "structural_hops", "dashboard"]
+SearchGraphMethod = Literal["bm25", "regex", "unlinked_mentions", "journal_tasks"]
+MutateGraphAction = Literal["write_outline", "edit_property", "append_journal", "inject_query"]
+RefactorBlocksAction = Literal["split_large", "reparent", "generate_flashcards"]
+RunLinterName = Literal["unify_tags", "block_refs", "full_wiki_scan"]
+
+
+def _graph_path_from_env() -> str:
+    return os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+
+
+def _graph_missing_text() -> str:
+    return (
+        "LOGSEQ_GRAPH_PATH is not set; cannot access the graph on disk. "
+        "Set it to your Logseq graph root (the folder that contains `pages/`), then retry."
+    )
+
+
+def _graph_missing_dict() -> dict[str, Any]:
+    return {"ok": False, "code": "graph_missing", "hint": _graph_missing_text()}
+
+
+def _parse_json_object(payload: str, *, field_name: str = "payload") -> dict[str, Any]:
+    raw = payload.strip()
+    if not raw:
+        msg = f"`{field_name}` must be a non-empty JSON object"
+        raise ValueError(msg)
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        msg = f"`{field_name}` must decode to a JSON object"
+        raise TypeError(msg)
+    return cast(dict[str, Any], data)
+
+
+def _parse_optional_json_query(query: str) -> dict[str, Any]:
+    raw = query.strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            msg = "`query` JSON must be an object when it starts with `{`"
+            raise TypeError(msg)
+        return cast(dict[str, Any], data)
+    return {}
+
+
+def _read_block_ast_markdown(graph_path: str, query: str) -> str:
+    """Return the on-disk Markdown subtree for one block (page title + ``id::`` UUID)."""
+    parts = [p.strip() for p in query.split("|", 1)]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        msg = (
+            "For `target_type=block_ast`, set `query` to `Page Title|block-uuid` "
+            "(Logseq page name, pipe, 36-char block UUID from `id::`)."
+        )
+        raise ValueError(msg)
+    page_ref, block_uuid = parts[0], parts[1]
+    path = graph_safe_page_path(graph_path, page_ref)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    stripped = [ln.rstrip("\n") for ln in lines]
+    loc = locate_block_by_uuid(stripped, block_uuid)
+    if loc is None:
+        return (
+            f"Block `{block_uuid}` not found on page `{page_ref}`. "
+            "Confirm the UUID matches an `id::` line on that page."
+        )
+    b_idx, _id_idx, end = loc
+    excerpt = "".join(lines[b_idx:end])
+    return (
+        f"# Block AST excerpt\n\n"
+        f"- **Page:** [[{page_ref}]]\n"
+        f"- **Block UUID:** `{block_uuid}`\n\n"
+        f"```markdown\n{excerpt.rstrip()}\n```\n"
+    )
+
+
+def _format_regex_search_markdown(graph_path: str, pattern: str, *, limit: int = 50) -> str:
+    """Vault-wide ``pages/**/*.md`` line scan (MCP orchestration; not the spatial parser)."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        msg = f"Invalid regex in `query`: {exc}"
+        raise ValueError(msg) from exc
+
+    root = Path(graph_path).expanduser().resolve(strict=False)
+    pages = root / "pages"
+    if not pages.is_dir():
+        return f"{_graph_missing_text()}\n\n`pages/` directory is missing."
+
+    hits: list[tuple[str, int, str]] = []
+    for path in sorted(pages.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = path.relative_to(root).as_posix()
+        for line_no, line in enumerate(body.splitlines(), start=1):
+            if compiled.search(line):
+                hits.append((rel, line_no, line.strip()[:240]))
+                if len(hits) >= limit:
+                    break
+        if len(hits) >= limit:
+            break
+
+    lines = [
+        "# Regex search (pages/)",
+        "",
+        f"- **Graph:** `{root}`",
+        f"- **Pattern:** `{pattern}`",
+        f"- **Hits (cap {limit}):** {len(hits)}",
+        "",
+    ]
+    if not hits:
+        lines.append("_No matches in `pages/**/*.md`._")
+        return "\n".join(lines) + "\n"
+    for rel, line_no, preview in hits:
+        lines.append(f"- `{rel}`:{line_no} — {preview}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def register_mcp_tools(mcp: FastMCP) -> None:
-    """Register read/write tools on the FastMCP application (stdio / hosted runtimes).
+    """Register five consolidated MCP mega-tools on the FastMCP application.
+
+    Tools: ``read_graph_data``, ``search_graph``, ``mutate_graph``, ``refactor_blocks``,
+    ``run_linter`` — each routes by a ``typing.Literal`` discriminator to existing graph/RAG
+    helpers (see module-level docstrings on each handler).
 
     Args:
         mcp: The application instance created in :mod:`src.main`.
@@ -276,180 +402,208 @@ def register_mcp_tools(mcp: FastMCP) -> None:
         return decorator
 
     @safe_tool()
-    async def traverse_logseq_structural_hops(
+    async def read_graph_data(
         ctx: Context[ServerSession, AppContext],
-        seeds: str,
-        max_depth: int | None = None,
-        max_per_level: int | None = None,
+        target_type: ReadGraphTarget,
+        query: str = "",
     ) -> str:
-        """BFS over wikilinks, shared tags, and light ``type::`` / ``domain::`` rings (no vectors).
+        """Unified read plane: pages, L1 memory, block excerpts, structural hops, dashboards.
 
-        **Seeds:** comma-separated page titles or stems (e.g. ``My Page, Other``).
+        Pick ``target_type`` first, then set ``query`` exactly as below (ignored where noted).
 
-        **Inspired by:** ``obsidian-graph`` connection BFS — structural only.
+        **``target_type=page``** — ``query`` = Logseq **page title** (e.g. ``My Project``),
+        not a file path.
+        Returns spatial-parser Markdown: block tree, ``synthetic_id``, ``source_uuid``, ``uuid``.
+        Use before edits; pair with ``mutate_graph`` only when you have a parent block UUID.
+
+        **``target_type=memory``** — ``query`` ignored. Loads L1 fast-context Markdown
+        (``MATRYCA_L1_PATH``, ``memory_path`` in ``matryca-wiki.yml``, or ``matryca-l1/*.md``).
+
+        **``target_type=block_ast``** — ``query`` = ``Page Title|block-uuid`` (pipe-separated).
+        Raw on-disk bullet subtree for that ``id::`` block (no Logseq HTTP API).
+
+        **``target_type=structural_hops``** — ``query`` = comma-separated seed page titles,
+        or JSON ``{"seeds":"A, B", "max_depth": 3, "max_per_level": 40}``. BFS over wikilinks,
+        shared tags, and light ``type::`` / ``domain::`` rings (no vectors).
+
+        **``target_type=dashboard``** — ``query`` ignored. Matryca dashboard Markdown:
+        page counts, ``id::`` tally, block-ref health under ``pages/``.
+
+        **Requires:** ``LOGSEQ_GRAPH_PATH`` for every target except ``memory`` (still recommended).
         """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        if target_type == "memory":
+            wiki_config = ctx.request_context.lifespan_context.wiki_config
+            labels, body = await read_l1_memory_async(wiki_config)
+            if not labels:
+                return (
+                    "No L1 memory loaded. Set **MATRYCA_L1_PATH**, or **memory_path** in "
+                    "**matryca-wiki.yml**, or create **matryca-l1/*.md** next to your graph. "
+                    "See `SYSTEM_PROMPT.md` for L1 vs L2 routing."
+                )
+            logger.bind(files=len(labels)).info("read_graph_data(memory) loaded L1 context")
+            return body
+
+        graph_path = _graph_path_from_env()
         if not graph_path:
-            return "LOGSEQ_GRAPH_PATH is not set; cannot traverse the graph on disk."
-        wiki = ctx.request_context.lifespan_context.wiki_config
-        depth = wiki.max_depth if max_depth is None else max(1, min(max_depth, 10))
-        per = (
-            wiki.structural_hop_max_per_level
-            if max_per_level is None
-            else max(1, min(max_per_level, 500))
-        )
-        seed_list = [s.strip() for s in seeds.split(",") if s.strip()]
+            logger.warning("read_graph_data(%s) but LOGSEQ_GRAPH_PATH unset", target_type)
+            return _graph_missing_text()
 
-        def _run() -> str:
-            return format_hop_report_markdown(
-                graph_path,
-                seed_list,
-                max_depth=depth,
-                max_per_level=per,
-            )
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def report_structural_hubs_orphans(ctx: Context[ServerSession, AppContext]) -> str:
-        """List high-degree hub pages and low-degree orphans (structural graph only)."""
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return "LOGSEQ_GRAPH_PATH is not set; cannot analyze the graph on disk."
-        return await asyncio.to_thread(format_hub_orphan_markdown, graph_path)
-
-    @safe_tool()
-    async def patch_logseq_block_property_lines(
-        ctx: Context[ServerSession, AppContext],
-        page_ref: str,
-        block_uuid: str,
-        search: str,
-        replacement: str,
-        dry_run: bool = True,
-        use_regex: bool = False,
-        replace_all: bool = False,
-        case_sensitive: bool = True,
-    ) -> dict[str, object]:
-        """Surgical edits on ``key::`` lines for one block (anchored at ``id::``).
-
-        **Inspired by:** cyanheads ``obsidian_replace_in_note`` (regex + ``$1`` / ``$&``).
-
-        Use ``dry_run=true`` first; apply with ``dry_run=false`` (writes ``.bak``).
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {
-                "ok": False,
-                "code": "graph_missing",
-                "hint": "LOGSEQ_GRAPH_PATH is not set.",
-                "dry_run": dry_run,
-                "match_count": 0,
-                "previews": [],
-                "previous_size_bytes": 0,
-                "current_size_bytes": 0,
-                "lines_changed": 0,
-            }
-
-        def _run() -> dict[str, object]:
-            return edit_block_property_lines(
-                graph_path,
-                page_ref,
-                block_uuid,
-                search,
-                replacement,
-                dry_run=dry_run,
-                use_regex=use_regex,
-                replace_all=replace_all,
-                case_sensitive=case_sensitive,
-            ).as_dict()
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def inject_logseq_advanced_query(
-        ctx: Context[ServerSession, AppContext],
-        parent_block_uuid: str,
-        query_edn: str = "",
-        dry_run: bool = True,
-        query_preset: str | None = None,
-        tag: str | None = None,
-    ) -> dict[str, Any]:
-        """Append a live Logseq **Advanced Query** block (``#+BEGIN_QUERY``) under a parent UUID.
-
-        Supply either ``query_preset`` (``open_markers`` or ``pages_tagged`` + ``tag``) **or**
-        raw inner **EDN** in ``query_edn`` (must include a ``:query`` clause). Prefer presets
-        for dashboards that refresh inside Logseq instead of static bullet dumps.
-
-        **Requires:** configured Logseq HTTP API client and ``dry_run=false`` to write.
-        """
-        bridge = ctx.request_context.lifespan_context.bridge
-
-        inner: str
-        if query_preset and query_preset.strip():
+        if target_type == "page":
+            page_name = query.strip()
+            if not page_name:
+                return "For `target_type=page`, set `query` to the Logseq page title."
             try:
-                inner = resolve_advanced_query_preset(query_preset.strip(), tag=tag)
-            except ValueError as exc:
-                return {"ok": False, "error": str(exc)}
-        elif query_edn.strip():
-            inner = query_edn.strip()
-        else:
-            return {
-                "ok": False,
-                "error": "Provide `query_preset` or a non-empty `query_edn` (inner EDN map).",
-            }
+                markdown = await get_page_spatial_context(page_name, graph_path)
+            except FileNotFoundError as exc:
+                logger.bind(page=page_name, graph=graph_path).info(
+                    "read_graph_data page miss: {}",
+                    exc,
+                )
+                return "Page not found, you can create it."
+            except ImportError as exc:
+                logger.error("read_graph_data parser missing: {}", exc)
+                return (
+                    "Spatial parser is not available (install `logseq-matryca-parser`). "
+                    f"Detail: {exc}"
+                )
+            except OSError as exc:
+                logger.bind(page=page_name).exception("read_graph_data OS error")
+                return f"Could not read the page file from disk: {exc}"
+            return append_read_page_routing_hint(markdown)
 
-        sec = advanced_query_security_violations(inner)
-        if sec:
-            return {"ok": False, "error": "; ".join(sec)}
+        if target_type == "block_ast":
+            block_query = query.strip()
+            if not block_query:
+                return "For `target_type=block_ast`, set `query` to `Page Title|block-uuid`."
+            return await asyncio.to_thread(_read_block_ast_markdown, graph_path, block_query)
 
-        try:
-            markdown = wrap_logseq_advanced_query(inner)
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        if target_type == "structural_hops":
+            wiki = ctx.request_context.lifespan_context.wiki_config
+            hop_opts = _parse_optional_json_query(query)
+            seeds_raw = str(hop_opts.get("seeds", query)).strip()
+            seed_list = [s.strip() for s in seeds_raw.split(",") if s.strip()]
+            if not seed_list:
+                return (
+                    "For `target_type=structural_hops`, provide seed page titles in `query` "
+                    "(comma-separated) or JSON with `seeds`."
+                )
+            depth = wiki.max_depth
+            if hop_opts.get("max_depth") is not None:
+                depth = max(1, min(int(hop_opts["max_depth"]), 10))
+            per = wiki.structural_hop_max_per_level
+            if hop_opts.get("max_per_level") is not None:
+                per = max(1, min(int(hop_opts["max_per_level"]), 500))
 
-        if dry_run:
-            return {
-                "ok": True,
-                "dry_run": True,
-                "markdown": markdown,
-                "uuid": None,
-                "routing_hint": routing_hint_for_write_outline(),
-            }
+            def _hops() -> str:
+                return format_hop_report_markdown(
+                    graph_path,
+                    seed_list,
+                    max_depth=depth,
+                    max_per_level=per,
+                )
 
-        try:
-            out = await bridge.inject_logseq_advanced_query_block(
-                parent_block_uuid=parent_block_uuid,
-                query_edn=inner,
-            )
-        except (ValueError, RuntimeError) as exc:
-            return {"ok": False, "error": str(exc)}
+            return await asyncio.to_thread(_hops)
 
-        return {"ok": True, "dry_run": False, **out}
+        wiki_config = ctx.request_context.lifespan_context.wiki_config
+        await mcp_tool_info(
+            ctx,
+            "Rendering Matryca dashboard: scanning pages/ and block-reference health…",
+        )
+
+        def _dash() -> str:
+            return build_dashboard_markdown(graph_path, wiki_config)
+
+        async with mcp_tool_session(ctx):
+            dashboard_md: str = await run_in_thread_with_mcp_context(_dash)
+        await mcp_tool_info(ctx, "Dashboard render complete.")
+        logger.bind(graph=graph_path).info("read_graph_data(dashboard) completed")
+        return dashboard_md
 
     @safe_tool()
-    async def analyze_journal_tasks(
+    async def search_graph(
         ctx: Context[ServerSession, AppContext],
-        days: int = 7,
-    ) -> dict[str, Any]:
-        """Scan ``journals/`` for the last ``days`` for ``TODO`` / ``LATER`` / ``WAITING`` bullets.
+        method: SearchGraphMethod,
+        query: str = "",
+    ) -> str | dict[str, Any]:
+        """Lexical and structural discovery on the on-disk graph (no vector DB).
 
-        Parses ``SCHEDULED:`` / ``DEADLINE:`` markers inside each task cluster. Returns JSON
-        rows plus a ready-to-paste **Task review** Markdown section (disk scan only).
+        **``method=bm25``** — ``query`` = natural-language keywords (e.g. ``redis cache``), or JSON
+        ``{"keyword":"...", "limit":15}``. Ranks ``pages/**/*.md`` by Okapi BM25.
 
-        To **append** the review into today's journal file, call
-        :func:`append_logseq_journal_markdown` with ``markdown_body`` set to the returned
-        ``task_review_markdown`` (or a shortened variant you author).
+        **``method=regex``** — ``query`` = Python regex pattern (line scan in ``pages/``), or JSON
+        ``{"pattern":"TODO|LATER", "limit":50}``.
+
+        **``method=unlinked_mentions``** — ``query`` empty or JSON
+        ``{"max_hits_per_file":80, "max_titles":500}``. Plain-text mentions of existing titles.
+
+        **``method=journal_tasks``** — ``query`` = days to scan (default ``7``), or JSON
+        ``{"days":14}``. Open ``TODO`` / ``LATER`` / ``WAITING`` in ``journals/`` plus review MD.
         """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        graph_path = _graph_path_from_env()
         if not graph_path:
-            return {
-                "ok": False,
-                "error": "LOGSEQ_GRAPH_PATH is not set.",
-                "items": [],
-                "task_review_markdown": "",
-            }
+            if method == "journal_tasks":
+                return {
+                    "ok": False,
+                    "error": _graph_missing_text(),
+                    "items": [],
+                    "task_review_markdown": "",
+                }
+            return _graph_missing_text()
 
-        def _run() -> dict[str, Any]:
+        if method == "bm25":
+            bm_opts = _parse_optional_json_query(query)
+            keyword = str(bm_opts.get("keyword", query)).strip()
+            if not keyword:
+                return "For `method=bm25`, set `query` to search keywords or JSON with `keyword`."
+            limit = max(1, min(int(bm_opts.get("limit", 15)), 100))
+            await mcp_tool_info(
+                ctx,
+                "Building in-memory BM25 index over pages/ "
+                "(first run or cache miss may take a moment)…",
+            )
+            async with mcp_tool_session(ctx):
+                bm25_md: str = await run_in_thread_with_mcp_context(
+                    format_keyword_query_markdown,
+                    graph_path,
+                    keyword,
+                    limit=limit,
+                    mode="bm25",
+                )
+            await mcp_tool_info(ctx, "Local page query complete.")
+            return bm25_md
+
+        if method == "regex":
+            rx_opts = _parse_optional_json_query(query)
+            pattern = str(rx_opts.get("pattern", query)).strip()
+            if not pattern:
+                return "For `method=regex`, set `query` to a regex pattern or JSON with `pattern`."
+            rx_limit = max(1, min(int(rx_opts.get("limit", 50)), 200))
+            return await asyncio.to_thread(
+                _format_regex_search_markdown,
+                graph_path,
+                pattern,
+                limit=rx_limit,
+            )
+
+        if method == "unlinked_mentions":
+            um_opts = _parse_optional_json_query(query)
+            max_hits = max(1, min(int(um_opts.get("max_hits_per_file", 80)), 500))
+            max_titles = max(1, min(int(um_opts.get("max_titles", 500)), 2000))
+
+            def _unlinked() -> dict[str, Any]:
+                return scan_unlinked_mentions(
+                    graph_path,
+                    max_hits_per_file=max_hits,
+                    max_titles=max_titles,
+                )
+
+            return await asyncio.to_thread(_unlinked)
+
+        j_opts = _parse_optional_json_query(query)
+        days_raw = j_opts.get("days", query.strip() or 7)
+        days = max(1, min(int(days_raw), 90))
+
+        def _journal() -> dict[str, Any]:
             report = scan_journal_tasks(graph_path, days=days)
             md = format_journal_task_review_markdown(report)
             rows = [
@@ -474,588 +628,321 @@ def register_mcp_tools(mcp: FastMCP) -> None:
                 "task_review_markdown": md,
             }
 
-        return await asyncio.to_thread(_run)
+        return await asyncio.to_thread(_journal)
 
     @safe_tool()
-    async def append_logseq_journal_markdown(
+    async def mutate_graph(
         ctx: Context[ServerSession, AppContext],
-        markdown_body: str,
-        dry_run: bool = True,
+        action: MutateGraphAction,
+        target: str,
+        payload: str,
     ) -> dict[str, Any]:
-        """Append Markdown to today's ``journals/YYYY_MM_DD.md`` (atomic write, ``.bak``).
+        """Create or patch durable graph content (Logseq API or on-disk).
 
-        Typical use: paste the ``task_review_markdown`` from :func:`analyze_journal_tasks`.
+        **``action=write_outline``** — ``target`` = parent **block UUID** in Logseq.
+        ``payload`` = JSON outline tree (``text``, optional ``properties`` / schema fields,
+        nested ``children``) matching ``OutlineNode``.
+
+        **``action=edit_property``** — ``target`` = ``Page Title|block-uuid``.
+        ``payload`` = JSON: ``search``, ``replacement``, optional ``dry_run`` (default true),
+        ``use_regex``, ``replace_all``, ``case_sensitive``. Surgical ``key::`` line edits only.
+
+        **``action=append_journal``** — ``target`` ignored (use ``""``).
+        ``payload`` = Markdown to append to today's ``journals/YYYY_MM_DD.md``, or JSON
+        ``{"markdown_body":"...", "dry_run":true}``.
+
+        **``action=inject_query``** — ``target`` = parent block UUID.
+        ``payload`` = JSON with inner EDN in ``query_edn`` and/or ``query_preset``
+        (``open_markers``, ``pages_tagged``) plus optional ``tag``, ``dry_run`` (default true).
         """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
+        bridge = ctx.request_context.lifespan_context.bridge
+        graph_path = _graph_path_from_env()
+
+        if action == "write_outline":
+            parent_uuid = target.strip()
+            if not parent_uuid:
+                return {"ok": False, "error": "`target` must be the parent block UUID."}
+            outline = _parse_json_object(payload, field_name="payload")
+            return await bridge.write_logseq_outline(
+                outline,
+                parent_block_uuid=parent_uuid,
+            )
+
+        if action == "edit_property":
+            if not graph_path:
+                return {
+                    **_graph_missing_dict(),
+                    "dry_run": True,
+                    "match_count": 0,
+                    "previews": [],
+                    "previous_size_bytes": 0,
+                    "current_size_bytes": 0,
+                    "lines_changed": 0,
+                }
+            target_parts = [p.strip() for p in target.split("|", 1)]
+            if len(target_parts) != 2 or not target_parts[0] or not target_parts[1]:
+                return {
+                    "ok": False,
+                    "error": "For edit_property, `target` must be `Page Title|block-uuid`.",
+                }
+            page_ref, block_uuid = target_parts[0], target_parts[1]
+            prop_opts = _parse_json_object(payload, field_name="payload")
+            search = str(prop_opts.get("search", ""))
+            replacement = str(prop_opts.get("replacement", ""))
+            if not search:
+                return {"ok": False, "error": "payload must include non-empty `search`."}
+
+            def _edit() -> dict[str, object]:
+                return edit_block_property_lines(
+                    graph_path,
+                    page_ref,
+                    block_uuid,
+                    search,
+                    replacement,
+                    dry_run=bool(prop_opts.get("dry_run", True)),
+                    use_regex=bool(prop_opts.get("use_regex", False)),
+                    replace_all=bool(prop_opts.get("replace_all", False)),
+                    case_sensitive=bool(prop_opts.get("case_sensitive", True)),
+                ).as_dict()
+
+            return cast(dict[str, Any], await asyncio.to_thread(_edit))
+
+        if action == "append_journal":
+            if not graph_path:
+                return _graph_missing_dict()
+            body = payload
+            dry_run = True
+            if payload.strip().startswith("{"):
+                journal_opts = _parse_json_object(payload, field_name="payload")
+                body = str(journal_opts.get("markdown_body", ""))
+                dry_run = bool(journal_opts.get("dry_run", True))
+            bounds = markdown_append_bounds_violations(body)
+            if bounds:
+                return {
+                    "ok": False,
+                    "code": "payload_too_large",
+                    "error": "; ".join(bounds),
+                }
+            return await asyncio.to_thread(
+                append_journal_markdown_section,
+                graph_path,
+                body,
+                dry_run=dry_run,
+            )
+
+        parent_block = target.strip()
+        if not parent_block:
             return {
                 "ok": False,
-                "code": "graph_missing",
-                "hint": "LOGSEQ_GRAPH_PATH is not set.",
+                "error": "For inject_query, `target` must be the parent block UUID.",
             }
-        bounds = markdown_append_bounds_violations(markdown_body)
-        if bounds:
+        inject_opts = _parse_json_object(payload, field_name="payload")
+        query_preset = inject_opts.get("query_preset")
+        tag = inject_opts.get("tag")
+        query_edn = str(inject_opts.get("query_edn", ""))
+        dry_run = bool(inject_opts.get("dry_run", True))
+
+        inner: str
+        if query_preset and str(query_preset).strip():
+            try:
+                inner = resolve_advanced_query_preset(str(query_preset).strip(), tag=tag)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+        elif query_edn.strip():
+            inner = query_edn.strip()
+        else:
             return {
                 "ok": False,
-                "code": "payload_too_large",
-                "error": "; ".join(bounds),
+                "error": "payload must include `query_preset` or non-empty `query_edn`.",
             }
-        return await asyncio.to_thread(
-            append_journal_markdown_section,
-            graph_path,
-            markdown_body,
-            dry_run=dry_run,
-        )
 
-    @safe_tool()
-    async def resolve_logseq_entity(
-        ctx: Context[ServerSession, AppContext],
-        candidates: str,
-    ) -> dict[str, Any]:
-        """Resolve page titles / aliases before creating entities (``alias::`` graph scan).
+        sec = advanced_query_security_violations(inner)
+        if sec:
+            return {"ok": False, "error": "; ".join(sec)}
 
-        ``candidates`` is a comma-separated list. Matching is normalization-only
-        (casefold, whitespace); no fuzzy edit distance.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "error": "LOGSEQ_GRAPH_PATH is not set.", "results": []}
+        try:
+            markdown = wrap_logseq_advanced_query(inner)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
-        def _run() -> dict[str, Any]:
-            index = cached_build_alias_index(graph_path)
-            parts = [p.strip() for p in candidates.split(",") if p.strip()]
-            results = [index.resolve(p).as_dict() for p in parts]
+        if dry_run:
             return {
                 "ok": True,
-                "index_collision_notes": index.collision_notes[:25],
-                "results": results,
+                "dry_run": True,
+                "markdown": markdown,
+                "uuid": None,
+                "routing_hint": routing_hint_for_write_outline(),
             }
 
-        return await asyncio.to_thread(_run)
+        try:
+            out = await bridge.inject_logseq_advanced_query_block(
+                parent_block_uuid=parent_block,
+                query_edn=inner,
+            )
+        except (ValueError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+        return {"ok": True, "dry_run": False, **out}
 
     @safe_tool()
-    async def append_logseq_page_alias(
+    async def refactor_blocks(
         ctx: Context[ServerSession, AppContext],
-        page_ref: str,
-        alias: str,
-        dry_run: bool = True,
+        action: RefactorBlocksAction,
+        target_uuid: str,
+        payload: str = "",
     ) -> dict[str, Any]:
-        """Append to the first ``alias::`` line on a page (or create one); idempotent."""
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        """AST-heavy block restructuring on disk (indent-only; preserves ``id::`` where possible).
+
+        **``action=split_large``** — ``target_uuid`` = page title (optional; empty = all pages).
+        ``payload`` = optional JSON ``{"min_chars":400, "max_blocks":25, "dry_run":true}``.
+
+        **``action=reparent``** — ``target_uuid`` = page title. ``payload`` = JSON array of groups
+        (same shape as legacy ``refactor_logseq_blocks`` ``groups`` argument).
+
+        **``action=generate_flashcards``** — ``target_uuid`` = ``Page Title|source-block-uuid``.
+        ``payload`` = optional JSON ``{"max_cards":30, "dry_run":true}``.
+        """
+        _ = ctx
+        graph_path = _graph_path_from_env()
         if not graph_path:
+            return _graph_missing_dict()
+
+        refactor_opts = _parse_optional_json_query(payload)
+        dry_run = bool(refactor_opts.get("dry_run", True))
+
+        if action == "split_large":
+            page_ref = target_uuid.strip() or None
+            min_chars = max(50, int(refactor_opts.get("min_chars", 400)))
+            max_blocks = max(1, min(int(refactor_opts.get("max_blocks", 25)), 100))
+            git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
+            if not dry_run:
+                git_snap = await asyncio.to_thread(
+                    snapshot_git_working_tree,
+                    graph_path,
+                    message="matryca: pre refactor_blocks split_large",
+                )
+
+            def _split() -> dict[str, Any]:
+                return run_refactor_large_blocks(
+                    graph_path,
+                    page_ref=page_ref,
+                    min_chars=min_chars,
+                    max_blocks=max_blocks,
+                    dry_run=dry_run,
+                ).as_dict()
+
+            split_out = await asyncio.to_thread(_split)
+            split_out["git_snapshot"] = git_snap
+            return split_out
+
+        if action == "reparent":
+            reparent_page = target_uuid.strip()
+            if not reparent_page:
+                return {"ok": False, "error": "For reparent, `target_uuid` must be the page title."}
+            groups_raw = refactor_opts.get("groups")
+            if groups_raw is None and payload.strip().startswith("["):
+                groups_raw = json.loads(payload)
+            if not isinstance(groups_raw, list):
+                return {
+                    "ok": False,
+                    "error": "For reparent, `payload` must be a JSON array of reparent groups.",
+                }
+            groups = cast(list[dict[str, Any]], groups_raw)
+            reparent_git: dict[str, object] = {"skipped": True, "reason": "dry_run"}
+            if not dry_run:
+                reparent_git = await asyncio.to_thread(
+                    snapshot_git_working_tree,
+                    graph_path,
+                    message="matryca: pre refactor_blocks reparent",
+                )
+
+            def _reparent() -> dict[str, Any]:
+                return run_reparent_logseq_blocks(
+                    graph_path,
+                    reparent_page,
+                    groups,
+                    dry_run=dry_run,
+                ).as_dict()
+
+            reparent_out = await asyncio.to_thread(_reparent)
+            reparent_out["git_snapshot"] = reparent_git
+            return reparent_out
+
+        flash_parts = [p.strip() for p in target_uuid.split("|", 1)]
+        if len(flash_parts) != 2 or not flash_parts[0] or not flash_parts[1]:
             return {
                 "ok": False,
-                "code": "graph_missing",
-                "hint": "LOGSEQ_GRAPH_PATH is not set.",
+                "error": (
+                    "For generate_flashcards, `target_uuid` must be `Page Title|source-block-uuid`."
+                ),
             }
+        page_ref, source_uuid = flash_parts[0], flash_parts[1]
+        max_cards = max(1, min(int(refactor_opts.get("max_cards", 30)), 200))
 
-        def _run() -> dict[str, Any]:
-            return append_page_alias_line(graph_path, page_ref, alias, dry_run=dry_run).as_dict()
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def generate_logseq_flashcards(
-        ctx: Context[ServerSession, AppContext],
-        page_ref: str,
-        source_block_uuid: str,
-        max_cards: int = 30,
-        dry_run: bool = True,
-    ) -> dict[str, Any]:
-        """Extract ``question :: answer`` pairs in a block subtree and append ``#card`` children.
-
-        **Inspired by:** ``st3v3nmw/obsidian-spaced-repetition`` (SRS ``::`` pairs)
-        and Logseq ``#card``.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
-
-        def _run() -> dict[str, Any]:
+        def _flash() -> dict[str, Any]:
             return append_logseq_flashcards_under_block(
                 graph_path,
                 page_ref,
-                source_block_uuid,
+                source_uuid,
                 max_cards=max_cards,
                 dry_run=dry_run,
             ).as_dict()
 
-        return await asyncio.to_thread(_run)
+        return await asyncio.to_thread(_flash)
 
     @safe_tool()
-    async def lint_unify_logseq_tags(
+    async def run_linter(
         ctx: Context[ServerSession, AppContext],
-        dry_run: bool = True,
-    ) -> dict[str, Any]:
-        """Cluster ``#tag`` spellings (case / variants), pick the most frequent, unify across graph.
+        linter_name: RunLinterName,
+    ) -> str | dict[str, Any]:
+        """Vault hygiene scans (read-only or dry-run by default).
 
-        **Inspired by:** ``obsidian-linter`` and tags-manager workflows.
-        Skips URLs, wikilinks, inline code.
+        **``linter_name=unify_tags``** — Preview-only tag clustering (``dry_run=true``).
+        Cluster ``#tag`` spellings vault-wide; apply only after explicit operator consent.
+
+        **``linter_name=block_refs``** — Markdown report: ``((uuid))`` vs graph-wide ``id::``.
+
+        **``linter_name=full_wiki_scan``** — Lint wiki-prefixed pages per ``matryca-wiki.yml``
+        (``type::``, stale knowledge, credentials, wikilinks).
         """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+        graph_path = _graph_path_from_env()
         if not graph_path:
-            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+            if linter_name == "unify_tags":
+                return _graph_missing_dict()
+            return _graph_missing_text()
 
-        def _run() -> dict[str, Any]:
-            raw = core_lint_unify_logseq_tags(graph_path, dry_run=dry_run).as_dict()
-            return cast(dict[str, Any], raw)
+        if linter_name == "unify_tags":
 
-        return await asyncio.to_thread(_run)
+            def _tags() -> dict[str, Any]:
+                raw = core_lint_unify_logseq_tags(graph_path, dry_run=True).as_dict()
+                return cast(dict[str, Any], raw)
 
-    @safe_tool()
-    async def refactor_logseq_blocks(
-        ctx: Context[ServerSession, AppContext],
-        page_ref: str,
-        groups: list[dict[str, Any]],
-        dry_run: bool = True,
-    ) -> dict[str, Any]:
-        """Group flat sibling blocks under new category headings (indent-only; preserves ``id::``).
+            return await asyncio.to_thread(_tags)
 
-        **Inspired by:** ``vslinko/obsidian-outliner`` reparenting.
-        Triggers a git snapshot when applying.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
+        if linter_name == "block_refs":
 
-        git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
-        if not dry_run:
-            git_snap = await asyncio.to_thread(
-                snapshot_git_working_tree,
-                graph_path,
-                message="matryca: pre refactor_logseq_blocks",
-            )
+            def _refs() -> str:
+                result = lint_block_refs_in_graph(graph_path)
+                logger.bind(
+                    pages=result.pages_scanned,
+                    issues=len(result.broken),
+                ).info("run_linter(block_refs) completed")
+                return result.format_report()
 
-        def _run() -> dict[str, Any]:
-            return run_reparent_logseq_blocks(
-                graph_path,
-                page_ref,
-                groups,
-                dry_run=dry_run,
-            ).as_dict()
+            return await asyncio.to_thread(_refs)
 
-        out = await asyncio.to_thread(_run)
-        out["git_snapshot"] = git_snap
-        return out
-
-    @safe_tool()
-    async def resolve_unlinked_mentions(
-        ctx: Context[ServerSession, AppContext],
-        max_hits_per_file: int = 80,
-        max_titles: int = 500,
-    ) -> dict[str, Any]:
-        """List plain-text mentions of existing page titles (candidates for ``[[wikilinks]]``).
-
-        **Inspired by:** ``logseq-plugin-unlinked-references`` (guards for URLs / links / code).
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "error": "LOGSEQ_GRAPH_PATH is not set.", "hits": []}
-
-        def _run() -> dict[str, Any]:
-            return scan_unlinked_mentions(
-                graph_path,
-                max_hits_per_file=max_hits_per_file,
-                max_titles=max_titles,
-            )
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def generate_moc_page(
-        ctx: Context[ServerSession, AppContext],
-        namespace: str,
-        output_page_title: str | None = None,
-        write_to_disk: bool = False,
-        dry_run: bool = True,
-    ) -> dict[str, Any]:
-        """Build a hierarchical MOC (Map of Content) Markdown index for a namespace stem.
-
-        **Inspired by:** ``zoottel/obsidian-zoottelkeeper`` index pages. Optional atomic page write.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "error": "LOGSEQ_GRAPH_PATH is not set."}
-
-        def _run() -> dict[str, Any]:
-            if write_to_disk:
-                snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
-                if not dry_run:
-                    snap = snapshot_git_working_tree(
-                        graph_path,
-                        message="matryca: pre generate_moc_page",
-                    )
-                out = write_moc_page(
-                    graph_path,
-                    namespace,
-                    output_page_title=output_page_title,
-                    dry_run=dry_run,
-                )
-                merged = dict(out)
-                merged["git_snapshot"] = snap
-                return merged
-            md = build_moc_markdown(graph_path, namespace)
-            return {
-                "ok": True,
-                "write_to_disk": False,
-                "markdown": md,
-                "hint": "Pass write_to_disk=true and dry_run=false to save under pages/.",
-            }
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def refactor_large_blocks(
-        ctx: Context[ServerSession, AppContext],
-        page_ref: str | None = None,
-        min_chars: int = 400,
-        max_blocks: int = 25,
-        dry_run: bool = True,
-    ) -> dict[str, Any]:
-        """Split very long bullets into parent + children; parent keeps the original ``id::``.
-
-        **Inspired by:** ``FeralFlora/obsidian-text-segmenter``. Git snapshot when applying.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {"ok": False, "code": "graph_missing", "hint": "LOGSEQ_GRAPH_PATH is not set."}
-
-        git_snap: dict[str, object] = {"skipped": True, "reason": "dry_run"}
-        if not dry_run:
-            git_snap = await asyncio.to_thread(
-                snapshot_git_working_tree,
-                graph_path,
-                message="matryca: pre refactor_large_blocks",
-            )
-
-        def _run() -> dict[str, Any]:
-            return run_refactor_large_blocks(
-                graph_path,
-                page_ref=page_ref,
-                min_chars=min_chars,
-                max_blocks=max_blocks,
-                dry_run=dry_run,
-            ).as_dict()
-
-        out = await asyncio.to_thread(_run)
-        out["git_snapshot"] = git_snap
-        return out
-
-    @safe_tool()
-    async def snapshot_logseq_graph_git(
-        message: str = "matryca: AI manual snapshot",
-    ) -> dict[str, object]:
-        """Run the same opt-in ``git add -A`` + ``git commit`` snapshot as writes (manual).
-
-        Requires ``MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`` and a git repo at ``LOGSEQ_GRAPH_PATH``.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return {
-                "enabled": False,
-                "skipped": True,
-                "reason": "LOGSEQ_GRAPH_PATH unset",
-                "committed": False,
-            }
-        return await asyncio.to_thread(snapshot_git_working_tree, graph_path, message=message)
-
-    @safe_tool()
-    async def list_logseq_templates(ctx: Context[ServerSession, AppContext]) -> str:
-        """List ``*.md`` in the graph ``templates/`` folder (Templater-style discovery)."""
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return "LOGSEQ_GRAPH_PATH is not set."
-        wiki = ctx.request_context.lifespan_context.wiki_config
-
-        def _run() -> str:
-            names = graph_templates.list_logseq_templates(graph_path, subdir=wiki.templates_subdir)
-            if not names:
-                return f"_No templates under `{wiki.templates_subdir}/`._"
-            lines = ["# Logseq templates", "", f"- **Directory:** `{wiki.templates_subdir}/`", ""]
-            for n in names:
-                lines.append(f"- `{n}`")
-            lines.append("")
-            return "\n".join(lines)
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def read_logseq_template(
-        ctx: Context[ServerSession, AppContext],
-        template_name: str,
-    ) -> str:
-        """Read one template file as Markdown (for mirroring properties / bullets)."""
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            return "LOGSEQ_GRAPH_PATH is not set."
-        wiki = ctx.request_context.lifespan_context.wiki_config
-
-        def _run() -> str:
-            try:
-                rel, body = graph_templates.read_logseq_template(
-                    graph_path,
-                    template_name,
-                    subdir=wiki.templates_subdir,
-                )
-            except FileNotFoundError:
-                return f"Template not found under `{wiki.templates_subdir}/`: `{template_name}`"
-            except ValueError as exc:
-                return f"Invalid template name: {exc}"
-            return f"# Template `{rel}`\n\n```markdown\n{body.rstrip()}\n```\n"
-
-        return await asyncio.to_thread(_run)
-
-    @safe_tool()
-    async def read_l1_memory(ctx: Context[ServerSession, AppContext]) -> str:
-        """Load **L1** fast-context Markdown (session rules, identity, gotchas).
-
-        Reads small ``*.md`` files from ``MATRYCA_L1_PATH`` (file or directory), or—if
-        unset—from ``memory_path`` in ``matryca-wiki.yml`` (``MATRYCA_WIKI_CONFIG`` or
-        ``$LOGSEQ_GRAPH_PATH/matryca-wiki.yml``), else
-        ``<parent of LOGSEQ_GRAPH_PATH>/matryca-l1/*.md``.
-        Total size is capped so the whole vault is never loaded.
-
-        **When to use:** At the start of substantive work, or when the user asks for
-        house style, credentials *pointers* (not values), deploy gotchas, or routing
-        rules that must apply before querying the graph (L2).
-
-        **Returns:** Markdown with a file list and each file's contents, or a short
-        message when no L1 sources are configured or found.
-        """
         wiki_config = ctx.request_context.lifespan_context.wiki_config
-        labels, body = await read_l1_memory_async(wiki_config)
-        if not labels:
-            return (
-                "No L1 memory loaded. Set **MATRYCA_L1_PATH**, or **memory_path** in "
-                "**matryca-wiki.yml**, or create **matryca-l1/*.md** next to your graph. "
-                "See `SYSTEM_PROMPT.md` for L1 vs L2 routing."
-            )
-        logger.bind(files=len(labels)).info("read_l1_memory loaded L1 context")
-        return body
-
-    @safe_tool()
-    async def lint_logseq_block_refs() -> str:
-        """Scan ``pages/**/*.md`` for ``((uuid))`` refs without a graph-wide ``id::`` target.
-
-        Uses a two-pass text scan (regex for ``id::`` lines and block refs). Does **not**
-        replace the spatial parser; it catches broken transclusions before edit sessions.
-
-        **Requires:** ``LOGSEQ_GRAPH_PATH`` pointing at the Logseq graph root (folder with
-        ``pages/``).
-
-        Returns:
-            Markdown report listing unresolved or non-v4 references.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("lint_logseq_block_refs called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set; cannot lint block references on disk. "
-                "Set it to your graph root, then retry."
-            )
-
-        result = await asyncio.to_thread(lint_block_refs_in_graph, graph_path)
-        logger.bind(
-            pages=result.pages_scanned,
-            issues=len(result.broken),
-        ).info("lint_logseq_block_refs completed")
-        return result.format_report()
-
-    @safe_tool()
-    async def lint_matryca_wiki_pages(ctx: Context[ServerSession, AppContext]) -> str:
-        """Lint prefixed wiki pages (``wiki_file_prefix`` from ``matryca-wiki.yml``).
-
-        Checks under ``LOGSEQ_GRAPH_PATH/pages/*.md`` for: missing ``type::``, stale
-        ``knowledge`` + ``confidence:: high`` + old ``updated::``, credential-like
-        property lines, long base64-like tokens, and missing ``[[wikilinks]]``.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("lint_matryca_wiki_pages called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set; cannot lint wiki pages on disk. "
-                "Set it to your graph root, then retry."
-            )
-        wiki_config = ctx.request_context.lifespan_context.wiki_config
-
         await mcp_tool_info(ctx, "Scanning wiki-prefixed pages under pages/ for lint findings…")
 
-        def _run() -> str:
+        def _wiki() -> str:
             findings = lint_wiki_prefixed_pages(graph_path, wiki_config)
             return format_wiki_lint_report(findings, prefix=wiki_config.wiki_file_prefix)
 
         async with mcp_tool_session(ctx):
-            report: str = await run_in_thread_with_mcp_context(_run)
+            wiki_report: str = await run_in_thread_with_mcp_context(_wiki)
         await mcp_tool_info(ctx, "Wiki lint scan complete.")
-        logger.bind(graph=graph_path).info("lint_matryca_wiki_pages completed")
-        return report
-
-    @safe_tool()
-    async def render_logseq_dashboard(ctx: Context[ServerSession, AppContext]) -> str:
-        """Build a **[[Matryca Dashboard]]**-style outline: page counts, ``id::`` tally, ref health.
-
-        Scans ``LOGSEQ_GRAPH_PATH/pages/**/*.md`` (no SQLite). Uses the same block-ref
-        heuristics as :func:`lint_logseq_block_refs`. Returns Markdown you can paste into
-        a Logseq page or split under a parent block.
-
-        **Requires:** ``LOGSEQ_GRAPH_PATH`` set to the graph root.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("render_logseq_dashboard called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set; cannot render a dashboard. "
-                "Set it to your graph root, then retry."
-            )
-        wiki_config = ctx.request_context.lifespan_context.wiki_config
-        await mcp_tool_info(
-            ctx,
-            "Rendering Matryca dashboard: scanning pages/ and block-reference health…",
-        )
-        async with mcp_tool_session(ctx):
-            markdown: str = await run_in_thread_with_mcp_context(
-                build_dashboard_markdown,
-                graph_path,
-                wiki_config,
-            )
-        await mcp_tool_info(ctx, "Dashboard render complete.")
-        logger.bind(graph=graph_path).info("render_logseq_dashboard completed")
-        return markdown
-
-    @safe_tool()
-    async def list_logseq_namespace_index(ctx: Context[ServerSession, AppContext]) -> str:
-        """Group ``pages/*.md`` by first ``___`` segment for hub-style navigation."""
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("list_logseq_namespace_index called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set; cannot list namespaces. "
-                "Set it to your graph root, then retry."
-            )
-        wiki_config = ctx.request_context.lifespan_context.wiki_config
-        return await asyncio.to_thread(
-            build_namespace_index_markdown,
-            graph_path,
-            wiki_config,
-        )
-
-    @safe_tool()
-    async def query_logseq_pages_local(
-        ctx: Context[ServerSession, AppContext],
-        keyword: str,
-        limit: int = 15,
-        mode: str = "bm25",
-    ) -> str:
-        """Rank ``pages/**/*.md`` by BM25 (default) or legacy substring counts (no vector DB).
-
-        **Modes:** ``bm25`` (Okapi BM25 over token bags) or ``substring`` (hit counts).
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("query_logseq_pages_local called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set; cannot query pages on disk. "
-                "Set it to your graph root, then retry."
-            )
-        query_mode = mode.strip().lower()
-        if query_mode in ("bm25", "tfidf", "relevance"):
-            await mcp_tool_info(
-                ctx,
-                "Building in-memory BM25 index over pages/ "
-                "(first run or cache miss may take a moment)…",
-            )
-        else:
-            await mcp_tool_info(ctx, f"Scanning pages/ for substring matches ({query_mode})…")
-        async with mcp_tool_session(ctx):
-            result: str = await run_in_thread_with_mcp_context(
-                format_keyword_query_markdown,
-                graph_path,
-                keyword,
-                limit=limit,
-                mode=mode,
-            )
-        await mcp_tool_info(ctx, "Local page query complete.")
-        return result
-
-    @safe_tool()
-    async def write_logseq_outline(
-        outline: dict[str, Any],
-        parent_block_uuid: str,
-        ctx: Context[ServerSession, AppContext],
-    ) -> dict[str, Any]:
-        """Write nested outline bullets into Logseq under an existing parent block (API).
-
-        **When to use:** The user or plan asks you to *create* or *append* structured
-        bullets under a block that **already exists** in the graph and you know its
-        **UUID** (e.g. from Logseq, prior tool output, or ``id::`` in file context).
-        Sends each node depth-first via Logseq's HTTP JSON-RPC API so children attach
-        to the freshly returned parent UUIDs (avoids unresolved-parent races).
-
-        **When not to use:** You only need to *read* a page, fix typos in a whole file,
-        or you do not have a real parent block UUID—prefer :func:`read_logseq_page` or
-        a human/editor workflow instead.
-
-        Args:
-            outline: JSON tree shaped like ``OutlineNode`` (``text``, optional
-                ``properties``, ``page_type`` / ``domain`` / ``entity_type``, nested
-                ``children``).
-            parent_block_uuid: Target parent block's UUID in Logseq.
-
-        Returns:
-            ``uuids`` (DFS-ordered list of new block UUID strings) plus ``routing_hint``.
-        """
-        bridge = ctx.request_context.lifespan_context.bridge
-        return await bridge.write_logseq_outline(
-            outline,
-            parent_block_uuid=parent_block_uuid,
-        )
-
-    @safe_tool()
-    async def read_logseq_page(page_name: str) -> str:
-        """Read a Logseq **page** from the on-disk Markdown graph (spatial / eyes).
-
-        **When to use:** You need **ground truth** for what is already on a page—block
-        hierarchy, ``id::`` lines, properties, links, or evidence—before editing,
-        merging, or answering from the user's vault. Uses ``LOGSEQ_GRAPH_PATH`` and the
-        external ``logseq-matryca-parser`` (no Logseq HTTP call).
-
-        **When not to use:** You need to **insert** bullets under a known block UUID;
-        use :func:`write_logseq_outline` and the Logseq API instead.
-
-        Args:
-            page_name: Page title as in Logseq (e.g. ``My Topic``), not a file path.
-
-        Returns:
-            Markdown summary of the parsed spatial tree (includes per-block
-            ``synthetic_id``, ``source_uuid``, and ``uuid`` from the parser AST),
-            or a short human-readable message if the graph path is missing, the page
-            is absent, or the parser is not installed.
-        """
-        graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-        if not graph_path:
-            logger.warning("read_logseq_page called but LOGSEQ_GRAPH_PATH is unset")
-            return (
-                "LOGSEQ_GRAPH_PATH is not set in the environment; cannot read pages "
-                "from disk. Set it to your Logseq graph root (the folder that contains "
-                "`pages/`), then retry."
-            )
-
-        try:
-            markdown = await get_page_spatial_context(page_name, graph_path)
-        except FileNotFoundError as exc:
-            logger.bind(page=page_name, graph=graph_path).info("read_logseq_page miss: {}", exc)
-            return "Page not found, you can create it."
-        except ImportError as exc:
-            logger.error("read_logseq_page failed (parser missing): {}", exc)
-            return (
-                f"Spatial parser is not available (install `logseq-matryca-parser`). Detail: {exc}"
-            )
-        except OSError as exc:
-            logger.bind(page=page_name).exception("read_logseq_page OS error")
-            return f"Could not read the page file from disk: {exc}"
-
-        logger.bind(page=page_name).debug("read_logseq_page returned spatial markdown")
-        return append_read_page_routing_hint(markdown)
+        logger.bind(graph=graph_path).info("run_linter(full_wiki_scan) completed")
+        return wiki_report
 
 
 __all__ = [
@@ -1063,8 +950,13 @@ __all__ = [
     "Domain",
     "EntityType",
     "MatrycaMCPServer",
+    "MutateGraphAction",
     "OutlineNode",
     "PageType",
+    "ReadGraphTarget",
+    "RefactorBlocksAction",
+    "RunLinterName",
+    "SearchGraphMethod",
     "outline_block_count",
     "register_mcp_tools",
 ]

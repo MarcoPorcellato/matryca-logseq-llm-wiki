@@ -2,12 +2,67 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
-from src.agent.mcp_server import MatrycaMCPServer, OutlineNode
+from src.agent.mcp_server import (
+    MatrycaMCPServer,
+    OutlineNode,
+    _format_regex_search_markdown,
+    _parse_optional_json_query,
+    _read_block_ast_markdown,
+    register_mcp_tools,
+)
 from src.bridge.logseq_client import LogseqClient
+
+
+def test_mcp_registers_five_mega_tools() -> None:
+    """Consolidated MCP surface exposes exactly five tool names."""
+    app = FastMCP("matryca-test")
+    register_mcp_tools(app)
+    names = sorted(app._tool_manager._tools.keys())  # noqa: SLF001
+    assert names == [
+        "mutate_graph",
+        "read_graph_data",
+        "refactor_blocks",
+        "run_linter",
+        "search_graph",
+    ]
+
+
+def test_parse_optional_json_query_accepts_plain_or_json() -> None:
+    assert _parse_optional_json_query("") == {}
+    assert _parse_optional_json_query("alpha") == {}
+    assert _parse_optional_json_query('{"days": 3}') == {"days": 3}
+
+
+def test_read_block_ast_markdown_returns_subtree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    block_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    (pages / "Demo.md").write_text(
+        f"- Parent\n  id:: {block_id}\n  - Child bullet\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOGSEQ_GRAPH_PATH", str(tmp_path))
+    md = _read_block_ast_markdown(str(tmp_path), f"Demo|{block_id}")
+    assert "Child bullet" in md
+    assert block_id in md
+
+
+def test_format_regex_search_markdown_finds_line(tmp_path: Path) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "Hit.md").write_text("- TODO fix parser\n", encoding="utf-8")
+    report = _format_regex_search_markdown(str(tmp_path), r"TODO", limit=10)
+    assert "Hit.md" in report
+    assert "TODO" in report
 
 
 def test_outline_node_validates_nested_hierarchy() -> None:
