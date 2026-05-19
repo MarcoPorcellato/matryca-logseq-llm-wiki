@@ -35,7 +35,7 @@ This repository **does not** reimplement a second full-file Markdown AST for vau
 | Class of work | Modules / tools | Mechanism |
 |---------------|-------------------|-----------|
 | **Scoped `key::` surgery** | `patch_logseq_block_property_lines` — `property_line_edit.py` | Lines inside a subtree anchored at `id:: <uuid>`; only true property lines per **`is_logseq_block_property_line`**; intersection with **`compute_page_protected_line_indices`** |
-| **Graph-wide ref integrity** | `lint_logseq_block_refs` — `block_ref_lint.py` | Two-pass scan: collect all `id::` UUIDs, validate each `((uuid))` reference |
+| **Graph-wide ref integrity** | `lint_logseq_block_refs` — `block_ref_lint.py` | Two-pass scan: collect all `id::` UUIDs (v4/v5), validate each `((uuid))` reference |
 | **Lexical discovery** | `query_logseq_pages_local` — `local_query.py` | Token bags + Okapi BM25 in memory; corpus memoized in **`generational_cache`** keyed by page `st_mtime_ns` sets |
 | **Structural hops** | `traverse_logseq_structural_hops`, hub/orphan reports — `link_tag_hop.py` | Wikilinks, `#tags` / `tags::`, light `type::` / `domain::` edges over `pages/**/*.md` |
 | **Hashtag normalization** | `lint_unify_logseq_tags` — `tag_unify.py` | Token-level `#tag` detection with **mldoc quoted-span** awareness and **global fence** guards |
@@ -114,6 +114,7 @@ sequenceDiagram
     else Disk mutator
         Bridge->>GFS: protected line indices
         GFS-->>Bridge: dead-zone set
+        Bridge->>Bridge: pre-flight ((uuid)) shape check
         Bridge->>FS: tmp + fsync + os.replace (+ optional git snapshot)
     end
     Bridge-->>MCP: Structured result + routing_hint
@@ -141,7 +142,7 @@ Operational prompting lives in **`SYSTEM_PROMPT.md`**. At a high level:
 
 1. **Search** — Prefer **`query_logseq_pages_local`** with **`mode=bm25`**. Optionally **`read_l1_memory`** when mistakes would be costly before touching L2.
 2. **Scan** — **`read_logseq_page`** for ground truth; **`traverse_logseq_structural_hops`** / **`report_structural_hubs_orphans`**; **`lint_logseq_block_refs`** when editing many `((uuid))` refs.
-3. **Refactor / update** — **`write_logseq_outline`**; **`patch_logseq_block_property_lines`**; **`inject_logseq_advanced_query`**; journal and alias tools as needed.
+3. **Refactor / update** — **`write_logseq_outline`**; **`patch_logseq_block_property_lines`** (including **persist-first** `id::` when the parser reports **`synthetic_id: true`**); **`inject_logseq_advanced_query`**; journal and alias tools as needed.
 4. **Garden** — Flashcards, tag unify, reparent, unlinked mentions, MOC generation, large-block split — almost always **`dry_run=true`** first.
 5. **Quality gate** — Re-lint refs after large edits; respect **`protected_fence`** when a mutation would cross fenced code, HTML comments, Advanced Query blocks, or drawer regions.
 
@@ -214,6 +215,65 @@ Mechanics:
 
 On **any** exception before `replace` completes, the temp file is **unlinked** and the original path is unchanged. There is **no in-place truncation** window. Disk mutators across **`property_line_edit`**, **`tag_unify`**, **`reparent_blocks`**, **`split_large_blocks`**, **`journal_task_scan`**, **`flashcards`**, and **`moc_page`** route through this helper. Property-line apply additionally uses **`shutil.copy2`** to a **`.bak`** sibling before swap for a second, human-visible rollback lever.
 
+### UUID lifecycle and synthetic ID guardrails (`v1.0.1`)
+
+The **Trust plane** (Phase 9) and **Ironclad Shield** (Phase 8) converge on a single invariant: **ephemeral AST identity must never be mistaken for durable Logseq database identity**.
+
+```mermaid
+flowchart LR
+  subgraph read["Spatial read"]
+    P["logseq-matryca-parser"]
+    A["matryca_hooks.py"]
+    P -->|"uuid · synthetic_id · source_uuid"| A
+    A -->|"read_logseq_page summary"| LLM["Agent"]
+  end
+  subgraph persist["Persist-first (agent policy)"]
+    LLM -->|"synthetic_id true, no source_uuid"| PATCH["patch_logseq_block_property_lines\nid:: injection"]
+    PATCH --> DISK["Source .md on disk"]
+  end
+  subgraph write["Disk commit"]
+    MOC["MOC / mutator payload"]
+    MOC --> GUARD["atomic_write_bytes\npre-flight ((uuid)) scan"]
+    GUARD -->|"valid"| SWAP["tmp + fsync + os.replace"]
+    GUARD -->|"malformed"| FAIL["ValueError — no replace"]
+  end
+  DISK --> MOC
+```
+
+#### Parser contract: `synthetic_id` and `source_uuid`
+
+**[logseq-matryca-parser](https://github.com/MarcoPorcellato/logseq-matryca-parser)** annotates each block with:
+
+| Field | Meaning |
+|-------|---------|
+| **`uuid`** | Effective identifier for the block in the current parse (may be read from disk or synthesized). |
+| **`source_uuid`** | When present, the UUID taken from a persisted **`id::`** line on disk. |
+| **`synthetic_id`** | **`true`** when the effective UUID was **generated in memory** (e.g. deterministic UUIDv5 for blocks lacking `id::`); **`false`** when identity is anchored to on-disk `id::`. |
+
+The adapter **`src/rag/matryca_hooks.py`** surfaces these fields in every **`read_logseq_page`** spatial summary—e.g. `` `synthetic_id` true ``, `` `source_uuid` … (persisted `id::` on disk) ``, or an explicit **not on disk — persist `id::` before `((uuid))`** warning when the agent must not reference the block yet.
+
+**Design rule:** A `((uuid))` in new Markdown is only safe when that UUID is already backed by an **`id::`** line in the **source** file Logseq will index. Parser output alone does not create graph edges.
+
+#### Pre-flight Block Reference Guard
+
+Before **`os.replace`**, **`atomic_write_bytes`** decodes UTF-8 payloads that contain `((` and calls **`assert_valid_block_refs_in_markdown`** in **`src/graph/logseq_uuid.py`**. The guard:
+
+- Scans all **`((...))`** tokens with a bounded regex.
+- Requires each inner token to be a **canonical 36-character hyphenated UUID** that parses under **`uuid.UUID`**.
+- Raises **`ValueError`** with an actionable message on the first malformed ref—**no temp file is promoted** to the live path.
+
+This complements **`lint_logseq_block_refs`**: the linter proves refs resolve to known **`id::`** targets vault-wide; the pre-flight guard catches **syntactically impossible** refs at commit time (common when models truncate or mistype hex). Together they enforce **separation of concerns** between *shape validity* (Ironclad) and *referential integrity* (Trust plane + gardening tools).
+
+#### Agent policy (`SYSTEM_PROMPT.md`)
+
+Operational prompting requires a **persist-first** sequence when building MOCs or any disk artifact with block refs:
+
+1. **Read** the source page and inspect **`synthetic_id` / `source_uuid` / `uuid`**.
+2. If **`synthetic_id: true`** and there is no on-disk `id::`, **`patch_logseq_block_property_lines`** (`dry_run=true` then `false`) injects **`id:: <uuid>`** into the original file.
+3. Only then may tools such as **`generate_moc_page`** or other **`atomic_write_bytes`** paths emit **`((that-uuid))`**.
+
+Release **`v1.0.1`** hardened this pipeline after a **~106k-token** Cursor MCP stress test that built a large MOC from **2,300+** lines of nested Markdown—the parser hierarchy was correct, but ephemeral UUIDs in refs broke after Logseq re-indexed.
+
 ### Incremental computation caches (Salsa-style invalidation)
 
 **`src/graph/generational_cache.py`** provides **process-lifetime**, **thread-safe** (`threading.Lock`) memoization keyed by **`frozenset[(relative_path, st_mtime_ns)]`** over participating files — the same **“inputs changed?”** contract as **Salsa**-style incremental compilers (famously **rust-analyzer**): if no participating file’s nanosecond mtime moved, the prior in-memory artifact is **reused**.
@@ -252,8 +312,8 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **5 — Graph gardener** | **`generate_logseq_flashcards`**, **`lint_unify_logseq_tags`**, **`refactor_logseq_blocks`** | Hygiene at scale: SRS cards, tag normalization, structural reparenting |
 | **6 — Synthesis engine** | **`resolve_unlinked_mentions`**, **`generate_moc_page`**, **`refactor_large_blocks`**, **`snapshot_logseq_graph_git`** | Graph “thickening,” long-bullet repair, and **manual** operator checkpoints |
 | **7 — Mldoc compliance** | **`mldoc_properties.py`**, **`mldoc_guards.py`** integrated into property, tag, alias, and split flows | Eliminate **false positives** on `key::` lines and **destructive edits** inside fragile bodies — auditable Python mirroring **mldoc** intent |
-| **8 — Ironclad Shield** | **`global_fence_scanner.py`**, **`atomic_write_bytes`** across disk mutators, **`generational_cache.py`** | **Global** awareness of code, comments, and queries; **no torn writes**; **sub-millisecond** hot paths when signatures are stable |
-| **9 — Trust plane** | **`quality_gate.py`** (outline and Advanced Query EDN secret scans), wiki lint under **`MatrycaWikiConfig`**, structured dry-run / apply payloads | Prevent **credential leakage into L2** via API paths; enforce **policy** without a second datastore |
+| **8 — Ironclad Shield** | **`global_fence_scanner.py`**, **`atomic_write_bytes`** (+ **`logseq_uuid`** pre-flight on `((uuid))`), **`generational_cache.py`** | **Global** awareness of code, comments, and queries; **no torn writes**; **commit-time** rejection of malformed block refs; **sub-millisecond** hot paths when signatures are stable |
+| **9 — Trust plane** | **`quality_gate.py`** (outline and Advanced Query EDN secret scans), wiki lint under **`MatrycaWikiConfig`**, **`synthetic_id` / persist-first** rules in **`SYSTEM_PROMPT.md`**, structured dry-run / apply payloads | Prevent **credential leakage into L2** via API paths; enforce **policy** and **UUID referential discipline** without a second datastore |
 | **10 — Delivery and community** | **`.github/workflows/ci.yml`** (`uv sync --locked`, Ruff lint + format check, Mypy on `src` + `tests`, Pytest), **`.github/dependabot.yml`** (weekly pip and GitHub Actions bumps), **`.github/workflows/release.yml`** (push tag `v*` → `uv build` → `gh release create`), **`SECURITY.md`**, **`CODE_OF_CONDUCT.md`**, issue and PR templates | **Reproducible quality bar**, **supply-chain hygiene**, **tag-driven artifacts**, and **clear vulnerability and community process** |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
@@ -284,7 +344,7 @@ flowchart TB
   subgraph data["Data tier"]
     API["Logseq JSON-RPC"]
     PAR["logseq_matryca_parser"]
-    DISK["Graph passes: fence · mldoc · atomic_write · generational_cache"]
+    DISK["Graph passes: fence · mldoc · atomic_write · logseq_uuid · generational_cache"]
   end
   subgraph ops["Phase 10 — delivery"]
     CI["GitHub Actions"]
@@ -313,7 +373,9 @@ flowchart TB
 | `src/agent/git_snapshot.py` | Optional commits on graph root |
 | `src/agent/quality_gate.py` | Outline and Advanced Query EDN pre-flight scans |
 | `src/rag/matryca_hooks.py` | Parser adapter for spatial reads |
-| `src/graph/markdown_blocks.py` | `atomic_write_bytes` / `atomic_write_file`, block line helpers, `graph_safe_page_path` |
+| `src/graph/markdown_blocks.py` | `atomic_write_bytes` / `atomic_write_file` (includes pre-flight `((uuid))` guard), block line helpers, `graph_safe_page_path` |
+| `src/graph/logseq_uuid.py` | UUID v4/v5 shape checks; `assert_valid_block_refs_in_markdown` for atomic writes |
+| `src/graph/block_ref_lint.py` | Vault-wide `((uuid))` ↔ `id::` integrity (`lint_logseq_block_refs`) |
 | `src/graph/global_fence_scanner.py` | Whole-page dead-zone line index |
 | `src/graph/mldoc_properties.py` / `mldoc_guards.py` | Phase 7 property grammar + structural shields |
 | `src/graph/generational_cache.py` | Phase 8 mtime-keyed alias + BM25 corpus memoization |

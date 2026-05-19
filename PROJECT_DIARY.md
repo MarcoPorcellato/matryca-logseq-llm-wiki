@@ -28,6 +28,28 @@ Concrete follow-ups: implementation tasks, documentation updates, experiments, o
 
 ---
 
+## [2026-05-19] - V1 Launch, 100k Token Stress Test, and Synthetic ID Guardrails
+
+### Context
+
+We ran a live **Agentic RAG** stress test (~**106k tokens**) in which **Cursor** acted as an MCP agent and generated a complex **Map of Content (MOC)** from more than **2,300 lines** of nested Markdown. The agent used the AST parser successfully to understand **spatial hierarchy**, but it **blindly reused ephemeral UUIDv5s** produced in memory by the parser inside `((...))` block references. Those IDs were never written back to the source `.md` files as `id::` lines. After Logseq re-indexed the graph, those references surfaced as **broken links**—a critical edge case at the boundary between parser identity and on-disk truth.
+
+We shipped **`v1.0.1`** to lock in fixes across the upstream parser and this MCP server.
+
+### Decisions Made
+
+1. **Upstream parser contract:** **`logseq-matryca-parser`** now exposes an explicit **`synthetic_id`** boolean and **`source_uuid`** on each block node so downstream consumers can tell whether an effective UUID exists on disk vs was generated only for the AST session.
+2. **Pre-flight Block Reference Guard:** Atomic disk mutators call **`assert_valid_block_refs_in_markdown`** inside **`atomic_write_bytes`** (`src/graph/markdown_blocks.py` via **`src/graph/logseq_uuid.py`**) to regex-scan outgoing Markdown and **reject malformed `((uuid))` tokens** (wrong length, bad hex groupings, typos) **before** `os.replace`—a fail-safe against LLM UUID hallucinations.
+3. **Agent persist-first rule:** **`SYSTEM_PROMPT.md`** now requires agents to call **`patch_logseq_block_property_lines`** to inject `id:: <uuid>` into the **source page** when **`synthetic_id: true`** and **`source_uuid` is absent**, **before** emitting MOCs or other pages that reference `((that-uuid))`.
+4. **Wiki linter alignment:** **`block_ref_lint.py`** (`lint_logseq_block_refs`) accepts both **UUIDv4** and **UUIDv5** shapes, matching Logseq’s on-disk and parser-generated identifiers.
+
+### Next Steps
+
+- Monitor community feedback from the open-source launch on **Reddit** and **Hacker News**.
+- Gather telemetry on how other agent hosts (e.g. **Claude Desktop**) enforce or violate the **persist-first** UUID rule when building MOCs at scale.
+
+---
+
 ## [2026-05-17] - Foundation, DX, and The Outliner Paradigm
 
 ### Context
