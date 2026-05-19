@@ -33,6 +33,9 @@ htmlcov/
 # Escludi le impostazioni personali attive per non sporcare il prompt
 matryca-wiki.yml
 
+# --- Logseq (graph locali / test) ---
+LOGSEQ copy test LLM/
+
 # --- File Temporanei e Backup (Generati dai nostri tool di Fase 3, 7 e 8) ---
 *.bak
 *.tmp

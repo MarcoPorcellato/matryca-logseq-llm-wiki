@@ -1,41 +1,25 @@
 # Matryca Logseq LLM Wiki
 
-> **Agentic knowledge management for Logseq OG** — an MCP server that treats your vault as a **block graph**, not a flat document store. **Local-first**, **database-free**, and engineered for humans and agents co-editing the same Markdown outliner files.
+> Agentic Knowledge Management for Logseq OG. An MCP server that turns your favorite AI into a spatial Knowledge Architect. It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-92%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-[Logseq](https://logseq.com/) materializes a folder of Markdown into a **typed block graph**. [Model Context Protocol](https://modelcontextprotocol.io/) connects LLMs to tools; **matryca-logseq-llm-wiki** is the bridge that speaks Logseq’s native semantics: nested bullets, `id::` UUIDs, `[[wikilinks]]`, `((block references))`, journals, **Advanced Query** (Datalog) blocks, and property lines shaped like `key:: value`.
+As the PKM ecosystem pivots heavily toward opaque SQLite databases to accommodate AI, many of us want to keep our Second Brain in pure, local Markdown. But standard LLM RAG pipelines destroy Markdown: they blindly chunk files, severing the crucial parent-child relationship of your bullet points.
 
-The design follows an **L1 / L2** mental model (session rules versus vault depth), similar in spirit to Karpathy’s “LLM Wiki” lineage and [llm-wiki](https://github.com/MehmetGoekce/llm-wiki)-style routing — but **rebuilt for Logseq OG**: one graph on disk, **FastMCP** and **Pydantic** at the tool boundary, and **no** Postgres, Redis, SQLite, or hosted vector index as system-of-record.
+Matryca solves the context-fragmentation problem. Powered by the [Logseq Matryca Parser](https://github.com/MarcoPorcellato/logseq-matryca-parser) and [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), this architecture allows agents like Claude Desktop or Cursor to read the exact Abstract Syntax Tree (AST) of your thoughts. It understands nested bullets, `id::` UUIDs, and `[[wikilinks]]`, allowing the AI to organically grow, synthesize, and garden your graph alongside you.
 
 ---
 
-## Why Matryca
+## 🧠 Why this is different
 
-| Typical “AI + notes” | Matryca |
-|----------------------|---------|
-| Treats each file as prose | Treats the vault as a **tree of blocks** with stable `id::` anchors |
-| Static lists that go stale | **`#+BEGIN_QUERY` … `#+END_QUERY`** blocks that **re-evaluate inside Logseq** |
-| Ignores journals and tasks | **`analyze_journal_tasks`** and **`append_logseq_journal_markdown`** for `TODO` / `LATER` / `WAITING` plus `SCHEDULED:` / `DEADLINE:` |
-| Rewrites whole pages blindly | **Depth-first** **`write_logseq_outline`** via Logseq’s API; **scoped** **`patch_logseq_block_property_lines`** for `key::` lines only |
-| No rollback story | Optional **`MATRYCA_GIT_SNAPSHOT_ON_WRITE`**: **git commit** on the graph repo before selected writes |
+**Compiler-Grade AST Awareness:** The agent reads the exact spatial indentation of your blocks. It knows if a bullet is a root project, a task, or a sub-note.
 
-### Core engineering pillars
+**Zero-DB / In-Memory Lexical Engine:** No bloated vector databases. It uses instantaneous in-memory Okapi BM25 and structural BFS graph traversals directly over your `pages/` directory.
 
-**Strict localism and zero database footprint**  
-Every durable artifact lives under **`LOGSEQ_GRAPH_PATH`**. Lexical discovery uses an **in-process Okapi BM25** corpus over `pages/**/*.md`; structural navigation uses **line- and regex-bounded graph scans**; alias resolution builds an **in-memory index** with generational invalidation. Nothing maintains a competing queryable store: rankings and traversals are **ephemeral views** computed for the request and discarded, which eliminates sync, migration, and “two truths” failure modes while keeping latency predictable on large vaults.
-
-**Zero-corruption transactional file engine**  
-Disk mutators do not shrink files in place. Payloads flow through **`atomic_write_bytes`** in **`src/graph/markdown_blocks.py`**: write to a **hidden sibling temp** (`.<basename>.XXXXXX.tmp` in the **same directory** as the target so `os.replace` never crosses filesystems), **`flush`** the handle, **`os.fsync`** to push bytes toward durable media, then a **single atomic `os.replace`** onto the live `.md` path. On failure before rename, the temp file is removed and the original inode remains intact — the same **write-ahead, commit-on-rename** family of guarantees as SQLite’s page journal or Git’s object store updates. Selected tools also write a **`.bak`** copy (e.g. property-line surgery) before swap for operator-visible rollback.
-
-**Compiler-grade AST and fence awareness**  
-Spatial reads delegate block boundaries and indentation to **[logseq-matryca-parser](https://github.com/MarcoPorcellato/logseq-matryca-parser)**. For mutators, **`mldoc_properties`** and **`mldoc_guards`** encode **Logseq / mldoc-aligned** rules: first `::` pair on property lines, wikilink-depth-aware CSV splitting, double-quoted spans, drawers (`:LOGBOOK:` … `:END:`), fenced code, `#+BEGIN_QUERY` regions, and `{{` macro opens. **`compute_page_protected_line_indices`** in **`global_fence_scanner.py`** performs a **streaming global fence pass** so code blocks, HTML comments, and query blocks become **dead zones** — mutators **fail closed** when a span would intersect protected lines.
-
-**Agentic git safety snapshots**  
-When **`MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`** and the graph root is a **git** checkout, **`snapshot_git_working_tree`** runs **`git add -A`** and **`git commit`** before **`write_logseq_outline`** and selected disk mutators (`refactor_logseq_blocks`, `refactor_large_blocks`, MOC writes). That yields a **reversible checkpoint** (`git revert` / `git log`) without any hosted snapshot product — entirely **local** and opt-in.
+**Ironclad Data Plane:** AI agents can be destructive. Matryca features ACID-inspired transactional file swaps, dead-zone fence scanning (to protect code blocks), and automated Git snapshots before mutating your graph.
 
 ---
 
