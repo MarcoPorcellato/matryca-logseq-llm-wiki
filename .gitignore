@@ -53,6 +53,7 @@ coverage.xml
 # 📝 Logseq & Data
 # ========================================
 # Escludi eventuali test-graph locali o database
+LOGSEQ copy test LLM/
 *.sqlite3
 *.db
 .logseq/
