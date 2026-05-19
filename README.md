@@ -3,7 +3,7 @@
 > Agentic Knowledge Management for Logseq OG. An MCP server that turns your favorite AI into a spatial Knowledge Architect. It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-92%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -20,6 +20,10 @@ Matryca solves the context-fragmentation problem. Powered by the [Logseq Matryca
 **Zero-DB / In-Memory Lexical Engine:** No bloated vector databases. It uses instantaneous in-memory Okapi BM25 and structural BFS graph traversals directly over your `pages/` directory.
 
 **Ironclad Data Plane:** AI agents can be destructive. Matryca features ACID-inspired transactional file swaps, dead-zone fence scanning (to protect code blocks), and automated Git snapshots before mutating your graph.
+
+**Sandboxed & Privacy-First by Design:** A centralized path sandbox (`path_sandbox.py`) enforces `Path.resolve().is_relative_to(graph_root)` on every disk read and write. Prompt-injected traversal attempts (e.g. `../../../etc/passwd`) are blocked with an explicit security error before any file is touched — your graph root is the hard boundary.
+
+**Network Deadlock Protection:** The Logseq HTTP client uses strict `httpx` timeouts (5s connect, 15s read/write). If the local Logseq API freezes during indexing, the MCP session returns a safe “API unresponsive” tool error instead of hanging worker threads indefinitely.
 
 ---
 
@@ -41,6 +45,7 @@ flowchart TB
   subgraph data["Data plane"]
     FS[("LOGSEQ_GRAPH_PATH\npages/ · journals/ · templates/")]
     PAR["logseq-matryca-parser\n(spatial read)"]
+    SBX["path_sandbox\n(is_relative_to graph root)"]
     GFS["global_fence_scanner\n(dead-zone line index)"]
     ATW["atomic_write_bytes\n(tmp + fsync + replace)"]
     GC["generational_cache\n(mtime_ns signatures)"]
@@ -54,6 +59,7 @@ flowchart TB
   SRV <-->|Bearer JSON-RPC| LQ
   SRV <-->|read / mutate| FS
   SRV --> PAR
+  SRV --> SBX
   SRV --> GFS
   SRV --> ATW
   SRV --> GC
@@ -115,6 +121,7 @@ Each phase adds capabilities; later phases **harden** earlier tools without nece
 | **8 — Ironclad data plane** | **`compute_page_protected_line_indices`** (global fence lexer); **`atomic_write_bytes`** on mutators; **`generational_cache`** (`st_mtime_ns` keyed alias + BM25 corpus reuse, Salsa-style invalidation) | *Same tool names; dead-zone and cache behavior upgraded* |
 | **9 — Trust and policy plane** | **`quality_gate`**: blocks credential-like outline properties and raw query EDN; **`lint_matryca_wiki_pages`** for configurable wiki discipline; structured dry-run / apply responses | Enforcement inside `write_logseq_outline`, `inject_logseq_advanced_query`; governance tools listed in phase 3 |
 | **10 — Delivery and community** | **GitHub Actions** (`ci.yml`): `uv sync --locked`, Ruff lint + format check, **Mypy** on `src` and `tests`, Pytest; **Dependabot** (pip + Actions); **`release.yml`** on `v*` tags (`uv build`, `gh release create`); **`SECURITY.md`**; **Contributor Covenant** (`CODE_OF_CONDUCT.md`); issue and PR templates | *Repository operations — no additional MCP tools* |
+| **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** traversal gate on all FS paths; **`LogseqClient`** bounded HTTP timeouts; **`mcp_tool_guard`** LLM-safe errors; lifespan lock and telemetry teardown | *Same MCP tool names; adversarial path and network hardening* |
 
 **Roadmaps and design history:** [`docs/roadmaps/`](docs/roadmaps/) (LLM Wiki, Phase 3, Logseq superpowers, Phase 5–6, mldoc compliance, Ironclad Shield).
 
@@ -217,7 +224,7 @@ Optional graph orchestration: copy [`matryca-wiki.example.yml`](matryca-wiki.exa
 make check
 ```
 
-Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (92 tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**123** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ### Claude Desktop (stdio MCP)
 

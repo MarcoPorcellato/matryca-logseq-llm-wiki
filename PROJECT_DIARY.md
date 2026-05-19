@@ -28,6 +28,24 @@ Concrete follow-ups: implementation tasks, documentation updates, experiments, o
 
 ---
 
+## [2026-05-19] - V1.3.0 Fortress Release: Path Traversal Sandbox & Network Resiliency
+
+### Context
+
+An adversarial security audit revealed risks regarding potential LLM path traversal hallucinations (e.g., prompt injection trying to read/write outside the graph via `../../../etc/passwd`) and potential HTTP deadlocks if the local Logseq API server freezes during heavy indexing.
+
+### Decisions Made
+
+1. Implemented a centralized sandbox engine (`src/graph/path_sandbox.py`) that strictly enforces `Path.resolve().is_relative_to(graph_root)` for all disk actions, raising an unbypassable security error on escape attempts.
+2. Hardened `LogseqClient` with strict connection (5.0s) and read/write (15.0s) timeouts using `httpx.Timeout`, converting network hangs into safe, explanatory tool errors for the agent.
+3. Implemented graceful lifespan teardown routines to clean locks and handle shutdown-time task callbacks cleanly.
+
+### Next Steps
+
+- Open-source launch cycle complete. Pivot to community management and monitoring telemetry on diverse host configurations.
+
+---
+
 ## [2026-05-19] - V1 Launch, 100k Token Stress Test, and Synthetic ID Guardrails
 
 ### Context

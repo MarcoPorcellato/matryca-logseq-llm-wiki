@@ -283,6 +283,44 @@ Release **`v1.0.1`** hardened this pipeline after a **~106k-token** Cursor MCP s
 
 **`clear_generational_caches()`** exists for tests and hot reload. **`tests/test_ironclad_phase8.py`** asserts alias cache **invalidation** after an mtime bump and BM25 cache identity plus scoring.
 
+### Path Traversal Sandbox Layer (`v1.3.0` — Fortress Release)
+
+**`src/graph/path_sandbox.py`** is the **deterministic gate** for every graph-relative filesystem path before a read, resolve, or atomic write proceeds. No disk mutator or spatial read adapter may trust raw LLM-supplied page names or paths without passing through this layer.
+
+Mechanics:
+
+1. **`resolved_graph_root(graph_root)`** — Canonicalizes `LOGSEQ_GRAPH_PATH` (or an explicit graph root passed to a tool) via `Path.expanduser().resolve(strict=False)`.
+2. **`assert_path_within_graph(path, graph_root)`** — Resolves the candidate path and requires `resolved.is_relative_to(root)`. On failure it raises **`ValueError("Security Violation: Path traversal attempt blocked.")`** — an unbypassable error that **`guard_mcp_tool`** maps to LLM-safe tool output without leaking stack traces.
+3. **`graph_safe_page_path(graph_root, page_ref)`** — Resolves `pages/Foo.md` or bare page titles under `pages/` only when the resolved absolute path remains inside the graph root (blocks `../../../etc/passwd`, `pages/../../outside.md`, and symlink escape attempts after `resolve()`).
+
+**Consumers:**
+
+| Operation | Module | Sandbox hook |
+|-----------|--------|--------------|
+| Page resolution | `markdown_blocks.graph_safe_page_path`, `property_line_edit` | Delegates to `path_sandbox` |
+| Spatial reads | `matryca_hooks.resolve_logseq_page_md` | Validates every candidate before `is_file()` |
+| Atomic commits | `markdown_blocks.atomic_write_bytes` | **Required** `graph_root=`; calls `assert_path_within_graph` before `mkstemp` |
+| Template reads | `templates.py` | `_safe_templates_dir` + `assert_path_within_graph` |
+| Tmp hygiene | `sweep_dangling_atomic_tmp_files` | Skips files that fail sandbox (defense in depth under `pages/` / `journals/`) |
+
+**Invariant:** The sandbox runs **before** any `read_text`, `open`, or `atomic_write_bytes` temp-file creation. Prompt-injected relative paths cannot escape the designated Logseq graph directory even when an agent hallucinates `pages/` prefixes or `..` segments.
+
+### Network Resiliency Policy (`v1.3.0` — Fortress Release)
+
+**`src/bridge/logseq_client.py`** talks to Logseq’s local HTTP JSON-RPC endpoint through **`httpx.AsyncClient`** with **explicit, bounded** timeouts — preventing MCP worker threads from hanging indefinitely when Logseq is indexing, frozen, or the port drops.
+
+| Boundary | Seconds | Purpose |
+|----------|---------|---------|
+| **Connect** | `5.0` | Fail fast when the API server is down or unreachable |
+| **Read / write** | `15.0` each | Bound stalled responses during heavy graph operations |
+| **Pool** | `5.0` | Avoid indefinite waits acquiring a connection from the pool |
+
+Default envelope: `httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)`.
+
+On **`httpx.TimeoutException`**, `_post_json_rpc` raises **`RuntimeError("Logseq API is unresponsive (request timed out)")`**. **`guard_mcp_tool`** in **`src/agent/mcp_tool_guard.py`** catches domain errors and returns a concise tool failure string to the agent — the MCP stdio session stays alive instead of deadlocking behind a hung HTTP call.
+
+**Lifespan teardown:** `src/main.py` **`app_lifespan`** `finally` block calls **`client.aclose()`**, **`clear_page_write_locks()`**, and the loguru→MCP bridge in **`mcp_telemetry.py`** registers **`add_done_callback`** on fire-and-forget tasks so shutdown-time notification failures do not surface as unhandled exceptions.
+
 ---
 
 ### Layered property grammar and structural guards (Phase 7)
@@ -315,6 +353,7 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **8 — Ironclad Shield** | **`global_fence_scanner.py`**, **`atomic_write_bytes`** (+ **`logseq_uuid`** pre-flight on `((uuid))`), **`generational_cache.py`** | **Global** awareness of code, comments, and queries; **no torn writes**; **commit-time** rejection of malformed block refs; **sub-millisecond** hot paths when signatures are stable |
 | **9 — Trust plane** | **`quality_gate.py`** (outline and Advanced Query EDN secret scans), wiki lint under **`MatrycaWikiConfig`**, **`synthetic_id` / persist-first** rules in **`SYSTEM_PROMPT.md`**, structured dry-run / apply payloads | Prevent **credential leakage into L2** via API paths; enforce **policy** and **UUID referential discipline** without a second datastore |
 | **10 — Delivery and community** | **`.github/workflows/ci.yml`** (`uv sync --locked`, Ruff lint + format check, Mypy on `src` + `tests`, Pytest), **`.github/dependabot.yml`** (weekly pip and GitHub Actions bumps), **`.github/workflows/release.yml`** (push tag `v*` → `uv build` → `gh release create`), **`SECURITY.md`**, **`CODE_OF_CONDUCT.md`**, issue and PR templates | **Reproducible quality bar**, **supply-chain hygiene**, **tag-driven artifacts**, and **clear vulnerability and community process** |
+| **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`LogseqClient`** bounded **`httpx`** timeouts, **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, prevent HTTP deadlocks during Logseq stalls, graceful MCP shutdown |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
@@ -344,7 +383,7 @@ flowchart TB
   subgraph data["Data tier"]
     API["Logseq JSON-RPC"]
     PAR["logseq_matryca_parser"]
-    DISK["Graph passes: fence · mldoc · atomic_write · logseq_uuid · generational_cache"]
+    DISK["Graph passes: path_sandbox · fence · mldoc · atomic_write · logseq_uuid · generational_cache"]
   end
   subgraph ops["Phase 10 — delivery"]
     CI["GitHub Actions"]
@@ -369,11 +408,13 @@ flowchart TB
 |------|------|
 | `src/main.py` | FastMCP app, lifespan, `register_mcp_tools` |
 | `src/agent/mcp_server.py` | All `@mcp.tool()` handlers, `OutlineNode`, `MatrycaMCPServer` |
-| `src/bridge/logseq_client.py` | Async JSON-RPC over HTTP |
+| `src/bridge/logseq_client.py` | Async JSON-RPC over HTTP (5s connect / 15s read-write timeouts; maps hangs to “unresponsive”) |
+| `src/graph/path_sandbox.py` | Graph-root path sandbox (`is_relative_to`); blocks traversal before any FS read/write |
+| `src/agent/mcp_tool_guard.py` | Outer MCP tool error boundary (LLM-safe failures for `ValueError`, `RuntimeError`, timeouts) |
 | `src/agent/git_snapshot.py` | Optional commits on graph root |
 | `src/agent/quality_gate.py` | Outline and Advanced Query EDN pre-flight scans |
 | `src/rag/matryca_hooks.py` | Parser adapter for spatial reads |
-| `src/graph/markdown_blocks.py` | `atomic_write_bytes` / `atomic_write_file` (includes pre-flight `((uuid))` guard), block line helpers, `graph_safe_page_path` |
+| `src/graph/markdown_blocks.py` | `atomic_write_bytes` / `atomic_write_file` (sandbox + pre-flight `((uuid))` guard), block line helpers, `graph_safe_page_path` |
 | `src/graph/logseq_uuid.py` | UUID v4/v5 shape checks; `assert_valid_block_refs_in_markdown` for atomic writes |
 | `src/graph/block_ref_lint.py` | Vault-wide `((uuid))` ↔ `id::` integrity (`lint_logseq_block_refs`) |
 | `src/graph/global_fence_scanner.py` | Whole-page dead-zone line index |
