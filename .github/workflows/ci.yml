@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   GIT_AUTHOR_NAME: Matryca CI
   GIT_AUTHOR_EMAIL: ci@matryca.local
