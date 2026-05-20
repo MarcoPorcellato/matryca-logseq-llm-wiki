@@ -42,6 +42,7 @@ SEARCH_METHODS: tuple[SearchGraphMethod, ...] = (
     "regex",
     "unlinked_mentions",
     "journal_tasks",
+    "resolve_entity",
 )
 MUTATE_ACTIONS: tuple[MutateGraphAction, ...] = (
     "write_outline",

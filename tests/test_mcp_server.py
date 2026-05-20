@@ -14,6 +14,7 @@ from src.agent.graph_tool_helpers import (
     format_regex_search_markdown,
     parse_optional_json_query,
     read_block_ast_markdown,
+    read_xray_page_markdown,
 )
 from src.agent.mcp_server import OutlineNode, register_mcp_tools
 
@@ -52,6 +53,21 @@ def test_read_block_ast_markdown_returns_subtree(
     monkeypatch.setenv("LOGSEQ_GRAPH_PATH", str(tmp_path))
     md = read_block_ast_markdown(str(tmp_path), f"Demo|{block_id}")
     assert "Child bullet" in md
+    assert block_id in md
+
+
+def test_read_block_ast_markdown_resolves_xray_alias(tmp_path: Path) -> None:
+    """``read_block_ast`` accepts ``Page|[n]`` after ``xray_page`` populates alias state."""
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    block_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    (pages / "Alias Demo.md").write_text(
+        f"- Parent bullet\n  id:: {block_id}\n",
+        encoding="utf-8",
+    )
+    read_xray_page_markdown(str(tmp_path), "Alias Demo")
+    md = read_block_ast_markdown(str(tmp_path), "Alias Demo|[0]")
+    assert "Parent bullet" in md
     assert block_id in md
 
 
@@ -131,6 +147,7 @@ def test_headless_write_outline_chains_parent_uuids(tmp_path: Path) -> None:
     }
     out = _headless_write_outline(str(tmp_path), parent_id, outline)
 
+    assert out.get("ok") is True
     assert len(out["uuids"]) == 3
     assert "routing_hint" in out
     assert "L2" in out["routing_hint"]

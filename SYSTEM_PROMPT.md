@@ -17,7 +17,7 @@ All graph work routes through these polymorphic tools. Each tool selects behavio
 | Tool | Discriminator | Purpose |
 |------|---------------|---------|
 | `read_graph_data` | `target_type` | Read pages, L1 memory, block excerpts, structural hops, dashboard, X-Ray aliases |
-| `search_graph` | `method` | BM25, regex, unlinked mentions, journal tasks |
+| `search_graph` | `method` | BM25, regex, unlinked mentions, journal tasks, entity resolution (`resolve_entity`) |
 | `mutate_graph` | `action` | Write outlines, edit properties, append journal, inject queries |
 | `refactor_blocks` | `action` | Split wall bullets, reparent siblings, generate flashcards |
 | `run_linter` | `linter_name` | Tag unification preview, block-ref integrity, wiki schema scan |
@@ -364,7 +364,7 @@ A human edits the same files. If new information **contradicts** existing blocks
 
 ```
 READ   page | memory | block_ast | structural_hops | dashboard
-SEARCH bm25 | regex | unlinked_mentions | journal_tasks
+SEARCH bm25 | regex | unlinked_mentions | journal_tasks | resolve_entity
 MUTATE write_outline | edit_property | append_journal | inject_query
 REFACTOR split_large | reparent | generate_flashcards
 LINT   unify_tags | block_refs | full_wiki_scan

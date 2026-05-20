@@ -377,8 +377,8 @@ wheels = [
 ]
 
 [[package]]
-name = "matryca-logseq-llm-wiki"
-version = "1.4.0"
+name = "matryca-logseq"
+version = "1.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "logseq-matryca-parser" },

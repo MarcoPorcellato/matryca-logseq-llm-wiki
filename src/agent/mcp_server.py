@@ -213,6 +213,9 @@ def register_mcp_tools(mcp: FastMCP) -> None:
 
         **``method=journal_tasks``** — ``query`` = days to scan (default ``7``), or JSON
         ``{"days":14}``. Open ``TODO`` / ``LATER`` / ``WAITING`` in ``journals/`` plus review MD.
+
+        **``method=resolve_entity``** — ``query`` = page title or ``alias::`` name. Resolves
+        collisions, lists existing aliases, and reports whether a new entity page is safe to create.
         """
         if method == "bm25":
             await mcp_tool_info(

@@ -3,8 +3,8 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "matryca-logseq-llm-wiki"
-version = "1.4.0"
+name = "matryca-logseq"
+version = "1.4.1"
 description = "MCP bridge between AI agents and Logseq OG (pure Markdown outliner)."
 readme = "README.md"
 requires-python = ">=3.12"

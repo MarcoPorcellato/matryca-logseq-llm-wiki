@@ -224,6 +224,7 @@ def _headless_write_outline(
     if root.properties.get("type::") == "entity":
         join_hint = f"{join_hint}\n{routing_hint_for_entity_alias_preflight()}"
     return {
+        "ok": True,
         "uuids": created_ids,
         "routing_hint": join_hint,
         "outline_block_count": outline_block_count(outline),
@@ -295,7 +296,10 @@ async def dispatch_read(
     if target_type == "block_ast":
         block_query = query.strip()
         if not block_query:
-            return "For `target_type=block_ast`, set `query` to `Page Title|block-uuid`."
+            return (
+                "For `target_type=block_ast`, set `query` to `Page Title|block-uuid` "
+                "or `Page Title|[n]` after `xray_page`."
+            )
         return await asyncio.to_thread(read_block_ast_markdown, graph_path, block_query)
 
     if target_type == "structural_hops":
@@ -347,6 +351,8 @@ async def dispatch_search(
                 "items": [],
                 "task_review_markdown": "",
             }
+        if method == "resolve_entity":
+            return graph_missing_dict()
         return graph_missing_text()
 
     if method == "bm25":
@@ -389,6 +395,20 @@ async def dispatch_search(
             )
 
         return await asyncio.to_thread(_unlinked)
+
+    if method == "resolve_entity":
+        candidate = query.strip()
+        if not candidate:
+            return "For `method=resolve_entity`, set `query` to a page title or `alias::` name."
+
+        def _resolve_entity() -> dict[str, object]:
+            from ..graph.generational_cache import cached_build_alias_index
+
+            root = Path(graph_path).expanduser().resolve(strict=False)
+            idx = cached_build_alias_index(root)
+            return idx.resolve(candidate).as_dict()
+
+        return await asyncio.to_thread(_resolve_entity)
 
     j_opts = parse_optional_json_query(query)
     days_raw = j_opts.get("days", query.strip() or 7)

@@ -19,7 +19,13 @@ ReadGraphTarget = Literal[
     "dashboard",
     "xray_page",
 ]
-SearchGraphMethod = Literal["bm25", "regex", "unlinked_mentions", "journal_tasks"]
+SearchGraphMethod = Literal[
+    "bm25",
+    "regex",
+    "unlinked_mentions",
+    "journal_tasks",
+    "resolve_entity",
+]
 MutateGraphAction = Literal["write_outline", "edit_property", "append_journal", "inject_query"]
 RefactorBlocksAction = Literal["split_large", "reparent", "generate_flashcards"]
 RunLinterName = Literal["unify_tags", "block_refs", "full_wiki_scan"]
@@ -143,11 +149,14 @@ def read_xray_page_markdown(graph_path: str, page_name: str) -> str:
 
 def read_block_ast_markdown(graph_path: str, query: str) -> str:
     """Return the on-disk Markdown subtree for one block (page title + ``id::`` UUID)."""
-    parts = [p.strip() for p in query.split("|", 1)]
+    from .alias_state import resolve_pipe_target
+
+    resolved_query = resolve_pipe_target(graph_path, query)
+    parts = [p.strip() for p in resolved_query.split("|", 1)]
     if len(parts) != 2 or not parts[0] or not parts[1]:
         msg = (
-            "For `target_type=block_ast`, set `query` to `Page Title|block-uuid` "
-            "(Logseq page name, pipe, 36-char block UUID from `id::`)."
+            f"Invalid block_ast query format: {query!r}. "
+            "Expected `Page Title|block-uuid` or `Page Title|[n]` (X-Ray alias)."
         )
         raise ValueError(msg)
     page_ref, block_uuid = parts[0], parts[1]

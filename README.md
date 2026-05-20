@@ -3,7 +3,7 @@
 > Agentic Knowledge Management for Logseq OG. An MCP server that turns your favorite AI into a spatial Knowledge Architect. It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-144%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-152%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -56,7 +56,7 @@ Restart the MCP host after edits. Optional: `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`
 
 ## 🧪 Stability Markers
 
-* **144 strict passing tests** (unit, integration, subprocess).
+* **152 strict passing tests** (unit, integration, subprocess).
 * **100% strict MyPy** type checking and **Ruff** compliance on `src/` and `tests/`.
 * The same bar on `main` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — run `make check` locally.
 
@@ -152,7 +152,7 @@ Each phase adds capabilities; later phases **harden** earlier tools without nece
 | **1 — Baseline bridge** | FastMCP server, **`OutlineNode`** validation, DFS **`write_logseq_outline`**, spatial **`read_logseq_page`**, block-ref integrity scan, dashboard aggregation | `read_logseq_page`, `write_logseq_outline`, `lint_logseq_block_refs`, `render_logseq_dashboard` |
 | **2 — L1 / L2 routing** | Capped **`read_l1_memory`** from configurable paths; **routing hints** on read/write responses for traceability (`routing_hint.py`) | `read_l1_memory` *(hints on other tools’ payloads)* |
 | **3 — PKM refinements** | BM25 and substring local query; structural BFS hops and hub/orphan reports; surgical **`key::`** property edits; templates; wiki-prefix lint; namespace index; optional **git snapshot** on outline and heavy mutators | `query_logseq_pages_local`, `traverse_logseq_structural_hops`, `report_structural_hubs_orphans`, `patch_logseq_block_property_lines`, `list_logseq_templates`, `read_logseq_template`, `lint_matryca_wiki_pages`, `list_logseq_namespace_index`, `snapshot_logseq_graph_git` |
-| **4 — Logseq superpowers** | Advanced Query injection with preset or raw EDN; journal task mining; entity resolution via alias index; page alias append | `inject_logseq_advanced_query`, `analyze_journal_tasks`, `append_logseq_journal_markdown`, `resolve_logseq_entity`, `append_logseq_page_alias` |
+| **4 — Logseq superpowers** | Advanced Query injection with preset or raw EDN; journal task mining; entity resolution via alias index; page alias append | `search_graph` / `method=resolve_entity`, `mutate_graph` / `inject_query`, `append_journal` |
 | **5 — Graph gardener** | SRS-style flashcards from `::` pairs; vault-wide tag unify; same-page reparent refactor | `generate_logseq_flashcards`, `lint_unify_logseq_tags`, `refactor_logseq_blocks` |
 | **6 — Synthesis engine** | Unlinked mention discovery; MOC generation; long-bullet split; manual git snapshot | `resolve_unlinked_mentions`, `generate_moc_page`, `refactor_large_blocks`, `snapshot_logseq_graph_git` |
 | **7 — Mldoc guards** | **`mldoc_properties`** (property grammar, CSV / wikilink / quote semantics); **`mldoc_guards`** (drawers, fences, macros) wired into property edit, tag unify, alias append, large-block split | *Same tool names as phases 3–6; strengthened internals* |
@@ -236,7 +236,7 @@ Optional graph orchestration: copy [`matryca-wiki.example.yml`](matryca-wiki.exa
 make check
 ```
 
-Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**144** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**152** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 

@@ -44,7 +44,7 @@ def routing_hint_for_write_outline() -> str:
 
 def routing_hint_for_entity_alias_preflight() -> str:
     """Suggest alias index lookup before creating entity pages (duplicate avoidance)."""
-    return "<!-- matryca_routing: hint=call_resolve_logseq_entity_for_entities -->"
+    return "<!-- matryca_routing: hint=call_search_graph_resolve_entity_for_entities -->"
 
 
 __all__ = [

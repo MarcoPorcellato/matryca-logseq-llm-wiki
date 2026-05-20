@@ -38,7 +38,7 @@ This project exists so AI agents can collaborate on **Logseq OG** graphs the rig
    cp .env.example .env
    ```
 
-   Set **`LOGSEQ_API_TOKEN`**, **`LOGSEQ_API_URL`**, and **`LOGSEQ_GRAPH_PATH`** when you exercise live Logseq or graph-scoped tools.
+   Set **`LOGSEQ_GRAPH_PATH`** to your Logseq graph root (the folder containing `pages/`). Matryca is headless — no Logseq HTTP API or desktop app is required.
 
 6. List all Make targets:
 

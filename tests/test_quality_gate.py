@@ -43,7 +43,7 @@ def test_headless_write_entity_includes_alias_routing_hint(tmp_path: Path) -> No
         "children": [],
     }
     out = _headless_write_outline(str(tmp_path), parent_id, outline)
-    assert "resolve_logseq_entity" in out["routing_hint"]
+    assert "resolve_entity" in out["routing_hint"]
 
 
 def test_headless_write_rejects_outline_with_secret(tmp_path: Path) -> None:
