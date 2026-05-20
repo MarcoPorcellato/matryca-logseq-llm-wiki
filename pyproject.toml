@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "matryca-logseq"
-version = "1.4.1"
+version = "1.4.3"
 description = "MCP bridge between AI agents and Logseq OG (pure Markdown outliner)."
 readme = "README.md"
 requires-python = ">=3.12"
