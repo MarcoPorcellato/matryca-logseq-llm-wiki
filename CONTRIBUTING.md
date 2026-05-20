@@ -68,11 +68,13 @@ That means, in order:
 
 1. **Ruff** — auto-fix and format the tree, then lint clean  
 2. **Mypy** — strict type-check on **`src/`** and **`tests/`**  
-3. **Pytest** — full suite (currently **72** tests)
+3. **Pytest** — full suite (currently **162** tests)
 
 GitHub Actions on pushes and pull requests to **`main`** runs **ruff**, **mypy** on `src/`, and **pytest** (see `.github/workflows/ci.yml`). Locally, always run **`make check`** before you push: it matches maintainer expectations and catches formatting drift CI does not auto-fix.
 
 Never commit secrets (no `.env`, tokens, or private graph paths in git).
+
+**Background service:** `matryca service install` must target a **stable** `matryca-logseq-llm-wiki` binary (for example after `uv tool install matryca-logseq`). Do not install the daemon from ephemeral **`uvx`** — the unit file would reference a cache path that uv may delete. See [README.md](README.md#background-service-matryca-service--persistent-install-only).
 
 ---
 

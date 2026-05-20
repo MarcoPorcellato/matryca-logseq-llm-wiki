@@ -3,7 +3,7 @@
 > Agentic Knowledge Management for Logseq OG. An MCP server that turns your favorite AI into a spatial Knowledge Architect. It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-152%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-162%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -21,7 +21,7 @@ The shift from a **stateful, network-bounded** architecture (Logseq Electron + J
 * 🤖 **100% Headless & Local-First:** does not require the Logseq desktop app to be open. Mutations use atomic file I/O directly on `.md` sources.
 * 🩻 **X-Ray Token Economy (Printing Press Mode):** compresses Markdown trees and maps UUIDs to persistent aliases like `[0]`, `[1]` — up to ~35× less context noise.
 * 🔒 **Sandboxed Privacy:** mathematically blocks path-traversal attempts outside the graph root (`path_sandbox.py`).
-* ⚡ **Agent-Native CLI:** fast, minimal `matryca` command optimized for terminal scripts and local LLMs.
+* ⚡ **Agent-Native CLI:** fast, minimal `matryca` command optimized for terminal scripts and local LLMs (including `matryca service` for LaunchAgent / systemd).
 * 🧱 **Ironclad Data Plane:** transactional swaps, code-block fence scanning, optional Git snapshots before mutations.
 * 📊 **Zero-DB Lexical Engine:** in-memory Okapi BM25 and structural BFS traversals — no vector store.
 
@@ -57,7 +57,7 @@ Restart the MCP host after edits. Optional: `MATRYCA_GIT_SNAPSHOT_ON_WRITE=true`
 
 ## 🧪 Stability Markers
 
-* **152 strict passing tests** (unit, integration, subprocess).
+* **162 strict passing tests** (unit, integration, subprocess).
 * **100% strict MyPy** type checking and **Ruff** compliance on `src/` and `tests/`.
 * The same bar on `main` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — run `make check` locally.
 
@@ -183,6 +183,21 @@ uvx --from git+https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki.git ma
 
 Set **`LOGSEQ_GRAPH_PATH`** to the absolute root of your Logseq graph (the folder containing `pages/`) in your MCP host’s server definition. For **responsible vulnerability disclosure**, see [`SECURITY.md`](SECURITY.md).
 
+### Background service (`matryca service`) — persistent install only
+
+`matryca service install` writes a per-user **LaunchAgent** (macOS) or **systemd user unit** (Linux) that runs `matryca-logseq-llm-wiki` on login. The unit records whatever path `shutil.which("matryca-logseq-llm-wiki")` resolves to at install time.
+
+**Do not run `matryca service install` via ephemeral `uvx`.** `uvx` executes from a temporary uv cache that may be garbage-collected; after reboot, the daemon would fail with `FileNotFound`.
+
+Install Matryca as a **stable tool** first, then install the service (with `LOGSEQ_GRAPH_PATH` and any optional vars exported in your shell):
+
+```bash
+uv tool install matryca-logseq
+matryca service install
+```
+
+Use `matryca service uninstall` to remove the plist or unit. Set `MATRYCA_DEBUG=true` only when debugging MCP log bridging (disables privacy masking in client-visible logs).
+
 ---
 
 ## Safe testing on a copy of your graph
@@ -234,6 +249,7 @@ Copy **`.env.example`** to **`.env`** and set at minimum:
 | `MATRYCA_L1_PATH` | Optional: file or directory of small Markdown “L1” session rules |
 | `MATRYCA_WIKI_CONFIG` | Optional: path to `matryca-wiki.yml` (else `$LOGSEQ_GRAPH_PATH/matryca-wiki.yml`) |
 | `MATRYCA_GIT_SNAPSHOT_ON_WRITE` | `true` or `false` — opt-in automatic **`git add -A` + `git commit`** before selected writes when the graph is a git checkout |
+| `MATRYCA_DEBUG` | `true` — disable privacy masking in MCP client-visible log bridge (default: censored) |
 
 Optional graph orchestration: copy [`matryca-wiki.example.yml`](matryca-wiki.example.yml) to your graph as **`matryca-wiki.yml`** for namespaces, template subdirectory, wiki lint prefix, and dashboard title.
 
@@ -243,7 +259,7 @@ Optional graph orchestration: copy [`matryca-wiki.example.yml`](matryca-wiki.exa
 make check
 ```
 
-Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**152** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Runs Ruff (format + lint), **strict Mypy** on `src/` and `tests/`, and **pytest** (**162** strict passing tests). The same bar is enforced on **`main`** in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 

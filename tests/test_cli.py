@@ -17,14 +17,21 @@ from src.cli import build_parser, main, run_cli
 BLOCK_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
-def test_parser_exposes_five_subcommands() -> None:
+def test_parser_exposes_six_subcommands() -> None:
     parser = build_parser()
     sub_action = next(
         action
         for action in parser._actions
         if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
     )
-    assert sorted(sub_action.choices) == ["lint", "mutate", "read", "refactor", "search"]
+    assert sorted(sub_action.choices) == [
+        "lint",
+        "mutate",
+        "read",
+        "refactor",
+        "search",
+        "service",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -70,6 +77,10 @@ def test_parser_exposes_five_subcommands() -> None:
             },
         ),
         (["lint", "block_refs"], {"command": "lint", "linter_name": "block_refs"}),
+        (
+            ["service", "install"],
+            {"command": "service", "action": "install"},
+        ),
     ],
 )
 def test_parser_routes_subcommands(argv: list[str], expected: dict[str, str]) -> None:

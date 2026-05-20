@@ -16,6 +16,7 @@ from .agent.mcp_telemetry import install_loguru_mcp_bridge
 from .config import load_matryca_wiki_config
 from .graph.markdown_blocks import sweep_dangling_atomic_tmp_files
 from .graph.page_write_lock import clear_page_write_locks
+from .graph.path_sandbox import resolved_graph_root
 
 install_loguru_mcp_bridge()
 
@@ -34,9 +35,11 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     wiki_config = load_matryca_wiki_config()
     graph_path = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
     if graph_path:
-        swept = await asyncio.to_thread(sweep_dangling_atomic_tmp_files, graph_path)
+        resolved_root = resolved_graph_root(graph_path)
+        os.chdir(str(resolved_root))
+        swept = await asyncio.to_thread(sweep_dangling_atomic_tmp_files, str(resolved_root))
         if swept:
-            logger.bind(graph=graph_path, removed=swept).info(
+            logger.bind(graph=str(resolved_root), removed=swept).info(
                 "Swept dangling atomic-write temp files at startup",
             )
     logger.bind(namespaces=len(wiki_config.namespaces)).info(

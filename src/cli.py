@@ -28,6 +28,7 @@ from .agent.graph_tool_helpers import (
     SearchGraphMethod,
 )
 from .config import load_matryca_wiki_config
+from .graph.service_manager import manage_matryca_service
 
 READ_TARGETS: tuple[ReadGraphTarget, ...] = (
     "page",
@@ -63,7 +64,7 @@ LINTER_NAMES: tuple[RunLinterName, ...] = (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the top-level CLI parser and five domain subcommands."""
+    """Construct the top-level CLI parser and six domain subcommands."""
     parser = argparse.ArgumentParser(prog="matryca", description="Agent-native Logseq graph CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -136,6 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Linter to run",
     )
 
+    service_p = sub.add_parser(
+        "service",
+        help="Manage background system daemon integration",
+    )
+    service_p.add_argument(
+        "action",
+        choices=["install", "uninstall"],
+        help="Install or remove the per-user background service unit",
+    )
+
     return parser
 
 
@@ -199,6 +210,13 @@ async def run_cli(args: argparse.Namespace) -> int:
     if command == "lint":
         lint_out: str | dict[str, Any] = await dispatch_lint(wiki_config, args.linter_name)
         _emit_result(lint_out)
+        return 0
+
+    if command == "service":
+        service_out: dict[str, Any] = manage_matryca_service(args.action)
+        _emit_result(service_out)
+        if service_out.get("ok") is False:
+            return 1
         return 0
 
     _emit_error(f"unknown command: {command}")

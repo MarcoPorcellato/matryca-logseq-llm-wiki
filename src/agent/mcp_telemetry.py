@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
+
+_UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+)
+_CONTENT_MARKER_PATTERN = re.compile(
+    r"(?i)(\b(?:payload|content|snippet|query)\s*[:=]\s*)(.+)",
+)
 
 _mcp_ctx: ContextVar[Any | None] = ContextVar("matryca_mcp_context", default=None)
 _sink_id: int | None = None
@@ -39,6 +48,18 @@ async def run_in_thread_with_mcp_context[R](
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
+def _matryca_debug_enabled() -> bool:
+    return os.environ.get("MATRYCA_DEBUG", "").strip().lower() == "true"
+
+
+def sanitize_log_message(text: str) -> str:
+    """Mask UUIDs and sensitive payload markers unless ``MATRYCA_DEBUG=true``."""
+    if _matryca_debug_enabled():
+        return text
+    censored = _UUID_PATTERN.sub("[CENSORED_UUID]", text)
+    return _CONTENT_MARKER_PATTERN.sub(r"\1[REDACTED_CONTENT]", censored)
+
+
 def _log_bridge_task_done(task: asyncio.Task[object]) -> None:
     if task.cancelled():
         return
@@ -55,7 +76,7 @@ def _loguru_mcp_sink(message: Any) -> None:
     ctx = _mcp_ctx.get()
     if ctx is None:
         return
-    text = str(record["message"])
+    text = sanitize_log_message(str(record["message"]))
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -77,4 +98,5 @@ __all__ = [
     "mcp_tool_info",
     "mcp_tool_session",
     "run_in_thread_with_mcp_context",
+    "sanitize_log_message",
 ]

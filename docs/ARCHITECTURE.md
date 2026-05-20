@@ -360,7 +360,26 @@ Mechanics:
 
 **`guard_mcp_tool`** in **`src/agent/mcp_tool_guard.py`** catches domain errors (`ValueError`, `RuntimeError`, …) and returns concise tool failure strings to the agent — the MCP stdio session stays alive instead of surfacing raw stack traces.
 
-**Lifespan teardown:** `src/main.py` **`app_lifespan`** `finally` block calls **`clear_page_write_locks()`**, and the loguru→MCP bridge in **`mcp_telemetry.py`** registers **`add_done_callback`** on fire-and-forget tasks so shutdown-time notification failures do not surface as unhandled exceptions.
+**Lifespan setup (`v1.4.1`):** When **`LOGSEQ_GRAPH_PATH`** is set, **`app_lifespan`** in **`src/main.py`** canonicalizes the graph root with **`resolved_graph_root`**, then **`os.chdir(str(resolved_root))`** so the process working directory stays inside the sandbox (avoids **`EPERM`** / **`uv_cwd`** failures when MCP hosts or daemons start from arbitrary directories). Startup still sweeps dangling atomic-write temps under that root.
+
+**Lifespan teardown:** **`app_lifespan`** `finally` calls **`clear_page_write_locks()`**, and the loguru→MCP bridge in **`mcp_telemetry.py`** registers **`add_done_callback`** on fire-and-forget tasks so shutdown-time notification failures do not surface as unhandled exceptions.
+
+### Privacy-safe MCP telemetry (`v1.4.1`)
+
+**`src/agent/mcp_telemetry.py`** forwards INFO+ loguru records to the active MCP client via **`Context.info`** during tool calls. Unless **`MATRYCA_DEBUG=true`** (case-insensitive), **`sanitize_log_message`** masks standard UUIDs as **`[CENSORED_UUID]`** and redacts values after **`payload:`**, **`content:`**, **`snippet:`**, and **`query:`** markers as **`[REDACTED_CONTENT]`**. With debug enabled, the bridge preserves full text for operator troubleshooting.
+
+### Background service installer (`v1.4.1`)
+
+**`src/graph/service_manager.py`** implements **`manage_matryca_service(install | uninstall)`**:
+
+| Platform | Unit file | Executable |
+|----------|-----------|------------|
+| **macOS** | `~/Library/LaunchAgents/com.matryca.logseq.plist` | `matryca-logseq-llm-wiki` on `PATH` |
+| **Linux** | `~/.config/systemd/user/matryca-logseq.service` | same |
+
+Stdio is appended under **`~/.matryca/logs/`**. Install captures **`LOGSEQ_GRAPH_PATH`** and optional Matryca env vars from the **installing shell**. The CLI exposes this as **`matryca service install|uninstall`** (JSON summary on stdout).
+
+**UX invariant:** The service unit must point at a **stable** binary (for example after **`uv tool install matryca-logseq`** → `~/.local/bin/matryca-logseq-llm-wiki`). **`uvx`** uses an ephemeral cache path; a LaunchAgent or systemd unit written from a **`uvx`** invocation will break after cache eviction or reboot.
 
 ---
 
@@ -395,7 +414,8 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **9 — Trust plane** | **`quality_gate.py`** (outline and Advanced Query EDN secret scans), wiki lint under **`MatrycaWikiConfig`**, **`synthetic_id` / persist-first** rules in **`SYSTEM_PROMPT.md`**, structured dry-run / apply payloads | Prevent **credential leakage into L2**; enforce **policy** and **UUID referential discipline** without a second datastore |
 | **10 — Delivery and community** | **`.github/workflows/ci.yml`** (`uv sync --locked`, Ruff lint + format check, Mypy on `src` + `tests`, Pytest), **`.github/dependabot.yml`** (weekly pip and GitHub Actions bumps), **`.github/workflows/release.yml`** (push tag `v*` → `uv build` → `gh release create`), **`SECURITY.md`**, **`CODE_OF_CONDUCT.md`**, issue and PR templates | **Reproducible quality bar**, **supply-chain hygiene**, **tag-driven artifacts**, and **clear vulnerability and community process** |
 | **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, graceful MCP shutdown |
-| **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint; **144** strict tests | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
+| **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
+| **13 — Operational hardening (`v1.4.1`)** | Lifespan **`os.chdir`** to sandbox root; **`mcp_telemetry` privacy sanitizer** (`MATRYCA_DEBUG`); **`service_manager.py`** + CLI **`matryca service`**; **162** strict tests | **Daemon-safe cwd**, **production-safe MCP logs**, **LaunchAgent / systemd** background integration |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
@@ -450,7 +470,10 @@ flowchart TB
 
 | Path | Role |
 |------|------|
-| `src/main.py` | FastMCP app, lifespan, `register_mcp_tools` |
+| `src/main.py` | FastMCP app, lifespan (`chdir` to graph root), `register_mcp_tools` |
+| `src/cli.py` | Agent-native CLI (`read`, `search`, `mutate`, `refactor`, `lint`, `service`) |
+| `src/agent/mcp_telemetry.py` | Loguru→MCP bridge with optional privacy sanitization |
+| `src/graph/service_manager.py` | LaunchAgent / systemd user-unit install and uninstall |
 | `src/agent/mcp_server.py` | All `@mcp.tool()` handlers, `OutlineNode`, `MatrycaMCPServer` |
 | `src/agent/graph_dispatch.py` | Headless CRUD dispatch: `_headless_write_outline`, mega-tool routing |
 | `src/agent/alias_state.py` | X-Ray `SessionAliasRegistry` load/save at `.matryca_xray_state.json` |

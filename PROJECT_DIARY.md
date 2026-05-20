@@ -45,7 +45,7 @@ In earlier versions, Matryca depended on the Logseq desktop app’s local HTTP J
 
 * **Dependencies stripped to the bone:** API tokens are no longer required. The only required variable is `LOGSEQ_GRAPH_PATH`.
 * **Absolute resilience:** the MCP server and CLI run on machines without an active Logseq GUI, eliminating network latency and network-related crashes.
-* **Hardened test suite:** **144 passing tests** under strict MyPy and Ruff.
+* **Hardened test suite:** **162 passing tests** under strict MyPy and Ruff.
 
 ### Status
 
