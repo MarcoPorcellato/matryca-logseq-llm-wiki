@@ -30,6 +30,7 @@ from ..agent.graph_tool_helpers import (
 from ..agent.maintenance_daemon import (
     resolve_graph_root,
     run_plumber_audit,
+    run_plumber_cluster,
     start_daemon_detached,
     start_daemon_foreground,
     stop_daemon,
@@ -172,6 +173,10 @@ def build_parser() -> argparse.ArgumentParser:
         "audit",
         help="Run bootstrap harvest and graph insights diagnostic dashboard",
     )
+    plumber_sub.add_parser(
+        "cluster",
+        help="Compute or audit deterministic semantic cluster neighborhoods",
+    )
 
     return parser
 
@@ -266,6 +271,10 @@ async def run_cli(args: argparse.Namespace) -> int:
             audit_out = run_plumber_audit(graph_root)
             _emit_result(audit_out)
             return 0 if audit_out.get("ok") is not False else 1
+        if plumber_action == "cluster":
+            cluster_out = run_plumber_cluster(graph_root)
+            _emit_result(cluster_out)
+            return 0 if cluster_out.get("ok") is not False else 1
         _emit_error(f"unknown plumber action: {plumber_action}")
         return 2
 

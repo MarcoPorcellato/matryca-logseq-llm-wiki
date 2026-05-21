@@ -205,6 +205,9 @@ def harvest_page_into_catalog(
         page_path=page_path,
         graph_root=graph_root,
     )
+    reset_history = getattr(llm, "reset_execution_history", None)
+    if reset_history is not None:
+        reset_history()
     if not domain and summary_result.domain:
         domain = _normalize_domain(summary_result.domain)
 

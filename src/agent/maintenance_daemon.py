@@ -47,6 +47,10 @@ from ..graph.page_write_lock import (
     page_rmw_lock,
     sweep_matryca_lock_sidecars,
 )
+from ..graph.semantic_clustering import (
+    format_cluster_neighborhood,
+    load_or_compute_semantic_clusters,
+)
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -796,6 +800,26 @@ class InstructorLLMClient:
         """Drop per-page session history (constant memory footprint across daemon uptime)."""
         self._execution_history.clear()
 
+    def inject_cluster_focus_context(self, neighborhood_text: str) -> None:
+        """Seed Ermes rolling history with an isolated semantic cluster boundary."""
+        self.reset_execution_history()
+        focus_prompt = (
+            "[CLUSTER FOCUS: NEIGHBORHOOD MAP]\n"
+            "Below are the summaries of all nodes in this isolated semantic cluster:\n\n"
+            f"{neighborhood_text}"
+        )
+        self._execution_history.append({"role": "user", "content": focus_prompt})
+        self._execution_history.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "Acknowledged. I will process pages within this semantic neighborhood, "
+                    "prioritizing dense cross-links and alias consolidation among these "
+                    "related nodes."
+                ),
+            },
+        )
+
     def _trim_execution_history(self) -> None:
         if len(self._execution_history) > MAX_EXECUTION_HISTORY_MESSAGES:
             self._execution_history = self._execution_history[-MAX_EXECUTION_HISTORY_MESSAGES:]
@@ -804,6 +828,27 @@ class InstructorLLMClient:
         self._execution_history.append({"role": "user", "content": prompt})
         self._execution_history.append({"role": "assistant", "content": response})
         self._trim_execution_history()
+
+    def _completion_messages(
+        self,
+        *,
+        system_prompt: str,
+        prompt: str,
+        stateless: bool,
+    ) -> list[ChatMessage]:
+        """Build chat messages for one completion (Ermes history only when stateful)."""
+        config = load_plumber_lint_config()
+        use_history = config.context_compression and not stateless
+        if not use_history:
+            self.reset_execution_history()
+            return [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+        messages: list[ChatMessage] = [{"role": "system", "content": system_prompt}]
+        messages.extend(self._execution_history)
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
     def _compress_history_via_llm(self, compression_prompt: str) -> str:
         """Send isolated history to LM Studio for epistemic condensation."""
@@ -824,20 +869,19 @@ class InstructorLLMClient:
         prompt: str,
         response_model: type[T],
         system_prompt: str,
+        stateless: bool = False,
     ) -> tuple[T, object]:
         """Call LM Studio with JSON schema mode, falling back when parsing fails."""
         self.refresh_config()
         config = load_plumber_lint_config()
-        if not config.context_compression:
-            self.reset_execution_history()
-            messages: list[ChatMessage] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ]
-        else:
-            messages = [{"role": "system", "content": system_prompt}]
-            messages.extend(self._execution_history)
-            messages.append({"role": "user", "content": prompt})
+        messages = self._completion_messages(
+            system_prompt=system_prompt,
+            prompt=prompt,
+            stateless=stateless,
+        )
+        use_history = config.context_compression and not stateless
+        compression_event = None
+        if use_history:
             messages, compression_event = condense_messages(
                 messages,
                 trigger=config.compression_trigger,
@@ -869,8 +913,10 @@ class InstructorLLMClient:
                     messages=messages,
                     response_model=response_model,
                 )
-                if config.context_compression:
+                if use_history:
                     self._append_execution_turn(prompt, parsed.model_dump_json())
+                if stateless:
+                    self.reset_execution_history()
                 return parsed, completion
             except Exception as exc:  # noqa: BLE001 - try next instructor mode
                 errors.append(f"{mode.name}: {exc}")
@@ -1084,6 +1130,7 @@ class InstructorLLMClient:
                 "You are Matryca Plumber's bootstrap harvester. Return JSON only. "
                 "Write one crisp English sentence summarizing the page."
             ),
+            stateless=True,
         )
         _ = (page_path, graph_root)
         return result
@@ -1386,6 +1433,167 @@ class MaintenanceDaemon:
         catalog.upsert(title, extracted)
         catalog.save()
 
+    def _use_semantic_cluster_cycle(self, lint_config: PlumberLintConfig) -> bool:
+        """Phase 2 cluster isolation when cognitive routing modules are active."""
+        return self.bootstrap_complete and (
+            lint_config.semantic_routing or lint_config.backpropagate_links
+        )
+
+    def _group_pending_by_cluster(self, pending: list[Path]) -> list[tuple[str, list[Path]]]:
+        """Order pending files into semantic cluster execution blocks."""
+        clusters = load_or_compute_semantic_clusters(self.graph_root)
+        title_to_cluster: dict[str, str] = {}
+        for cluster_id, titles in clusters.items():
+            for title in titles:
+                title_to_cluster[title] = cluster_id
+
+        by_cluster: dict[str, list[Path]] = {}
+        unclustered: list[Path] = []
+        for path in pending:
+            title = _page_title_from_path(self.graph_root, path)
+            mapped_cluster = title_to_cluster.get(title)
+            if mapped_cluster is None:
+                unclustered.append(path)
+                continue
+            by_cluster.setdefault(mapped_cluster, []).append(path)
+
+        groups: list[tuple[str, list[Path]]] = [
+            (cluster_id, by_cluster[cluster_id]) for cluster_id in sorted(by_cluster)
+        ]
+        if unclustered:
+            groups.append(("unclustered", unclustered))
+        return groups
+
+    def _begin_cluster_context(self, cluster_id: str, cluster_paths: list[Path]) -> None:
+        """Hard-reset LLM history and inject neighborhood map for one cluster."""
+        if not isinstance(self.llm_client, InstructorLLMClient):
+            return
+        catalog = load_master_catalog(self.graph_root)
+        clusters = load_or_compute_semantic_clusters(self.graph_root)
+        cluster_titles = clusters.get(cluster_id)
+        if cluster_titles is None:
+            cluster_titles = [
+                _page_title_from_path(self.graph_root, path) for path in cluster_paths
+            ]
+        neighborhood = format_cluster_neighborhood(catalog.to_json(), cluster_titles)
+        self.llm_client.inject_cluster_focus_context(neighborhood)
+
+    def _process_cycle_file(
+        self,
+        path: Path,
+        state: DaemonState,
+        lint_config: PlumberLintConfig,
+        *,
+        reset_history_after: bool,
+    ) -> None:
+        """Index one pending page and checkpoint daemon state."""
+        key = str(path.resolve())
+        mtime = path.stat().st_mtime
+        title = _page_title_from_path(self.graph_root, path)
+        state.last_file = key
+        content = ""
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            protected_lines = compute_page_protected_line_indices(content)
+            malformed_refs = find_malformed_block_refs(
+                content,
+                protected_lines=protected_lines,
+            )
+            if malformed_refs:
+                self._quarantine_structural_lint(
+                    path=path,
+                    key=key,
+                    mtime=mtime,
+                    message=(
+                        "Malformed UUID detected in block ref. Must be standard 36-char format."
+                    ),
+                    malformed_refs=malformed_refs,
+                    state=state,
+                )
+                return
+            if SEMANTIC_INDEX_HEADER in content:
+                state.files[key] = FileState(
+                    mtime=mtime,
+                    processed_at=datetime.now(tz=UTC).isoformat(),
+                    status="skipped",
+                )
+                return
+            if not content.strip():
+                state.files[key] = FileState(
+                    mtime=mtime,
+                    processed_at=datetime.now(tz=UTC).isoformat(),
+                    status="skipped",
+                )
+                return
+            if self.bootstrap_complete and lint_config.any_enabled:
+                run_cognitive_lint_pipeline(
+                    self.graph_root,
+                    path,
+                    title,
+                    content,
+                    llm=self.llm_client,
+                    config=lint_config,
+                )
+                content = path.read_text(encoding="utf-8", errors="replace")
+            alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
+            enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
+            enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
+            result, _usage = self.llm_client.index_page(
+                title,
+                content,
+                page_path=path,
+                graph_root=self.graph_root,
+                alias_index=alias_index,
+                enable_semantic_routing=enable_semantic_routing,
+            )
+            apply_semantic_page_result(
+                self.graph_root,
+                path,
+                title,
+                result,
+                backpropagate=enable_backprop,
+                alias_index=alias_index,
+            )
+            state.files[key] = FileState(
+                mtime=path.stat().st_mtime,
+                processed_at=datetime.now(tz=UTC).isoformat(),
+                status="processed",
+            )
+            self._sync_catalog_after_page_write(path, title)
+        except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
+            if is_malformed_block_ref_error(exc):
+                protected_lines = compute_page_protected_line_indices(content)
+                malformed_refs = find_malformed_block_refs(
+                    content,
+                    protected_lines=protected_lines,
+                )
+                self._quarantine_structural_lint(
+                    path=path,
+                    key=key,
+                    mtime=mtime,
+                    message=str(exc),
+                    malformed_refs=malformed_refs or [],
+                    state=state,
+                )
+            else:
+                state.files[key] = FileState(
+                    mtime=mtime,
+                    processed_at=datetime.now(tz=UTC).isoformat(),
+                    status="error",
+                    error=str(exc),
+                )
+        finally:
+            if reset_history_after and isinstance(self.llm_client, InstructorLLMClient):
+                self.llm_client.reset_execution_history()
+            try:
+                save_daemon_state(self.graph_root, state)
+            except Exception as save_exc:  # noqa: BLE001 - log and continue cycle
+                self.token_logger.log_structural_lint_warning(
+                    target_file=path,
+                    message=f"Checkpoint save failed after {key}: {save_exc}",
+                    malformed_refs=[],
+                )
+
     def _quarantine_structural_lint(
         self,
         *,
@@ -1434,117 +1642,30 @@ class MaintenanceDaemon:
             save_daemon_state(self.graph_root, state)
             return state
 
-        for path in pending:
+        lint_config = self._effective_lint_config()
+        cluster_cycle = self._use_semantic_cluster_cycle(lint_config)
+        pending_groups: list[tuple[str, list[Path]]]
+        if cluster_cycle:
+            pending_groups = self._group_pending_by_cluster(pending)
+        else:
+            pending_groups = [("flat", pending)]
+
+        for cluster_id, cluster_paths in pending_groups:
             if self._stop_requested:
                 state.status = "stopped"
                 break
-            key = str(path.resolve())
-            mtime = path.stat().st_mtime
-            title = _page_title_from_path(self.graph_root, path)
-            state.last_file = key
-            content = ""
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-                protected_lines = compute_page_protected_line_indices(content)
-                malformed_refs = find_malformed_block_refs(
-                    content,
-                    protected_lines=protected_lines,
-                )
-                if malformed_refs:
-                    self._quarantine_structural_lint(
-                        path=path,
-                        key=key,
-                        mtime=mtime,
-                        message=(
-                            "Malformed UUID detected in block ref. Must be standard 36-char format."
-                        ),
-                        malformed_refs=malformed_refs,
-                        state=state,
-                    )
-                    continue
-                if SEMANTIC_INDEX_HEADER in content:
-                    state.files[key] = FileState(
-                        mtime=mtime,
-                        processed_at=datetime.now(tz=UTC).isoformat(),
-                        status="skipped",
-                    )
-                    continue
-                if not content.strip():
-                    state.files[key] = FileState(
-                        mtime=mtime,
-                        processed_at=datetime.now(tz=UTC).isoformat(),
-                        status="skipped",
-                    )
-                    continue
-                lint_config = self._effective_lint_config()
-                if self.bootstrap_complete and lint_config.any_enabled:
-                    run_cognitive_lint_pipeline(
-                        self.graph_root,
-                        path,
-                        title,
-                        content,
-                        llm=self.llm_client,
-                        config=lint_config,
-                    )
-                    content = path.read_text(encoding="utf-8", errors="replace")
-                alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
-                enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
-                enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
-                result, _usage = self.llm_client.index_page(
-                    title,
-                    content,
-                    page_path=path,
-                    graph_root=self.graph_root,
-                    alias_index=alias_index,
-                    enable_semantic_routing=enable_semantic_routing,
-                )
-                apply_semantic_page_result(
-                    self.graph_root,
+            if cluster_cycle:
+                self._begin_cluster_context(cluster_id, cluster_paths)
+            for path in cluster_paths:
+                if self._stop_requested:
+                    state.status = "stopped"
+                    break
+                self._process_cycle_file(
                     path,
-                    title,
-                    result,
-                    backpropagate=enable_backprop,
-                    alias_index=alias_index,
+                    state,
+                    lint_config,
+                    reset_history_after=not cluster_cycle,
                 )
-                state.files[key] = FileState(
-                    mtime=path.stat().st_mtime,
-                    processed_at=datetime.now(tz=UTC).isoformat(),
-                    status="processed",
-                )
-                self._sync_catalog_after_page_write(path, title)
-            except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
-                if is_malformed_block_ref_error(exc):
-                    protected_lines = compute_page_protected_line_indices(content)
-                    malformed_refs = find_malformed_block_refs(
-                        content,
-                        protected_lines=protected_lines,
-                    )
-                    self._quarantine_structural_lint(
-                        path=path,
-                        key=key,
-                        mtime=mtime,
-                        message=str(exc),
-                        malformed_refs=malformed_refs or [],
-                        state=state,
-                    )
-                else:
-                    state.files[key] = FileState(
-                        mtime=mtime,
-                        processed_at=datetime.now(tz=UTC).isoformat(),
-                        status="error",
-                        error=str(exc),
-                    )
-            finally:
-                if isinstance(self.llm_client, InstructorLLMClient):
-                    self.llm_client.reset_execution_history()
-                try:
-                    save_daemon_state(self.graph_root, state)
-                except Exception as save_exc:  # noqa: BLE001 - log and continue cycle
-                    self.token_logger.log_structural_lint_warning(
-                        target_file=path,
-                        message=f"Checkpoint save failed after {key}: {save_exc}",
-                        malformed_refs=[],
-                    )
 
         self._prune_stale_catalog_entries()
         state.session_prompt_tokens = self.token_logger.session_prompt_tokens
@@ -1576,6 +1697,37 @@ class MaintenanceDaemon:
             state.status = "stopped"
             save_daemon_state(self.graph_root, state)
             remove_pid_file(self.graph_root)
+
+
+def run_plumber_cluster(
+    graph_root: Path | None = None,
+    *,
+    max_cluster_size: int = 35,
+    force_recompute: bool = False,
+) -> dict[str, Any]:
+    """Manual entrypoint: compute or audit semantic cluster neighborhoods."""
+    root = graph_root or resolve_graph_root()
+    catalog = load_master_catalog(root, force_reload=True)
+    clusters = load_or_compute_semantic_clusters(
+        root,
+        catalog_data=catalog.to_json(),
+        max_cluster_size=max_cluster_size,
+        force_recompute=force_recompute,
+    )
+    sizes = [len(titles) for titles in clusters.values()]
+    return {
+        "ok": True,
+        "graph_root": str(root),
+        "cluster_count": len(clusters),
+        "page_count": sum(sizes),
+        "min_cluster_size": min(sizes) if sizes else 0,
+        "max_cluster_size": max(sizes) if sizes else 0,
+        "avg_cluster_size": round(sum(sizes) / len(sizes), 2) if sizes else 0.0,
+        "clusters_path": str(
+            (root / ".matryca_semantic_cache" / "semantic_clusters.json").relative_to(root),
+        ),
+        "catalog_updated_at": catalog.updated_at,
+    }
 
 
 def run_plumber_audit(graph_root: Path | None = None) -> dict[str, Any]:

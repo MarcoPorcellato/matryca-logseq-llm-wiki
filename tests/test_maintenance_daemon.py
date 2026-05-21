@@ -31,6 +31,7 @@ from src.agent.maintenance_daemon import (
     stop_daemon,
     write_pid_file,
 )
+from src.agent.plumber_config import PlumberLintConfig
 from src.agent.plumber_llm import BootstrapSummaryResult, GraphInsightsLLMResult
 from src.cli import build_parser
 from src.cli.tui_dashboard import MONITOR_TITLE, collect_snapshot
@@ -463,6 +464,8 @@ def test_parser_exposes_plumber_subcommands() -> None:
     assert args_stop.plumber_action == "stop"
     args_audit = parser.parse_args(["plumber", "audit"])
     assert args_audit.plumber_action == "audit"
+    args_cluster = parser.parse_args(["plumber", "cluster"])
+    assert args_cluster.plumber_action == "cluster"
 
 
 def test_semantic_correction_applies_wikilink(graph_root: Path) -> None:
@@ -614,6 +617,58 @@ def test_instructor_client_reset_execution_history() -> None:
     assert len(client._execution_history) == 2
     client.reset_execution_history()
     assert client._execution_history == []
+
+
+def test_bootstrap_harvest_uses_stateless_messages_when_compression_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 1 must not send rolling Ermes history even if context compression is on."""
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1")
+    client._append_execution_turn("stale-user", '{"stale": true}')
+    client._append_execution_turn("stale-user-2", '{"stale": 2}')
+    config = PlumberLintConfig(context_compression=True)
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.load_plumber_lint_config",
+        lambda: config,
+    )
+
+    messages = client._completion_messages(
+        system_prompt="system",
+        prompt="current page",
+        stateless=True,
+    )
+    assert messages == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "current page"},
+    ]
+    assert client._execution_history == []
+
+
+def test_harvest_page_summary_passes_stateless_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1")
+    captured: dict[str, bool] = {}
+
+    def fake_completion(
+        self: InstructorLLMClient,
+        *,
+        prompt: str,
+        response_model: type[object],
+        system_prompt: str,
+        stateless: bool = False,
+    ) -> tuple[BootstrapSummaryResult, object]:
+        _ = (self, prompt, response_model, system_prompt)
+        captured["stateless"] = stateless
+        return BootstrapSummaryResult(summary="ok"), object()
+
+    monkeypatch.setattr(
+        InstructorLLMClient,
+        "_completion_with_structured_output",
+        fake_completion,
+    )
+    client.harvest_page_summary("Page", "body")
+    assert captured["stateless"] is True
 
 
 def test_maintenance_daemon_resets_instructor_history_after_cycle(
