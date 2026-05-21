@@ -22,7 +22,13 @@ from ..graph.generational_cache import patch_generational_caches_for_paths
 from ..graph.markdown_blocks import atomic_write_bytes, locate_block_by_uuid
 from ..graph.page_write_lock import page_rmw_lock
 from ..utils.token_logger import OperationType, TokenLogger
-from .brain_config import load_brain_lint_config
+from .brain_config import (
+    DEFAULT_LM_BASE_URL,
+    DEFAULT_LM_MODEL,
+    load_brain_lint_config,
+    resolve_lm_base_url,
+    resolve_lm_model,
+)
 from .brain_llm import (
     ContextualSeedResult,
     EntityOverlapResult,
@@ -47,8 +53,7 @@ from .context_compressor import (
 STATE_FILENAME = ".matryca_daemon_state.json"
 PID_FILENAME = ".matryca_brain_daemon.pid"
 SEMANTIC_INDEX_HEADER = "### Matryca Semantic Index"
-DEFAULT_LM_BASE_URL = "http://localhost:1234/v1"
-DEFAULT_MODEL = "qwen2.5-coder-7b"
+DEFAULT_MODEL = DEFAULT_LM_MODEL  # backward-compatible alias for CLI/TUI
 DEFAULT_POLL_SECONDS = 30.0
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
@@ -124,7 +129,7 @@ class DaemonState:
     version: int = 1
     files: dict[str, FileState] = field(default_factory=dict)
     status: DaemonStatus = "idle"
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_LM_MODEL
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
     last_scan_at: str | None = None
@@ -168,7 +173,7 @@ class DaemonState:
             version=int(payload.get("version", 1)),
             files=files,
             status=str(payload.get("status", "idle")),  # type: ignore[arg-type]
-            model=str(payload.get("model", DEFAULT_MODEL)),
+            model=str(payload.get("model", DEFAULT_LM_MODEL)),
             session_prompt_tokens=int(payload.get("session_prompt_tokens", 0)),
             session_completion_tokens=int(payload.get("session_completion_tokens", 0)),
             last_scan_at=payload.get("last_scan_at"),
@@ -193,17 +198,23 @@ def pid_path(graph_root: Path) -> Path:
     return graph_root / PID_FILENAME
 
 
+def sync_daemon_state_from_env(state: DaemonState) -> DaemonState:
+    """Ensure persisted daemon state reflects the current ``MATRYCA_LM_MODEL`` env value."""
+    state.model = resolve_lm_model()
+    return state
+
+
 def load_daemon_state(graph_root: Path) -> DaemonState:
     path = state_path(graph_root)
     if not path.is_file():
-        return DaemonState()
+        return sync_daemon_state_from_env(DaemonState())
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return DaemonState()
+        return sync_daemon_state_from_env(DaemonState())
     if not isinstance(payload, dict):
-        return DaemonState()
-    return DaemonState.from_json(payload)
+        return sync_daemon_state_from_env(DaemonState())
+    return sync_daemon_state_from_env(DaemonState.from_json(payload))
 
 
 def save_daemon_state(graph_root: Path, state: DaemonState) -> None:
@@ -535,14 +546,26 @@ class InstructorLLMClient:
         model: str | None = None,
         token_logger: TokenLogger | None = None,
     ) -> None:
-        env_base = os.environ.get("MATRYCA_LM_BASE_URL", DEFAULT_LM_BASE_URL)
-        self.base_url = (base_url or env_base).rstrip("/")
-        if not self.base_url.endswith("/v1"):
-            self.base_url = f"{self.base_url.rstrip('/')}/v1"
-        self.model = model or os.environ.get("MATRYCA_LM_MODEL", DEFAULT_MODEL)
         self.token_logger = token_logger or TokenLogger()
-        self._raw_client = OpenAI(base_url=self.base_url, api_key="lm-studio")
+        self._explicit_model = model
+        self._explicit_base_url = base_url
+        self.base_url = resolve_lm_base_url(override=base_url)
+        self.model = resolve_lm_model(override=model)
+        self._raw_client: OpenAI = OpenAI(base_url=self.base_url, api_key="lm-studio")
         self._execution_history: list[ChatMessage] = []
+
+    def refresh_config(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """Reload LM Studio settings from env (explicit ctor overrides win over env)."""
+        resolved_model = model if model is not None else self._explicit_model
+        resolved_base = base_url if base_url is not None else self._explicit_base_url
+        self.base_url = resolve_lm_base_url(override=resolved_base)
+        self.model = resolve_lm_model(override=resolved_model)
+        self._raw_client = OpenAI(base_url=self.base_url, api_key="lm-studio")
 
     def reset_execution_history(self) -> None:
         """Drop per-page session history (constant memory footprint across daemon uptime)."""
@@ -578,6 +601,7 @@ class InstructorLLMClient:
         system_prompt: str,
     ) -> tuple[T, object]:
         """Call LM Studio with JSON schema mode, falling back when parsing fails."""
+        self.refresh_config()
         config = load_brain_lint_config()
         if not config.context_compression:
             self.reset_execution_history()
@@ -891,12 +915,18 @@ class MaintenanceDaemon:
         self.max_files_per_cycle = max_files_per_cycle
         self._stop_requested = False
 
+    def _sync_runtime_config(self, state: DaemonState) -> DaemonState:
+        """Align LLM client and persisted state with the active environment block."""
+        if isinstance(self.llm_client, InstructorLLMClient):
+            self.llm_client.refresh_config()
+        return sync_daemon_state_from_env(state)
+
     def request_stop(self) -> None:
         self._stop_requested = True
 
     def run_cycle(self, state: DaemonState | None = None) -> DaemonState:
         """Process up to ``max_files_per_cycle`` pending files."""
-        state = state or load_daemon_state(self.graph_root)
+        state = self._sync_runtime_config(state or load_daemon_state(self.graph_root))
         prune_stale_daemon_file_entries(state, self.graph_root)
         state.status = "running"
         state.last_scan_at = datetime.now(tz=UTC).isoformat()
@@ -981,7 +1011,7 @@ class MaintenanceDaemon:
     def run_forever(self) -> None:
         """Infinite polling loop until stop is requested."""
         write_pid_file(self.graph_root)
-        state = load_daemon_state(self.graph_root)
+        state = self._sync_runtime_config(load_daemon_state(self.graph_root))
         state.status = "running"
         save_daemon_state(self.graph_root, state)
 
@@ -1007,6 +1037,9 @@ class MaintenanceDaemon:
 
 def start_daemon_foreground(graph_root: Path | None = None) -> None:
     """Run the daemon in the current process (foreground)."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
     root = graph_root or resolve_graph_root()
     daemon = MaintenanceDaemon(root)
     daemon.run_forever()
@@ -1036,6 +1069,9 @@ def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
     sys.stdin = open(os.devnull)  # noqa: SIM115
     sys.stdout = open(os.devnull, "w")  # noqa: SIM115
     sys.stderr = open(os.devnull, "w")  # noqa: SIM115
+    from dotenv import load_dotenv
+
+    load_dotenv()
     os.environ["LOGSEQ_GRAPH_PATH"] = str(root)
     start_daemon_foreground(root)
     os._exit(0)
@@ -1066,4 +1102,5 @@ __all__ = [
     "start_daemon_detached",
     "start_daemon_foreground",
     "stop_daemon",
+    "sync_daemon_state_from_env",
 ]

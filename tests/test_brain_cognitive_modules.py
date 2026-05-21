@@ -106,7 +106,6 @@ def test_load_brain_lint_config_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     cfg = load_brain_lint_config()
     assert cfg.heal_dangling is False
     assert cfg.marpa_framework is False
-    assert cfg.marpa_strict_bipartite is True
     assert cfg.dangling_max_words == 50
     assert cfg.any_enabled is False
 
@@ -203,30 +202,12 @@ def test_marpa_framework_classifies_project_with_deadline(graph_root: Path) -> N
         "Progetti___Lancio",
         body,
         llm=StubBrainLLM(),
-        strict_bipartite=True,
     )
     text = path.read_text(encoding="utf-8")
     assert "type:: progetto" in text
     assert "deadline:: 2026-06-01" in text
     assert "### Matryca MARPA Validation" in text
     assert outcome.pages_modified == ["Progetti___Lancio"]
-
-
-def test_marpa_bipartite_validation_flags_direct_links(graph_root: Path) -> None:
-    body = "- [[Alpha Concept]] connects to [[Beta Concept]] without structure\n"
-    path = _write_page(graph_root, "Linked", body)
-    outcome = run_marpa_framework(
-        graph_root,
-        path,
-        "Linked",
-        body,
-        llm=StubBrainLLM(),
-        strict_bipartite=True,
-    )
-    text = path.read_text(encoding="utf-8")
-    assert "bipartite-violations::" in text
-    assert "direct_entity_link:Alpha Concept<->Beta Concept" in text
-    assert any("bipartite=" in detail for detail in outcome.details)
 
 
 def test_marpa_disabled_by_default_leaves_file_untouched(graph_root: Path) -> None:
@@ -253,7 +234,6 @@ def test_marpa_validation_section_is_replaced_on_rerun(graph_root: Path) -> None
         "Rerun",
         body,
         llm=StubBrainLLM(),
-        strict_bipartite=True,
     )
     first = path.read_text(encoding="utf-8")
     assert first.count("### Matryca MARPA Validation") == 1
@@ -266,7 +246,6 @@ def test_marpa_validation_section_is_replaced_on_rerun(graph_root: Path) -> None
         "Rerun",
         edited,
         llm=StubBrainLLM(),
-        strict_bipartite=True,
     )
     second = path.read_text(encoding="utf-8")
     assert second.count("### Matryca MARPA Validation") == 1

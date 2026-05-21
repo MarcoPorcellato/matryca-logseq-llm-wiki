@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +14,7 @@ from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
+from ..agent.brain_config import resolve_lm_model
 from ..agent.maintenance_daemon import (
     DEFAULT_MODEL,
     compute_scan_metrics,
@@ -88,7 +88,7 @@ def collect_snapshot(
 
     return DashboardSnapshot(
         status=status,
-        model=state.model or os.environ.get("MATRYCA_LM_MODEL", DEFAULT_MODEL),
+        model=state.model or resolve_lm_model(),
         total_pages=metrics.total,
         processed_pages=metrics.processed,
         pending_backlog=metrics.pending,

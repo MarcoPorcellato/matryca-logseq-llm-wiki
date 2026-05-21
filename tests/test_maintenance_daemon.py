@@ -121,7 +121,8 @@ def test_token_logger_writes_jsonl_and_counts_session(tmp_path: Path) -> None:
     assert "Concept Indexing" in summaries[0]
 
 
-def test_daemon_state_roundtrip(graph_root: Path) -> None:
+def test_daemon_state_roundtrip(graph_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "qwen-test")
     state = DaemonState(
         files={
             "/tmp/demo.md": FileState(
@@ -476,3 +477,35 @@ def test_maintenance_daemon_resets_instructor_history_after_cycle(
     daemon = MaintenanceDaemon(graph_root, llm_client=client, max_files_per_cycle=1)
     daemon.run_cycle()
     assert client._execution_history == []
+
+
+def test_load_daemon_state_overrides_stale_cached_model(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
+    stale = DaemonState(model="qwen2.5-coder-7b")
+    save_daemon_state(graph_root, stale)
+    loaded = load_daemon_state(graph_root)
+    assert loaded.model == "gemma-4-e4b-it"
+
+
+def test_instructor_client_refresh_config_uses_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1")
+    assert client.model == "gemma-4-e4b-it"
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "qwen3-8b")
+    client.refresh_config()
+    assert client.model == "qwen3-8b"
+
+
+def test_instructor_client_explicit_model_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1", model="override-model")
+    assert client.model == "override-model"
+    client.refresh_config()
+    assert client.model == "override-model"

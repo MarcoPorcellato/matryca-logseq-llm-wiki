@@ -44,7 +44,6 @@ def run_cognitive_lint_pipeline(
             page_title,
             content,
             llm=llm,
-            strict_bipartite=config.marpa_strict_bipartite,
         )
         outcome.modules_run.append("marpa_framework")
         outcome.pages_modified.extend(sub.pages_modified)

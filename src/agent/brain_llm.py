@@ -11,13 +11,12 @@ MarpaDomain = Literal["mappa", "area", "risorsa", "progetto", "archivio"]
 
 
 class MarpaClassificationResult(BaseModel):
-    """LLM classification payload for the MARPA bipartite framework."""
+    """LLM classification payload for the MARPA taxonomy framework."""
 
     assigned_domain: MarpaDomain = Field(description="MARPA domain assignment")
     detected_tags: list[str] = Field(default_factory=list)
     inferred_properties: dict[str, str] = Field(default_factory=dict)
     violates_ssot_duplication: bool = Field(default=False)
-    bipartite_violations: list[str] = Field(default_factory=list)
 
 
 class ContextualSeedResult(BaseModel):

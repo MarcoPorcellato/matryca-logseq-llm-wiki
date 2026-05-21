@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_LM_BASE_URL = "http://localhost:1234/v1"
+DEFAULT_LM_MODEL = "qwen2.5-coder-7b"
+
 
 def _env_bool(key: str, default: bool = False) -> bool:
     raw = os.environ.get(key, "").strip().lower()
@@ -34,12 +37,44 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_str(key: str, default: str) -> str:
+    """Return env value when non-empty; never override explicit env with default."""
+    raw = os.environ.get(key, "").strip()
+    if raw:
+        return raw
+    return default
+
+
+def resolve_lm_model(*, override: str | None = None) -> str:
+    """Resolve the active LM Studio model id from env or explicit override."""
+    if override is not None and override.strip():
+        return override.strip()
+    return _env_str("MATRYCA_LM_MODEL", DEFAULT_LM_MODEL)
+
+
+def resolve_lm_base_url(*, override: str | None = None) -> str:
+    """Resolve LM Studio OpenAI-compatible base URL (always ends with ``/v1``)."""
+    raw = (
+        override.strip()
+        if override is not None and override.strip()
+        else _env_str(
+            "MATRYCA_LM_BASE_URL",
+            DEFAULT_LM_BASE_URL,
+        )
+    )
+    base = raw.rstrip("/")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return base
+
+
 @dataclass(frozen=True, slots=True)
 class BrainLintConfig:
     """Feature flags and thresholds for advanced Brain lint modules."""
 
+    lm_model: str = DEFAULT_LM_MODEL
+    lm_base_url: str = DEFAULT_LM_BASE_URL
     marpa_framework: bool = False
-    marpa_strict_bipartite: bool = True
     heal_dangling: bool = False
     dangling_max_words: int = 50
     entity_consolidation: bool = False
@@ -80,8 +115,9 @@ def load_brain_lint_config() -> BrainLintConfig:
                 rules_path = candidate
 
     return BrainLintConfig(
+        lm_model=resolve_lm_model(),
+        lm_base_url=resolve_lm_base_url(),
         marpa_framework=_env_bool("MATRYCA_LINT_MARPA_FRAMEWORK"),
-        marpa_strict_bipartite=_env_bool("MATRYCA_LINT_MARPA_STRICT_BIPARTITE", True),
         heal_dangling=_env_bool("MATRYCA_LINT_HEAL_DANGLING"),
         dangling_max_words=_env_int("MATRYCA_LINT_DANGLING_MAX_WORDS", 50),
         entity_consolidation=_env_bool("MATRYCA_LINT_ENTITY_CONSOLIDATION"),
@@ -99,4 +135,11 @@ def load_brain_lint_config() -> BrainLintConfig:
     )
 
 
-__all__ = ["BrainLintConfig", "load_brain_lint_config"]
+__all__ = [
+    "BrainLintConfig",
+    "DEFAULT_LM_BASE_URL",
+    "DEFAULT_LM_MODEL",
+    "load_brain_lint_config",
+    "resolve_lm_base_url",
+    "resolve_lm_model",
+]

@@ -172,9 +172,20 @@ def test_token_logger_writes_compression_warning(tmp_path: Path) -> None:
 
 def test_load_brain_config_compression_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MATRYCA_BRAIN_CONTEXT_COMPRESSION", raising=False)
-    from src.agent.brain_config import load_brain_lint_config
+    monkeypatch.delenv("MATRYCA_LM_MODEL", raising=False)
+    from src.agent.brain_config import DEFAULT_LM_MODEL, load_brain_lint_config
 
     cfg = load_brain_lint_config()
     assert cfg.context_compression is False
     assert cfg.compression_trigger == 100_000
     assert cfg.compression_target == 30_000
+    assert cfg.lm_model == DEFAULT_LM_MODEL
+
+
+def test_resolve_lm_model_respects_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.agent.brain_config import DEFAULT_LM_MODEL, resolve_lm_model
+
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
+    assert resolve_lm_model() == "gemma-4-e4b-it"
+    monkeypatch.delenv("MATRYCA_LM_MODEL", raising=False)
+    assert resolve_lm_model() == DEFAULT_LM_MODEL
