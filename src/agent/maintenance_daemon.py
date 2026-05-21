@@ -37,6 +37,10 @@ from .brain_llm import (
 )
 from .brain_modules import run_cognitive_lint_pipeline
 from .brain_modules.backlink_backpropagator import BacklinkCorrection, run_backlink_backpropagator
+from .brain_modules.marpa_framework import (
+    build_marpa_classify_system_prompt,
+    build_marpa_classify_user_prompt,
+)
 from .brain_modules.semantic_cache_router import (
     cache_get,
     cache_put,
@@ -49,6 +53,7 @@ from .context_compressor import (
     condense_messages,
     extract_persisted_history,
 )
+from .prompt_constraints import finalize_system_prompt
 
 STATE_FILENAME = ".matryca_daemon_state.json"
 PID_FILENAME = ".matryca_brain_daemon.pid"
@@ -324,15 +329,15 @@ def _enumerate_blocks_for_prompt(content: str) -> str:
 
 
 def _build_semantic_lint_system_prompt() -> str:
-    return (
+    return finalize_system_prompt(
         "You are Matryca Brain, a semantic linter and indexer for Logseq OG outliner pages. "
-        "Behave like Andrej Karpathy's nanochat compiler: analyze block-by-block, propose only "
-        "safe, additive micro-corrections, never rewrite whole files. "
+        "Behave like a strict compiler: analyze block-by-block, propose only safe additive "
+        "micro-corrections, never rewrite whole files. "
         "Rules for semantic_corrections: "
         "(1) block_uuid must match an id:: line from the page; "
         "(2) original_text must copy the bullet-line text verbatim "
         "(exclude id:: / property lines); "
-        "(3) corrected_text must contain original_text unchanged "
+        "(3) corrected_text must preserve original_text unchanged "
         "and only add [[WikiLinks]] or #tags; "
         "(4) never delete, shorten, or paraphrase user prose; "
         "(5) if unsure, omit the correction. "
@@ -346,9 +351,13 @@ def _build_semantic_lint_system_prompt() -> str:
 def _build_index_prompt(page_title: str, content: str) -> str:
     block_catalog = _enumerate_blocks_for_prompt(content)
     return (
-        "Analyze this Logseq outliner page. Extract semantic connections AND propose safe "
-        "per-block lint corrections.\n"
-        "Return structured JSON only.\n\n"
+        "Task: semantic indexing and safe per-block lint for one Logseq OG outliner page.\n"
+        "Output: structured JSON only.\n"
+        "Steps:\n"
+        "1. Read the page title, block catalog, and full content below.\n"
+        "2. Extract summary, cross_references, suggested_tags, and moc_pointers.\n"
+        "3. Propose semantic_corrections only when every system-prompt "
+        "safety rule is satisfied.\n\n"
         f"Page title: {page_title}\n\n"
         f"Blocks available for semantic_corrections:\n{block_catalog}\n\n"
         f"Full page content:\n{content[:8000]}"
@@ -661,14 +670,16 @@ class InstructorLLMClient:
         max_words: int,
     ) -> ContextualSeedResult:
         prompt = (
-            f"Create a contextual seed definition for dangling wikilink [[{link_title}]] "
-            f"born on page [[{source_page}]]. Max {max_words} words.\n\n"
+            "Task: write a contextual seed definition for a dangling wikilink.\n"
+            f"Target link: [[{link_title}]]\n"
+            f"Source page: [[{source_page}]]\n"
+            f"Max length: {max_words} words.\n\n"
             f"Surrounding blocks:\n{context}"
         )
         result, _ = self._completion_with_structured_output(
             prompt=prompt,
             response_model=ContextualSeedResult,
-            system_prompt=(
+            system_prompt=finalize_system_prompt(
                 "You seed new Logseq pages from local context. Return JSON only. "
                 "Write a neutral, concise definition without markdown headings."
             ),
@@ -683,15 +694,17 @@ class InstructorLLMClient:
         context: str,
     ) -> EntityOverlapResult:
         prompt = (
-            f"Do these two page titles refer to the same concept?\n"
-            f"A: {title_a}\nB: {title_b}\n\nPage context:\n{context[:3000]}"
+            "Task: decide whether two page titles refer to the same concept.\n"
+            f"Title A: {title_a}\n"
+            f"Title B: {title_b}\n\n"
+            f"Page context:\n{context[:3000]}"
         )
         result, _ = self._completion_with_structured_output(
             prompt=prompt,
             response_model=EntityOverlapResult,
-            system_prompt=(
-                "You are an entity consolidation linter. Prefer one canonical title and "
-                "register the other as alias. Never suggest merging file contents."
+            system_prompt=finalize_system_prompt(
+                "You are an entity consolidation linter for Logseq. Prefer one canonical title "
+                "and register the other as alias. Never suggest merging file contents."
             ),
         )
         return result
@@ -706,13 +719,16 @@ class InstructorLLMClient:
     ) -> InferredPropertiesResult:
         keys = ", ".join(required_keys)
         prompt = (
-            f"Page [[{page_title}]] is tagged #{tag}. Infer values for: {keys}.\n\n"
+            "Task: infer Logseq block property values from page context.\n"
+            f"Page: [[{page_title}]]\n"
+            f"Tag: #{tag}\n"
+            f"Required property keys: {keys}\n\n"
             f"Content:\n{content[:5000]}"
         )
         result, _ = self._completion_with_structured_output(
             prompt=prompt,
             response_model=InferredPropertiesResult,
-            system_prompt=(
+            system_prompt=finalize_system_prompt(
                 "Infer Logseq block properties from context. Use empty string when unknown. "
                 "Return JSON with a properties object."
             ),
@@ -728,16 +744,10 @@ class InstructorLLMClient:
         page_path: Path | None = None,
         graph_root: Path | None = None,
     ) -> MarpaClassificationResult:
-        prompt = (
-            "Classify this Logseq page into exactly one MARPA domain:\n"
-            "- mappa: strategic vision, V2MOM, high-level OKRs\n"
-            "- area: continuous operational responsibilities without hard deadlines\n"
-            "- risorsa: timeless intellectual capital, specs, reusable assets\n"
-            "- progetto: time-bounded tactical work with deadlines and deliverables\n"
-            "- archivio: completed/cancelled nodes removed from active focus\n\n"
-            f"Page title: {page_title}\n"
-            f"Namespace hint: {namespace_hint or '(none)'}\n\n"
-            f"Content:\n{content[:7000]}"
+        prompt = build_marpa_classify_user_prompt(
+            page_title,
+            content,
+            namespace_hint=namespace_hint,
         )
         config = load_brain_lint_config()
         if config.semantic_routing and page_path is not None and graph_root is not None:
@@ -749,10 +759,7 @@ class InstructorLLMClient:
         result, _ = self._completion_with_structured_output(
             prompt=prompt,
             response_model=MarpaClassificationResult,
-            system_prompt=(
-                "You are the MARPA semantic compiler for Logseq. Return JSON only. "
-                "Populate inferred_properties for missing structural fields (deadline, status)."
-            ),
+            system_prompt=build_marpa_classify_system_prompt(),
         )
         if config.semantic_routing and page_path is not None and graph_root is not None:
             key = semantic_cache_key(page_path, "marpa_classify")

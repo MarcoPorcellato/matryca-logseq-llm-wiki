@@ -10,9 +10,54 @@ from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import atomic_write_bytes
 from ...graph.page_write_lock import page_rmw_lock
 from ..brain_llm import MarpaClassificationResult
+from ..prompt_constraints import finalize_system_prompt
 from ._shared import ModuleOutcome
 
 MarpaDomain = Literal["mappa", "area", "risorsa", "progetto", "archivio"]
+
+MARPA_DOMAIN_DEFINITIONS = (
+    "- mappa: Strategic vision layer — long-horizon direction, V2MOM, north-star metrics, "
+    "and portfolio OKRs. Excludes day-to-day operational execution.\n"
+    "- area: Continuous operational domain — ongoing responsibilities, standards, and rhythms "
+    "without a fixed end date or hard deliverable deadline.\n"
+    "- risorsa: Timeless intellectual capital — durable reference material, specifications, "
+    "frameworks, and reusable assets not tied to a single initiative.\n"
+    "- progetto: Time-bounded initiative — tactical work with explicit deadlines, milestones, "
+    "and deliverables requiring completion or cancellation.\n"
+    "- archivio: Closed or dormant node — completed, cancelled, or superseded material removed "
+    "from active planning surfaces."
+)
+
+_MARPA_CLASSIFY_SYSTEM_INSTRUCTIONS = (
+    "You are the MARPA semantic taxonomy compiler for Logseq OG. Return JSON only. "
+    "Assign exactly one domain from the user-provided catalog. "
+    "Populate inferred_properties for missing structural fields (deadline, status, owner). "
+    "Use standardized Logseq property keys; leave values empty when unknown."
+)
+
+
+def build_marpa_classify_system_prompt() -> str:
+    """System prompt for MARPA domain classification (English instructions, multilingual output)."""
+    return finalize_system_prompt(_MARPA_CLASSIFY_SYSTEM_INSTRUCTIONS)
+
+
+def build_marpa_classify_user_prompt(
+    page_title: str,
+    content: str,
+    *,
+    namespace_hint: str | None,
+    max_content_chars: int = 7000,
+) -> str:
+    """User prompt for MARPA domain classification."""
+    hint = namespace_hint or "(none)"
+    return (
+        "Classify the page below into exactly one MARPA domain using these definitions:\n"
+        f"{MARPA_DOMAIN_DEFINITIONS}\n\n"
+        f"Page title: {page_title}\n"
+        f"Namespace hint: {hint}\n\n"
+        f"Page content:\n{content[:max_content_chars]}"
+    )
+
 
 _TYPE_LINE = re.compile(r"^\s*type::\s*(\S+)\s*$", re.IGNORECASE)
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
@@ -195,6 +240,9 @@ def run_marpa_framework(
 
 __all__ = [
     "MarpaDomain",
+    "MARPA_DOMAIN_DEFINITIONS",
+    "build_marpa_classify_system_prompt",
+    "build_marpa_classify_user_prompt",
     "detect_marpa_namespace",
     "run_marpa_framework",
 ]

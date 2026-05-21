@@ -10,6 +10,8 @@ from typing import Literal, TypedDict
 
 from loguru import logger
 
+from .prompt_constraints import finalize_system_prompt
+
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]")
 _MESSAGE_OVERHEAD_TOKENS = 4
 _PRESERVE_TAIL_TURNS = 2
@@ -17,13 +19,15 @@ _PRESERVE_TAIL_TURNS = 2
 TOKEN_ESTIMATE_SAFETY_MULTIPLIER = 1.12
 MAX_EXECUTION_HISTORY_MESSAGES = 48
 
-COMPRESSION_SYSTEM_PROMPT = (
+_COMPRESSION_SYSTEM_INSTRUCTIONS = (
     "You are Matryca Brain Context Compressor. Condense maintenance-session history "
-    "into a dense markdown summary titled 'Consolidated Epistemic State'. Preserve: "
-    "page titles processed, MARPA domains assigned, lint corrections applied, entity "
-    "merges, dangling links healed, block UUIDs referenced, errors/skips, and open tasks. "
+    "into dense markdown titled '## Consolidated Epistemic State'. Preserve: page titles "
+    "processed, MARPA domains assigned, lint corrections applied, entity merges, dangling "
+    "links healed, block UUIDs referenced, errors/skips, and open tasks. "
     "Use bullet lists and short headings. Omit filler. Output markdown only."
 )
+
+COMPRESSION_SYSTEM_PROMPT = finalize_system_prompt(_COMPRESSION_SYSTEM_INSTRUCTIONS)
 
 
 class ChatMessage(TypedDict):
@@ -78,8 +82,9 @@ def serialize_history_for_compression(messages: list[ChatMessage]) -> str:
 def build_compression_user_prompt(history_text: str, *, target_tokens: int) -> str:
     """Build the user payload for the compression call."""
     return (
-        "Compress the following Matryca Brain maintenance history into a dense markdown "
-        f"summary under `# Consolidated Epistemic State`. Target <= {target_tokens} tokens.\n\n"
+        "Compress the Matryca Brain maintenance history below into dense markdown under "
+        f"`## Consolidated Epistemic State`. Target <= {target_tokens} estimated tokens. "
+        "Preserve factual details; do not invent events.\n\n"
         f"{history_text}"
     )
 
