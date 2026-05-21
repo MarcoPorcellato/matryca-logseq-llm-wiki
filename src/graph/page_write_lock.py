@@ -6,9 +6,11 @@ import os
 import sys
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 _fcntl: Any
 try:
@@ -51,11 +53,20 @@ def _cross_process_file_lock(page_path: str | Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        _fcntl.flock(fd, _fcntl.LOCK_EX)
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX)
+        except OSError:
+            logger.info(
+                "[LOCK FILE SYSTEM DEGRADATION] Shared process lock not supported by "
+                "filesystem, falling back to pure in-process thread locking."
+            )
+            yield
+            return
         try:
             yield
         finally:
-            _fcntl.flock(fd, _fcntl.LOCK_UN)
+            with suppress(OSError):
+                _fcntl.flock(fd, _fcntl.LOCK_UN)
     finally:
         os.close(fd)
 
@@ -79,6 +90,21 @@ def clear_page_write_locks() -> None:
         _page_locks.clear()
 
 
+def sweep_matryca_lock_sidecars(graph_root: str | Path) -> int:
+    """Remove orphan ``.{page}.matryca.lock`` sidecars under ``pages/`` and ``journals/``."""
+    root = Path(graph_root).expanduser().resolve(strict=False)
+    removed = 0
+    for sub in ("pages", "journals"):
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for candidate in base.rglob("*.matryca.lock"):
+            if candidate.is_file():
+                candidate.unlink(missing_ok=True)
+                removed += 1
+    return removed
+
+
 def cross_process_lock_available() -> bool:
     """Return whether OS-level ``flock`` locking is active on this platform."""
     return _fcntl is not None and sys.platform != "win32"
@@ -89,4 +115,5 @@ __all__ = [
     "cross_process_lock_available",
     "normalize_page_lock_key",
     "page_rmw_lock",
+    "sweep_matryca_lock_sidecars",
 ]

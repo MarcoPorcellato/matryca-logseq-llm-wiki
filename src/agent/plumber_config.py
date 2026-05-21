@@ -103,6 +103,11 @@ class PlumberLintConfig:
         )
 
 
+def bootstrap_phase_lint_config() -> PlumberLintConfig:
+    """Return a lint config with every generative/mutative module disabled (Phase 1)."""
+    return PlumberLintConfig()
+
+
 def load_plumber_lint_config() -> PlumberLintConfig:
     """Load Plumber lint settings from environment variables."""
     rules_raw = os.environ.get("MATRYCA_LINT_PROPERTY_RULES", "").strip()
@@ -139,6 +144,7 @@ __all__ = [
     "DEFAULT_LM_BASE_URL",
     "DEFAULT_LM_MODEL",
     "PlumberLintConfig",
+    "bootstrap_phase_lint_config",
     "load_plumber_lint_config",
     "resolve_lm_base_url",
     "resolve_lm_model",

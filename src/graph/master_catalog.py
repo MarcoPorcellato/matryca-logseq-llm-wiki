@@ -10,12 +10,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from .alias_index import iter_alias_source_paths, page_title_from_path
 from .markdown_blocks import atomic_write_bytes
 
 CATALOG_FILENAME = "master_catalog.json"
 CATALOG_VERSION = 1
 SEMANTIC_INDEX_HEADER = "### Matryca Semantic Index"
+MASTER_INDEX_PAGE_TITLE = "Matryca Master Index"
+MATRYCA_GENERATED_INDEX_TITLES = frozenset(
+    {MASTER_INDEX_PAGE_TITLE, "Matryca Graph Insights"},
+)
 
 _SUMMARY_LINE = re.compile(r"^\s*-\s*summary::\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _TAGS_LINE = re.compile(r"^\s*-\s*suggested-tags::\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
@@ -66,16 +72,19 @@ class MasterCatalog:
     version: int = CATALOG_VERSION
     updated_at: str | None = None
     pages: dict[str, CatalogEntry] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     @staticmethod
     def catalog_path(graph_root: Path) -> Path:
         return graph_root / ".matryca_semantic_cache" / CATALOG_FILENAME
 
     def to_json(self) -> dict[str, Any]:
+        with self._lock:
+            pages_payload = {title: entry.to_json() for title, entry in sorted(self.pages.items())}
         return {
             "version": self.version,
             "updated_at": self.updated_at,
-            "pages": {title: entry.to_json() for title, entry in sorted(self.pages.items())},
+            "pages": pages_payload,
         }
 
     @classmethod
@@ -95,10 +104,16 @@ class MasterCatalog:
 
     def save(self) -> None:
         """Persist catalog atomically under the graph root."""
-        self.updated_at = datetime.now(tz=UTC).isoformat()
+        with self._lock:
+            self.updated_at = datetime.now(tz=UTC).isoformat()
+            payload = {
+                "version": self.version,
+                "updated_at": self.updated_at,
+                "pages": {title: entry.to_json() for title, entry in sorted(self.pages.items())},
+            }
         path = self.catalog_path(self.graph_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(self.to_json(), indent=2, ensure_ascii=False) + "\n"
+        data = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         atomic_write_bytes(
             path,
             data.encode("utf-8"),
@@ -107,20 +122,24 @@ class MasterCatalog:
         )
 
     def upsert(self, page_title: str, entry: CatalogEntry) -> None:
-        self.pages[page_title] = entry
+        with self._lock:
+            self.pages[page_title] = entry
 
     def get(self, page_title: str) -> CatalogEntry | None:
-        return self.pages.get(page_title)
+        with self._lock:
+            return self.pages.get(page_title)
 
     def remove(self, page_title: str) -> None:
-        self.pages.pop(page_title, None)
+        with self._lock:
+            self.pages.pop(page_title, None)
 
     def needs_refresh(self, page_title: str, mtime_ns: int) -> bool:
         """Return True when the on-disk page is newer than the catalog row."""
-        entry = self.pages.get(page_title)
-        if entry is None:
-            return True
-        return int(mtime_ns // 1_000_000_000) != entry.last_mtime
+        with self._lock:
+            entry = self.pages.get(page_title)
+            if entry is None:
+                return True
+            return int(mtime_ns // 1_000_000_000) != entry.last_mtime
 
     def prune_missing_pages(self) -> int:
         """Drop catalog rows for deleted markdown files."""
@@ -128,10 +147,11 @@ class MasterCatalog:
             page_title_from_path(self.graph_root, path)
             for path in iter_alias_source_paths(self.graph_root)
         }
-        stale = [title for title in self.pages if title not in live_titles]
-        for title in stale:
-            del self.pages[title]
-        return len(stale)
+        with self._lock:
+            stale = [title for title in self.pages if title not in live_titles]
+            for title in stale:
+                del self.pages[title]
+            return len(stale)
 
 
 def load_master_catalog(graph_root: Path, *, force_reload: bool = False) -> MasterCatalog:
@@ -147,8 +167,14 @@ def load_master_catalog(graph_root: Path, *, force_reload: bool = False) -> Mast
             catalog = MasterCatalog(graph_root=root)
         else:
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                catalog = MasterCatalog(graph_root=root)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(
+                    "[METADATA CORRUPTION DETECTED] File state was malformed, "
+                    "self-healing by initializing a fresh instance."
+                )
                 catalog = MasterCatalog(graph_root=root)
             else:
                 if isinstance(payload, dict):
@@ -249,7 +275,7 @@ def build_master_index_markdown(catalog: MasterCatalog) -> str:
     domain_order = ["mappa", "area", "risorsa", "progetto", "archivio", ""]
     grouped: dict[str, list[tuple[str, CatalogEntry]]] = {d: [] for d in domain_order}
     for title, entry in catalog.pages.items():
-        if title in {"Matryca Master Index", "Matryca Graph Insights"}:
+        if title in MATRYCA_GENERATED_INDEX_TITLES:
             continue
         domain = entry.domain if entry.domain in _MARPA_DOMAINS else ""
         grouped[domain].append((title, entry))
@@ -290,6 +316,40 @@ def build_master_index_markdown(catalog: MasterCatalog) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def master_index_page_path(graph_root: Path) -> Path:
+    """Return the on-disk path for the compiled master index page."""
+    return graph_root / "pages" / f"{MASTER_INDEX_PAGE_TITLE}.md"
+
+
+def is_bootstrap_catalog_complete(graph_root: Path) -> bool:
+    """Return True when every scannable page has a catalog summary and the master index exists."""
+    root = graph_root.expanduser().resolve(strict=False)
+    if not master_index_page_path(root).is_file():
+        return False
+
+    catalog = load_master_catalog(root)
+    if not catalog.pages:
+        return False
+
+    for path in iter_alias_source_paths(root):
+        title = page_title_from_path(root, path)
+        if title in MATRYCA_GENERATED_INDEX_TITLES:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return False
+        if not content.strip():
+            continue
+        entry = catalog.get(title)
+        if entry is None or not entry.summary.strip():
+            return False
+        if catalog.needs_refresh(title, mtime_ns):
+            return False
+    return True
+
+
 def write_master_index_page(graph_root: Path, catalog: MasterCatalog) -> Path:
     """Write the compiled master index page under ``pages/``."""
     from .path_sandbox import graph_safe_page_path
@@ -304,13 +364,17 @@ def write_master_index_page(graph_root: Path, catalog: MasterCatalog) -> Path:
 __all__ = [
     "CATALOG_FILENAME",
     "CatalogEntry",
+    "MASTER_INDEX_PAGE_TITLE",
+    "MATRYCA_GENERATED_INDEX_TITLES",
     "MasterCatalog",
     "SEMANTIC_INDEX_HEADER",
     "build_master_index_markdown",
     "clear_master_catalog_cache",
     "entry_from_page_path",
     "extract_catalog_fields_from_content",
+    "is_bootstrap_catalog_complete",
     "list_stale_page_paths",
     "load_master_catalog",
+    "master_index_page_path",
     "write_master_index_page",
 ]

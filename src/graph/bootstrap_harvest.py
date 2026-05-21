@@ -13,12 +13,14 @@ from .alias_index import iter_alias_source_paths, page_title_from_path
 from .generational_cache import patch_generational_caches_for_paths
 from .markdown_blocks import atomic_write_bytes
 from .master_catalog import (
+    MASTER_INDEX_PAGE_TITLE,
     SEMANTIC_INDEX_HEADER,
     CatalogEntry,
     MasterCatalog,
     extract_catalog_fields_from_content,
     list_stale_page_paths,
     load_master_catalog,
+    master_index_page_path,
     write_master_index_page,
 )
 from .page_write_lock import page_rmw_lock
@@ -38,7 +40,23 @@ class HarvestMetrics:
     errors: int = 0
     pruned: int = 0
     index_rebuilt: bool = False
+    files_created: int = 0
     error_messages: list[str] = field(default_factory=list)
+
+
+def _snapshot_page_titles(graph_root: Path) -> set[str]:
+    return {page_title_from_path(graph_root, path) for path in iter_alias_source_paths(graph_root)}
+
+
+def _count_new_concept_pages(
+    *,
+    before: set[str],
+    after: set[str],
+) -> int:
+    """Count newly created markdown pages, excluding the compiled master index."""
+    created = after - before
+    created.discard(MASTER_INDEX_PAGE_TITLE)
+    return len(created)
 
 
 def _normalize_domain(raw: str) -> str:
@@ -208,12 +226,14 @@ def run_bootstrap_harvest(
     llm: HarvestLLM | None = None,
     incremental: bool = False,
     rebuild_index: bool = True,
+    phase1_strict: bool = False,
 ) -> HarvestMetrics:
     """Scan the graph, populate the master catalog, and compile the master index."""
     root = graph_root.expanduser().resolve(strict=False)
     catalog = load_master_catalog(root, force_reload=True)
     metrics = HarvestMetrics()
     incoming = _compute_incoming_backlinks(root)
+    titles_before = _snapshot_page_titles(root) if phase1_strict else set()
 
     paths = (
         list_stale_page_paths(root, catalog)
@@ -257,8 +277,15 @@ def run_bootstrap_harvest(
             metrics.index_rebuilt = True
             patch_generational_caches_for_paths(
                 root,
-                [root / "pages" / "Matryca Master Index.md"],
+                [master_index_page_path(root)],
             )
+
+    if phase1_strict:
+        titles_after = _snapshot_page_titles(root)
+        metrics.files_created = _count_new_concept_pages(
+            before=titles_before,
+            after=titles_after,
+        )
 
     return metrics
 

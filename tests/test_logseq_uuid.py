@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from src.graph.global_fence_scanner import compute_page_protected_line_indices
 from src.graph.logseq_uuid import (
     assert_valid_block_refs_in_markdown,
     find_malformed_block_refs,
@@ -31,6 +32,36 @@ def test_is_logseq_block_uuid_rejects_v1() -> None:
 def test_find_malformed_block_refs_short_uuid() -> None:
     bad = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"  # 35 hex chars in last group
     assert find_malformed_block_refs(f"- link (({bad}))") == [bad]
+
+
+def test_find_malformed_block_refs_ignores_double_parens_in_code_fence() -> None:
+    md = "\n".join(
+        [
+            "- visible note",
+            "```python",
+            "if ((x > 0)):",
+            "    pass",
+            "```",
+        ],
+    )
+    protected = compute_page_protected_line_indices(md)
+    assert find_malformed_block_refs(md, protected_lines=protected) == []
+
+
+def test_assert_valid_block_refs_allows_code_fence_double_parens(tmp_path: Path) -> None:
+    md = "\n".join(
+        [
+            "- ok",
+            "```",
+            "if ((x > 0)):",
+            "```",
+        ],
+    )
+    assert_valid_block_refs_in_markdown(md)
+    path = tmp_path / "pages" / "code.md"
+    path.parent.mkdir(parents=True)
+    atomic_write_bytes(path, (md + "\n").encode(), graph_root=tmp_path)
+    assert path.read_text(encoding="utf-8") == md + "\n"
 
 
 def test_assert_valid_block_refs_raises_on_typo() -> None:

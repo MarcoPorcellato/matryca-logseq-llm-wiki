@@ -25,7 +25,9 @@ from src.graph.master_catalog import (
     build_master_index_markdown,
     clear_master_catalog_cache,
     extract_catalog_fields_from_content,
+    is_bootstrap_catalog_complete,
     load_master_catalog,
+    master_index_page_path,
 )
 from src.graph.page_write_lock import clear_page_write_locks
 
@@ -127,6 +129,15 @@ def test_extract_catalog_fields_from_semantic_index() -> None:
     assert extracted.domain == "progetto"
 
 
+def test_load_master_catalog_self_heals_corrupt_json(graph_root: Path) -> None:
+    clear_master_catalog_cache(graph_root)
+    path = MasterCatalog.catalog_path(graph_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not-json", encoding="utf-8")
+    catalog = load_master_catalog(graph_root, force_reload=True)
+    assert catalog.pages == {}
+
+
 def test_load_and_save_master_catalog(graph_root: Path) -> None:
     catalog = load_master_catalog(graph_root)
     catalog.upsert(
@@ -179,23 +190,44 @@ def test_build_master_index_groups_by_domain_with_collapsed(graph_root: Path) ->
 
 def test_bootstrap_harvest_regex_path_without_llm(graph_root: Path) -> None:
     _write_page(graph_root, "Indexed", _indexed_body(summary="Already indexed."))
-    metrics = run_bootstrap_harvest(graph_root, llm=None, incremental=False)
+    metrics = run_bootstrap_harvest(
+        graph_root,
+        llm=None,
+        incremental=False,
+        phase1_strict=True,
+    )
     assert metrics.regex_harvested == 1
     assert metrics.llm_harvested == 0
     assert metrics.index_rebuilt is True
+    assert metrics.files_created == 0
 
     catalog = load_master_catalog(graph_root, force_reload=True)
     assert catalog.pages["Indexed"].summary == "Already indexed."
 
-    master_index = graph_root / "pages" / "Matryca Master Index.md"
+    master_index = master_index_page_path(graph_root)
     assert master_index.is_file()
     assert "[[Indexed]]" in master_index.read_text(encoding="utf-8")
 
 
+def test_is_bootstrap_catalog_complete_requires_master_index_and_rows(
+    graph_root: Path,
+) -> None:
+    assert is_bootstrap_catalog_complete(graph_root) is False
+    _write_page(graph_root, "Ready", _indexed_body(summary="Ready summary."))
+    run_bootstrap_harvest(graph_root, llm=None, incremental=False, phase1_strict=True)
+    assert is_bootstrap_catalog_complete(graph_root) is True
+
+
 def test_bootstrap_harvest_llm_path_writes_index_and_catalog(graph_root: Path) -> None:
     _write_page(graph_root, "Needs Index", "- type:: risorsa\n- Body content\n")
-    metrics = run_bootstrap_harvest(graph_root, llm=StubHarvestLLM(), incremental=False)
+    metrics = run_bootstrap_harvest(
+        graph_root,
+        llm=StubHarvestLLM(),
+        incremental=False,
+        phase1_strict=True,
+    )
     assert metrics.llm_harvested == 1
+    assert metrics.files_created == 0
 
     page_path = graph_root / "pages" / "Needs Index.md"
     text = page_path.read_text(encoding="utf-8")

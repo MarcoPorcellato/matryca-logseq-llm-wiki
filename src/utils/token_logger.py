@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -186,10 +187,11 @@ class TokenLogger:
                 os.fsync(handle.fileno())
 
     def log_compression_warning(self, message: str, *, model: str = "") -> None:
-        """Persist a ``[COMPRESSION WARN]`` fallback record to the ops log."""
-        warn_text = (
-            message if message.startswith("[COMPRESSION WARN]") else f"[COMPRESSION WARN] {message}"
-        )
+        """Persist a compression fallback record to the ops log."""
+        if message.startswith(("[COMPRESSION WARN]", "[COMPRESSION LLM FAULT]")):
+            warn_text = message
+        else:
+            warn_text = f"[COMPRESSION WARN] {message}"
         entry = {
             "timestamp": datetime.now(tz=UTC).isoformat(),
             "operation": "Context Compression",
@@ -201,6 +203,27 @@ class TokenLogger:
         with _write_guard:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+    def log_daemon_shutdown(self, signum: int) -> None:
+        """Persist a critical ``[DAEMON SHUTDOWN RECEIVED]`` record to the ops log."""
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = str(signum)
+        entry = {
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "operation": "Daemon Lifecycle",
+            "message": "[DAEMON SHUTDOWN RECEIVED] Executing safe evacuation...",
+            "signal": sig_name,
+            "critical": True,
+        }
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        with _write_guard:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8", errors="replace") as handle:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())

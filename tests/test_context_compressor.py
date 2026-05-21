@@ -10,6 +10,7 @@ from src.agent.context_compressor import (
     TOKEN_ESTIMATE_SAFETY_MULTIPLIER,
     ChatMessage,
     condense_messages,
+    drop_oldest_messages_fraction,
     estimate_messages_tokens,
     estimate_tokens,
     extract_persisted_history,
@@ -162,12 +163,49 @@ def test_truncate_messages_to_budget_preserves_system_and_current_user() -> None
     assert len(truncated) < len(messages)
 
 
+def test_drop_oldest_messages_fraction_removes_twenty_percent() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u0"},
+        {"role": "assistant", "content": "a0"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "current"},
+    ]
+    trimmed = drop_oldest_messages_fraction(messages, fraction=0.20)
+    assert trimmed[0]["role"] == "system"
+    assert trimmed[-1]["content"] == "current"
+    assert len(trimmed) < len(messages)
+
+
+def test_condense_messages_logs_compression_llm_fault(tmp_path: Path) -> None:
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "System prompt."},
+        *_build_history(10),
+        {"role": "user", "content": "Latest user prompt."},
+    ]
+    logger = TokenLogger(log_path=tmp_path / "ops.log")
+    condense_messages(
+        messages,
+        trigger=100,
+        target=30_000,
+        compress_fn=lambda _prompt: (_ for _ in ()).throw(ConnectionError("VRAM exhausted")),
+        warn_fn=lambda msg: logger.log_compression_warning(msg, model="qwen2.5-coder-7b"),
+    )
+    payload = json.loads((tmp_path / "ops.log").read_text(encoding="utf-8").strip())
+    assert "[COMPRESSION LLM FAULT]" in payload["message"]
+
+
 def test_token_logger_writes_compression_warning(tmp_path: Path) -> None:
     logger = TokenLogger(log_path=tmp_path / "ops.log")
-    logger.log_compression_warning("[COMPRESSION WARN] timeout", model="qwen2.5-coder-7b")
+    logger.log_compression_warning("[COMPRESSION LLM FAULT] timeout", model="qwen2.5-coder-7b")
     payload = json.loads((tmp_path / "ops.log").read_text(encoding="utf-8").strip())
     assert payload["fallback"] is True
-    assert "[COMPRESSION WARN]" in payload["message"]
+    assert "[COMPRESSION LLM FAULT]" in payload["message"]
 
 
 def test_load_plumber_config_compression_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,6 @@ from .alias_index import (
     build_alias_index,
     index_aliases_from_file,
     iter_alias_source_paths,
-    page_title_from_path,
     remove_page_from_alias_index,
 )
 
@@ -130,14 +129,20 @@ def patch_generational_caches_for_paths(
             for rel in removed_rels or []:
                 remove_page_from_alias_index(idx, _page_title_from_rel(rel))
             for path in resolved:
-                if path.is_file():
-                    title = page_title_from_path(root, path)
+                try:
+                    rel = path.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                title = _page_title_from_rel(rel)
+                if not path.is_file():
                     remove_page_from_alias_index(idx, title)
-                    index_aliases_from_file(idx, root, path)
+                    continue
+                remove_page_from_alias_index(idx, title)
+                index_aliases_from_file(idx, root, path)
             new_sig = _patch_signature(
                 sig,
                 root,
-                updated_paths=[p for p in resolved if p.is_file()],
+                updated_paths=resolved,
                 removed_rels=removed_rels,
             )
             _alias_cache[key] = (new_sig, idx)
@@ -151,11 +156,12 @@ def patch_generational_caches_for_paths(
             for rel in removed_rels or []:
                 _remove_bm25_doc(corpus, rel)
             for path in resolved:
-                if not path.is_file():
-                    continue
                 try:
                     rel = path.relative_to(root).as_posix()
                 except ValueError:
+                    continue
+                if not path.is_file():
+                    _remove_bm25_doc(corpus, rel)
                     continue
                 try:
                     raw = path.read_text(encoding="utf-8", errors="replace")
@@ -167,7 +173,7 @@ def patch_generational_caches_for_paths(
             new_sig = _patch_signature(
                 sig,
                 root,
-                updated_paths=[p for p in resolved if p.is_file()],
+                updated_paths=resolved,
                 removed_rels=removed_rels,
             )
             _bm25_cache[key] = (new_sig, corpus)

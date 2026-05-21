@@ -40,19 +40,34 @@ def is_logseq_block_uuid(value: str) -> bool:
     return parsed.version in (4, 5)
 
 
-def find_malformed_block_refs(text: str) -> list[str]:
-    """Return inner ``((...))`` tokens that are not valid 36-char UUIDs."""
+def find_malformed_block_refs(
+    text: str,
+    *,
+    protected_lines: set[int] | None = None,
+) -> list[str]:
+    """Return inner ``((...))`` tokens that are not valid 36-char UUIDs.
+
+    When ``protected_lines`` is set, matches on those 0-based line indices are
+    ignored (fenced code, HTML comments, advanced queries).
+    """
     bad: list[str] = []
-    for match in _BLOCK_REF_INNER_RE.finditer(text):
-        inner = match.group(1).strip()
-        if not is_standard_uuid_shape(inner):
-            bad.append(inner)
+    protected = protected_lines or set()
+    for line_idx, line in enumerate(text.splitlines()):
+        if line_idx in protected:
+            continue
+        for match in _BLOCK_REF_INNER_RE.finditer(line):
+            inner = match.group(1).strip()
+            if not is_standard_uuid_shape(inner):
+                bad.append(inner)
     return bad
 
 
 def assert_valid_block_refs_in_markdown(text: str) -> None:
     """Reject markdown that contains malformed ``((uuid))`` block references."""
-    bad = find_malformed_block_refs(text)
+    from .global_fence_scanner import compute_page_protected_line_indices
+
+    protected = compute_page_protected_line_indices(text)
+    bad = find_malformed_block_refs(text, protected_lines=protected)
     if bad:
         sample = bad[0]
         if len(sample) > 48:

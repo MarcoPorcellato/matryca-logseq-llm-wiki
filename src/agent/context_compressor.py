@@ -121,6 +121,30 @@ def _split_for_compression(
     return system, middle, tail, current_user
 
 
+def drop_oldest_messages_fraction(
+    messages: list[ChatMessage],
+    *,
+    fraction: float = 0.20,
+) -> list[ChatMessage]:
+    """Remove the oldest ``fraction`` of non-system messages (deterministic LLM fault recovery)."""
+    if not messages or fraction <= 0:
+        return messages
+
+    system: ChatMessage | None = None
+    rest = messages
+    if messages[0]["role"] == "system":
+        system = messages[0]
+        rest = messages[1:]
+    if not rest:
+        return messages
+
+    drop_n = max(1, int(len(rest) * fraction))
+    trimmed_rest = rest[drop_n:]
+    if system is not None:
+        return [system, *trimmed_rest]
+    return trimmed_rest
+
+
 def truncate_messages_to_budget(
     messages: list[ChatMessage],
     *,
@@ -168,18 +192,14 @@ def condense_messages(
     except Exception as exc:  # noqa: BLE001 - fall back so daemon keeps running
         latency = time.perf_counter() - started
         warn_msg = (
-            "[COMPRESSION WARN] "
+            "[COMPRESSION LLM FAULT] "
             f"compression LLM failed after {latency:.4f}s: {exc}; "
-            "falling back to truncation/uncompressed history"
+            "dropping oldest 20% of messages"
         )
         logger.warning(warn_msg)
         if warn_fn is not None:
             warn_fn(warn_msg)
-        truncated = truncate_messages_to_budget(
-            messages,
-            target=target,
-            preserve_tail_turns=preserve_tail_turns,
-        )
+        truncated = drop_oldest_messages_fraction(messages, fraction=0.20)
         if truncated != messages:
             return truncated, None
         return messages, None
@@ -231,6 +251,7 @@ __all__ = [
     "TOKEN_ESTIMATE_SAFETY_MULTIPLIER",
     "build_compression_user_prompt",
     "condense_messages",
+    "drop_oldest_messages_fraction",
     "estimate_messages_tokens",
     "estimate_tokens",
     "extract_persisted_history",

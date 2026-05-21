@@ -17,6 +17,7 @@ from src.agent.quality_gate import (
     markdown_append_bounds_violations,
     outline_bounds_violations,
 )
+from src.graph import page_write_lock as page_write_lock_mod
 from src.graph.markdown_blocks import atomic_write_bytes
 from src.graph.page_write_lock import (
     clear_page_write_locks,
@@ -75,6 +76,26 @@ def test_concurrent_page_rmw_lock_serializes_writes(tmp_path: Path) -> None:
     )
     body = target.read_text(encoding="utf-8")
     assert "A" in body and "B" in body
+
+
+@pytest.mark.skipif(not cross_process_lock_available(), reason="fcntl flock unavailable")
+def test_flock_oserror_falls_back_to_thread_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_page_write_locks()
+    target = tmp_path / "CloudSync.md"
+    target.write_text("start\n", encoding="utf-8")
+
+    def _reject_flock(fd: int, op: int) -> None:
+        _ = (fd, op)
+        msg = "flock not supported on this filesystem"
+        raise OSError(95, msg)
+
+    monkeypatch.setattr(page_write_lock_mod._fcntl, "flock", _reject_flock)
+    with page_rmw_lock(target):
+        target.write_text("updated\n", encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == "updated\n"
 
 
 def test_atomic_write_respects_existing_page_lock(tmp_path: Path) -> None:

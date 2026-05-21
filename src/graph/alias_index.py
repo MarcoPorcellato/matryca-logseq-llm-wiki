@@ -250,14 +250,96 @@ def index_aliases_from_file(idx: AliasIndex, graph_root: Path, path: Path) -> No
         idx.page_to_aliases[title] = aliases_found
 
 
+def _fold_content_for_alias_scan(content: str) -> str:
+    return re.sub(r"\s+", " ", content.casefold())
+
+
+def _mention_matches(content: str, content_fold: str, needle: str) -> bool:
+    """Return True when ``needle`` appears as plain text or a ``[[wikilink]]``."""
+    stripped = needle.strip().strip("[]").strip()
+    if not stripped:
+        return False
+    folded_needle = normalize_concept_key(stripped)
+    if len(folded_needle) < 2:
+        return False
+    if folded_needle in content_fold:
+        return True
+    if re.search(
+        rf"\[\[{re.escape(stripped)}(?:\|[^\]]+)?\]\]",
+        content,
+        re.IGNORECASE,
+    ):
+        return True
+    return stripped.casefold() in content_fold
+
+
+def collect_relevant_alias_pages(idx: AliasIndex, content: str) -> set[str]:
+    """Return canonical titles whose title or alias is mentioned in ``content``."""
+    if not content.strip():
+        return set()
+    content_fold = _fold_content_for_alias_scan(content)
+    relevant: set[str] = set()
+    for title in idx.page_to_relpath:
+        if _mention_matches(content, content_fold, title):
+            relevant.add(title)
+            continue
+        for alias in idx.page_to_aliases.get(title, []):
+            if _mention_matches(content, content_fold, alias):
+                relevant.add(title)
+                break
+    return relevant
+
+
+def format_alias_index_for_prompt(
+    idx: AliasIndex,
+    *,
+    page_content: str | None = None,
+    max_entries: int = 400,
+) -> str:
+    """Serialize canonical titles and aliases for LLM semantic-routing context."""
+    lines: list[str] = []
+    if page_content is not None:
+        titles = sorted(collect_relevant_alias_pages(idx, page_content), key=str.casefold)
+    else:
+        titles = sorted(idx.page_to_relpath.keys(), key=str.casefold)
+    for title in titles:
+        aliases = idx.page_to_aliases.get(title, [])
+        if aliases:
+            alias_text = ", ".join(aliases)
+            lines.append(f"- canonical: [[{title}]] | aliases: {alias_text}")
+        else:
+            lines.append(f"- canonical: [[{title}]]")
+        if len(lines) >= max_entries:
+            remaining = len(titles) - max_entries
+            if remaining > 0:
+                lines.append(f"- ... ({remaining} more canonical page(s) omitted)")
+            break
+    if not lines:
+        if page_content is not None:
+            return "(no AliasIndex entries match this page — prefer existing links only)"
+        return "(empty graph — no canonical pages indexed yet)"
+    return "\n".join(lines)
+
+
+def resolve_canonical_page_title(idx: AliasIndex, candidate: str) -> str:
+    """Map a wikilink target to its canonical page title when known."""
+    resolved = idx.resolve(candidate)
+    if resolved.matched and resolved.canonical_page_title:
+        return resolved.canonical_page_title
+    return candidate.strip()
+
+
 __all__ = [
     "AliasIndex",
     "ResolvedEntity",
     "build_alias_index",
+    "collect_relevant_alias_pages",
+    "format_alias_index_for_prompt",
     "index_aliases_from_file",
     "is_scannable_graph_markdown",
     "iter_alias_source_paths",
     "normalize_concept_key",
     "page_title_from_path",
     "remove_page_from_alias_index",
+    "resolve_canonical_page_title",
 ]

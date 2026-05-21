@@ -116,7 +116,7 @@ def atomic_write_bytes(
     is_markdown = Path(file_path).suffix.lower() == ".md"
     if validate_block_refs and is_markdown and b"((" in data:
         try:
-            text = data.decode("utf-8")
+            text = data.decode("utf-8", errors="replace")
         except UnicodeDecodeError:
             pass
         else:
@@ -162,7 +162,7 @@ def atomic_write_file(
     else:
         atomic_write_bytes(
             file_path,
-            contents.encode(encoding),
+            contents.encode(encoding, errors="replace"),
             graph_root=graph_root,
             validate_block_refs=validate_block_refs,
         )

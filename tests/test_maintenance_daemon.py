@@ -34,6 +34,8 @@ from src.agent.maintenance_daemon import (
 from src.agent.plumber_llm import BootstrapSummaryResult, GraphInsightsLLMResult
 from src.cli import build_parser
 from src.cli.tui_dashboard import collect_snapshot
+from src.graph.bootstrap_harvest import run_bootstrap_harvest
+from src.graph.master_catalog import CatalogEntry, load_master_catalog, master_index_page_path
 from src.graph.page_write_lock import clear_page_write_locks, page_rmw_lock
 from src.utils.token_logger import TokenLogger
 
@@ -50,8 +52,10 @@ class StubLLM:
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        alias_index: object | None = None,
+        enable_semantic_routing: bool = False,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
-        _ = (page_path, graph_root)
+        _ = (page_path, graph_root, alias_index, enable_semantic_routing)
         corrections: list[SemanticLintCorrection] = []
         if BLOCK_UUID in content and "Redis" in content:
             corrections.append(
@@ -144,6 +148,15 @@ def test_token_logger_writes_jsonl_and_counts_session(tmp_path: Path) -> None:
     summaries = logger.tail_summaries(1)
     assert summaries
     assert "Concept Indexing" in summaries[0]
+
+
+def test_load_daemon_state_self_heals_corrupt_json(graph_root: Path) -> None:
+    from src.agent.maintenance_daemon import state_path
+
+    state_path(graph_root).write_text("", encoding="utf-8")
+    loaded = load_daemon_state(graph_root)
+    assert loaded.files == {}
+    assert loaded.status == "idle"
 
 
 def test_daemon_state_roundtrip(graph_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,6 +291,40 @@ def test_pending_detection_after_file_change(graph_root: Path) -> None:
                 mtime=0.0,
                 processed_at="2026-01-01T00:00:00+00:00",
                 status="processed",
+            ),
+        },
+    )
+    pending = list_pending_files(graph_root, state)
+    assert path in pending
+
+
+def test_pending_detection_skips_error_with_stable_mtime(graph_root: Path) -> None:
+    path = _write_page(graph_root, "ErrorBackoff", "- broken\n")
+    mtime = path.stat().st_mtime
+    key = str(path.resolve())
+    state = DaemonState(
+        files={
+            key: FileState(
+                mtime=mtime,
+                processed_at="2026-01-01T00:00:00+00:00",
+                status="error",
+                error="LLM timeout",
+            ),
+        },
+    )
+    assert list_pending_files(graph_root, state) == []
+
+
+def test_pending_detection_requeues_error_after_edit(graph_root: Path) -> None:
+    path = _write_page(graph_root, "ErrorRetry", "- v1\n")
+    key = str(path.resolve())
+    state = DaemonState(
+        files={
+            key: FileState(
+                mtime=0.0,
+                processed_at="2026-01-01T00:00:00+00:00",
+                status="error",
+                error="LLM timeout",
             ),
         },
     )
@@ -609,3 +656,117 @@ def test_daemon_skips_malformed_block_ref_and_processes_healthy_page(
     assert persisted.files[bad_key].status == "skipped"
     assert persisted_error is not None
     assert "Malformed UUID" in persisted_error
+
+
+def test_run_cycle_prunes_deleted_pages_from_catalog(graph_root: Path) -> None:
+    live = _write_page(graph_root, "LivePage", "- still here\n")
+    ghost_path = graph_root / "pages" / "GhostPage.md"
+    ghost_path.write_text("- gone soon\n", encoding="utf-8")
+    catalog = load_master_catalog(graph_root, force_reload=True)
+    catalog.upsert("LivePage", CatalogEntry(summary="live", last_mtime=1))
+    catalog.upsert("GhostPage", CatalogEntry(summary="ghost", last_mtime=1))
+    catalog.save()
+
+    ghost_path.unlink()
+    daemon = MaintenanceDaemon(
+        graph_root,
+        llm_client=StubLLM(),
+        max_files_per_cycle=1,
+    )
+    daemon.run_cycle()
+
+    reloaded = load_master_catalog(graph_root, force_reload=True)
+    assert "LivePage" in reloaded.pages
+    assert "GhostPage" not in reloaded.pages
+    _ = live
+
+
+def test_bootstrap_pipeline_sets_complete_only_after_master_index(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(graph_root, "Seed", "- type:: risorsa\n- Seed body\n")
+    monkeypatch.setenv("MATRYCA_LINT_SEMANTIC_ROUTING", "true")
+    monkeypatch.setenv("MATRYCA_LINT_BACKPROPAGATE_LINKS", "true")
+    monkeypatch.setenv("MATRYCA_LINT_HEAL_DANGLING", "true")
+
+    daemon = MaintenanceDaemon(graph_root, llm_client=StubLLM(), max_files_per_cycle=1)
+    assert daemon.bootstrap_complete is False
+    daemon.run_bootstrap_pipeline()
+    assert daemon.bootstrap_complete is True
+    assert master_index_page_path(graph_root).is_file()
+
+    loaded = load_daemon_state(graph_root)
+    assert loaded.bootstrap_complete is True
+
+
+def test_bootstrap_restart_bypasses_phase1_when_catalog_complete(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(graph_root, "Cached", "- type:: risorsa\n- Cached body\n")
+    run_bootstrap_harvest(graph_root, llm=StubLLM(), incremental=False, phase1_strict=True)
+
+    daemon = MaintenanceDaemon(graph_root, llm_client=StubLLM())
+    state = load_daemon_state(graph_root)
+    daemon._hydrate_bootstrap_phase(state)
+    assert daemon.bootstrap_complete is True
+
+    harvest_calls: list[bool] = []
+
+    def _spy_harvest(*_args: object, **_kwargs: object) -> object:
+        harvest_calls.append(True)
+        from src.graph.bootstrap_harvest import HarvestMetrics
+
+        return HarvestMetrics()
+
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.run_bootstrap_harvest",
+        _spy_harvest,
+    )
+    daemon.run_bootstrap_pipeline(state)
+    assert harvest_calls == []
+
+
+def test_run_cycle_disables_semantic_routing_until_bootstrap_complete(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_LINT_SEMANTIC_ROUTING", "true")
+    monkeypatch.setenv("MATRYCA_LINT_BACKPROPAGATE_LINKS", "true")
+
+    observed: dict[str, bool] = {}
+
+    class RoutingProbeLLM(StubLLM):
+        def index_page(
+            self,
+            page_title: str,
+            content: str,
+            *,
+            page_path: Path | None = None,
+            graph_root: Path | None = None,
+            alias_index: object | None = None,
+            enable_semantic_routing: bool = False,
+        ) -> tuple[SemanticIndexResult, dict[str, int]]:
+            observed["enable_semantic_routing"] = enable_semantic_routing
+            return super().index_page(
+                page_title,
+                content,
+                page_path=page_path,
+                graph_root=graph_root,
+                alias_index=alias_index,
+                enable_semantic_routing=enable_semantic_routing,
+            )
+
+    _write_page(graph_root, "Probe", "- Probe content\n")
+    daemon = MaintenanceDaemon(graph_root, llm_client=RoutingProbeLLM(), max_files_per_cycle=1)
+    daemon.bootstrap_complete = False
+    daemon.run_cycle()
+    assert observed.get("enable_semantic_routing") is False
+
+    run_bootstrap_harvest(graph_root, llm=StubLLM(), incremental=False, phase1_strict=True)
+    _write_page(graph_root, "ProbeTwo", "- Second phase content\n")
+    daemon.bootstrap_complete = True
+    observed.clear()
+    daemon.run_cycle()
+    assert observed.get("enable_semantic_routing") is True

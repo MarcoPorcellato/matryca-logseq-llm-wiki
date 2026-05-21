@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -17,19 +18,35 @@ import instructor
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from ..graph.alias_index import iter_alias_source_paths
+from ..graph.alias_index import (
+    AliasIndex,
+    format_alias_index_for_prompt,
+    iter_alias_source_paths,
+    resolve_canonical_page_title,
+)
 from ..graph.bootstrap_harvest import (
     run_bootstrap_harvest,
     run_incremental_catalog_refresh,
 )
-from ..graph.generational_cache import patch_generational_caches_for_paths
+from ..graph.generational_cache import cached_build_alias_index, patch_generational_caches_for_paths
+from ..graph.global_fence_scanner import compute_page_protected_line_indices
 from ..graph.insights_engine import (
     INSIGHTS_SYSTEM_PROMPT,
     run_graph_insights_engine,
 )
 from ..graph.logseq_uuid import find_malformed_block_refs, is_malformed_block_ref_error
 from ..graph.markdown_blocks import atomic_write_bytes, locate_block_by_uuid
-from ..graph.page_write_lock import page_rmw_lock
+from ..graph.master_catalog import (
+    extract_catalog_fields_from_content,
+    is_bootstrap_catalog_complete,
+    load_master_catalog,
+    master_index_page_path,
+)
+from ..graph.page_write_lock import (
+    clear_page_write_locks,
+    page_rmw_lock,
+    sweep_matryca_lock_sidecars,
+)
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -41,6 +58,8 @@ from .context_compressor import (
 from .plumber_config import (
     DEFAULT_LM_BASE_URL,
     DEFAULT_LM_MODEL,
+    PlumberLintConfig,
+    bootstrap_phase_lint_config,
     load_plumber_lint_config,
     resolve_lm_base_url,
     resolve_lm_model,
@@ -64,7 +83,7 @@ from .plumber_modules.semantic_cache_router import (
     cache_put,
     semantic_cache_key,
 )
-from .prompt_constraints import finalize_system_prompt
+from .prompt_constraints import ALIAS_FIRST_LINK_CONSTRAINT, finalize_system_prompt
 
 STATE_FILENAME = ".matryca_daemon_state.json"
 PID_FILENAME = ".matryca_plumber_daemon.pid"
@@ -78,6 +97,7 @@ MATRYCA_GENERATED_PAGE_TITLES = frozenset(
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _ID_LINE = re.compile(r"^\s*id::\s*(.+?)\s*$", re.IGNORECASE)
+_WIKILINK = re.compile(r"\[\[([^\]#|]+)(?:\|[^\]]+)?\]\]")
 
 DaemonStatus = Literal["running", "idle", "stopped", "error"]
 LintType = Literal["auto_wikilink", "tag_hygiene", "anomaly_warning"]
@@ -98,7 +118,12 @@ class SemanticCrossRef(BaseModel):
 
     concept: str = Field(description="Short concept label")
     relation: str = Field(description="Relationship type, e.g. related_to, see_also")
-    target: str = Field(description="[[Page Title]] or #tag reference")
+    target: str = Field(
+        description=(
+            "Existing [[Canonical Page Title]] or #tag from AliasIndex; "
+            "never invent a new page title when an alias or canonical match exists"
+        ),
+    )
 
 
 class SemanticIndexResult(BaseModel):
@@ -109,7 +134,10 @@ class SemanticIndexResult(BaseModel):
     suggested_tags: list[str] = Field(default_factory=list)
     moc_pointers: list[str] = Field(
         default_factory=list,
-        description="Suggested [[Map of Content]] page links",
+        description=(
+            "Suggested [[Map of Content]] links that must already exist in AliasIndex; "
+            "prefer alias:: over new pages"
+        ),
     )
     semantic_corrections: list[SemanticLintCorrection] = Field(
         default_factory=list,
@@ -127,6 +155,8 @@ class LLMClient(Protocol):
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        alias_index: AliasIndex | None = None,
+        enable_semantic_routing: bool = False,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
         """Return structured index and token usage dict with prompt/completion keys."""
         ...
@@ -170,6 +200,7 @@ class DaemonState:
     files: dict[str, FileState] = field(default_factory=dict)
     status: DaemonStatus = "idle"
     model: str = DEFAULT_LM_MODEL
+    bootstrap_complete: bool = False
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
     last_scan_at: str | None = None
@@ -180,6 +211,7 @@ class DaemonState:
             "version": self.version,
             "status": self.status,
             "model": self.model,
+            "bootstrap_complete": self.bootstrap_complete,
             "session_prompt_tokens": self.session_prompt_tokens,
             "session_completion_tokens": self.session_completion_tokens,
             "last_scan_at": self.last_scan_at,
@@ -214,6 +246,7 @@ class DaemonState:
             files=files,
             status=str(payload.get("status", "idle")),  # type: ignore[arg-type]
             model=str(payload.get("model", DEFAULT_LM_MODEL)),
+            bootstrap_complete=bool(payload.get("bootstrap_complete", False)),
             session_prompt_tokens=int(payload.get("session_prompt_tokens", 0)),
             session_completion_tokens=int(payload.get("session_completion_tokens", 0)),
             last_scan_at=payload.get("last_scan_at"),
@@ -245,12 +278,20 @@ def sync_daemon_state_from_env(state: DaemonState) -> DaemonState:
 
 
 def load_daemon_state(graph_root: Path) -> DaemonState:
+    from loguru import logger
+
     path = state_path(graph_root)
     if not path.is_file():
         return sync_daemon_state_from_env(DaemonState())
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return sync_daemon_state_from_env(DaemonState())
+    except (json.JSONDecodeError, ValueError):
+        logger.warning(
+            "[METADATA CORRUPTION DETECTED] File state was malformed, "
+            "self-healing by initializing a fresh instance."
+        )
         return sync_daemon_state_from_env(DaemonState())
     if not isinstance(payload, dict):
         return sync_daemon_state_from_env(DaemonState())
@@ -285,7 +326,7 @@ def read_pid_file(graph_root: Path) -> int | None:
     if not path.is_file():
         return None
     try:
-        return int(path.read_text(encoding="utf-8").strip())
+        return int(path.read_text(encoding="utf-8", errors="replace").strip())
     except (OSError, ValueError):
         return None
 
@@ -318,6 +359,11 @@ def stop_daemon(graph_root: Path) -> dict[str, Any]:
         save_daemon_state(graph_root, state)
         return {"ok": True, "code": "stale_pid_removed", "pid": pid}
     os.kill(pid, signal.SIGTERM)
+    pid_file = pid_path(graph_root)
+    for _ in range(20):
+        if not is_process_alive(pid) and not pid_file.is_file():
+            break
+        time.sleep(0.1)
     return {"ok": True, "code": "signaled", "pid": pid, "signal": "SIGTERM"}
 
 
@@ -373,8 +419,8 @@ def _enumerate_blocks_for_prompt(content: str) -> str:
     return "\n".join(blocks)
 
 
-def _build_semantic_lint_system_prompt() -> str:
-    return finalize_system_prompt(
+def _build_semantic_lint_system_prompt(*, alias_index_context: str | None = None) -> str:
+    instructions = (
         "You are Matryca Plumber, a semantic linter and indexer for Logseq OG outliner pages. "
         "Behave like a strict compiler: analyze block-by-block, propose only safe additive "
         "micro-corrections, never rewrite whole files. "
@@ -389,28 +435,113 @@ def _build_semantic_lint_system_prompt() -> str:
         "lint_type auto_wikilink: wrap recognizable concepts in [[Page Title]] links. "
         "lint_type tag_hygiene: normalize inline #tags without removing words. "
         "lint_type anomaly_warning: flag issues only — set corrected_text equal to original_text. "
-        "Also populate summary, cross_references, suggested_tags, and moc_pointers."
+        "Also populate summary, cross_references, suggested_tags, and moc_pointers. "
+        f"{ALIAS_FIRST_LINK_CONSTRAINT}"
     )
+    if alias_index_context:
+        instructions += (
+            "\n\nCompiled AliasIndex (canonical page titles and alias:: values):\n"
+            f"{alias_index_context}"
+        )
+    return finalize_system_prompt(instructions)
 
 
-def _build_index_prompt(page_title: str, content: str) -> str:
+def _build_index_prompt(
+    page_title: str,
+    content: str,
+    *,
+    alias_index_context: str | None = None,
+) -> str:
     block_catalog = _enumerate_blocks_for_prompt(content)
+    alias_section = ""
+    if alias_index_context:
+        alias_section = (
+            "\nAliasIndex (resolve every wikilink against this map before suggesting links):\n"
+            f"{alias_index_context}\n"
+        )
     return (
         "Task: semantic indexing and safe per-block lint for one Logseq OG outliner page.\n"
         "Output: structured JSON only.\n"
         "Steps:\n"
-        "1. Read the page title, block catalog, and full content below.\n"
+        "1. Read the page title, block catalog, AliasIndex, and full content below.\n"
         "2. Extract summary, cross_references, suggested_tags, and moc_pointers.\n"
         "3. Propose semantic_corrections only when every system-prompt "
-        "safety rule is satisfied.\n\n"
+        "safety rule is satisfied.\n"
+        "4. Prefer existing canonical titles and alias:: over inventing new page names.\n\n"
         f"Page title: {page_title}\n\n"
-        f"Blocks available for semantic_corrections:\n{block_catalog}\n\n"
+        f"Blocks available for semantic_corrections:\n{block_catalog}\n"
+        f"{alias_section}\n"
         f"Full page content:\n{content[:8000]}"
     )
 
 
 def _strip_wikilink_brackets(text: str) -> str:
     return re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+
+
+def _rewrite_wikilinks_with_alias_index(text: str, alias_index: AliasIndex | None) -> str:
+    if alias_index is None or not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        target = match.group(1).strip()
+        canonical = resolve_canonical_page_title(alias_index, target)
+        if canonical != target:
+            return f"[[{canonical}]]"
+        return match.group(0)
+
+    return _WIKILINK.sub(_replace, text)
+
+
+def _normalize_index_result_aliases(
+    result: SemanticIndexResult,
+    alias_index: AliasIndex | None,
+) -> SemanticIndexResult:
+    if alias_index is None:
+        return result
+
+    cross_refs: list[SemanticCrossRef] = []
+    for ref in result.cross_references:
+        target = ref.target
+        if target.startswith("[["):
+            inner = target.strip("[]")
+            canonical = resolve_canonical_page_title(alias_index, inner)
+            target = f"[[{canonical}]]" if canonical != inner else target
+        cross_refs.append(
+            SemanticCrossRef(concept=ref.concept, relation=ref.relation, target=target),
+        )
+
+    moc_pointers = [
+        (
+            f"[[{resolve_canonical_page_title(alias_index, pointer.strip('[]'))}]]"
+            if pointer.startswith("[[")
+            else pointer
+        )
+        for pointer in result.moc_pointers
+    ]
+
+    corrections: list[SemanticLintCorrection] = []
+    for correction in result.semantic_corrections:
+        corrections.append(
+            SemanticLintCorrection(
+                block_uuid=correction.block_uuid,
+                original_text=correction.original_text,
+                corrected_text=_rewrite_wikilinks_with_alias_index(
+                    correction.corrected_text,
+                    alias_index,
+                ),
+                lint_type=correction.lint_type,
+                reason=correction.reason,
+            ),
+        )
+
+    return SemanticIndexResult(
+        summary=result.summary,
+        cross_references=cross_refs,
+        suggested_tags=list(result.suggested_tags),
+        moc_pointers=moc_pointers,
+        semantic_corrections=corrections,
+    )
 
 
 def _is_safe_additive_correction(original: str, corrected: str, lint_type: LintType) -> bool:
@@ -574,6 +705,7 @@ def apply_semantic_page_result(
     result: SemanticIndexResult,
     *,
     backpropagate: bool = False,
+    alias_index: AliasIndex | None = None,
 ) -> CorrectionOutcome:
     """Lint blocks surgically, then append the semantic index (one locked transaction)."""
     with page_rmw_lock(page_path):
@@ -606,6 +738,7 @@ def apply_semantic_page_result(
             page_title,
             backlink_corrections,
             lint_outcome.applied_details,
+            alias_index=alias_index,
         )
     return lint_outcome
 
@@ -856,24 +989,40 @@ class InstructorLLMClient:
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        alias_index: AliasIndex | None = None,
+        enable_semantic_routing: bool = False,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
-        prompt = _build_index_prompt(page_title, content)
+        alias_context = (
+            format_alias_index_for_prompt(alias_index, page_content=content)
+            if alias_index is not None
+            else None
+        )
+        prompt = _build_index_prompt(
+            page_title,
+            content,
+            alias_index_context=alias_context,
+        )
         started = time.perf_counter()
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         config = load_plumber_lint_config()
+        routing_enabled = enable_semantic_routing and config.semantic_routing
         try:
-            if config.semantic_routing and page_path is not None and graph_root is not None:
+            if routing_enabled and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
                 cached = cache_get(graph_root, "index", key)
                 if cached is not None:
                     result = SemanticIndexResult.model_validate(cached)
+                    result = _normalize_index_result_aliases(result, alias_index)
                     return result, usage
 
             result, completion = self._completion_with_structured_output(
                 prompt=prompt,
                 response_model=SemanticIndexResult,
-                system_prompt=_build_semantic_lint_system_prompt(),
+                system_prompt=_build_semantic_lint_system_prompt(
+                    alias_index_context=alias_context,
+                ),
             )
+            result = _normalize_index_result_aliases(result, alias_index)
             latency = time.perf_counter() - started
             usage_obj = getattr(completion, "usage", None)
             if usage_obj is not None:
@@ -892,7 +1041,7 @@ class InstructorLLMClient:
                 latency_seconds=latency,
                 model=self.model,
             )
-            if config.semantic_routing and page_path is not None and graph_root is not None:
+            if routing_enabled and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
                 cache_put(graph_root, "index", key, result.model_dump())
             return result, usage
@@ -984,8 +1133,13 @@ def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
         key = str(path.resolve())
         mtime = path.stat().st_mtime if path.is_file() else 0.0
         rec = state.files.get(key)
-        if rec is not None and rec.mtime == mtime and rec.status == "processed":
-            processed += 1
+        if rec is not None and rec.mtime == mtime:
+            if rec.status == "processed":
+                processed += 1
+            elif rec.status in {"skipped", "error"}:
+                pass
+            else:
+                pending += 1
         else:
             pending += 1
     return ScanMetrics(total=total, processed=processed, pending=pending)
@@ -1001,8 +1155,12 @@ def list_pending_files(graph_root: Path, state: DaemonState) -> list[Path]:
         key = str(path.resolve())
         mtime = path.stat().st_mtime
         rec = state.files.get(key)
-        if rec is None or rec.mtime != mtime or rec.status not in settled_statuses:
-            pending.append(path)
+        if rec is not None and rec.mtime == mtime:
+            if rec.status in settled_statuses:
+                continue
+            if rec.status == "error":
+                continue
+        pending.append(path)
     return pending
 
 
@@ -1055,7 +1213,66 @@ class MaintenanceDaemon:
         )
         self.max_files_per_cycle = max_files_per_cycle
         self._stop_requested = False
-        self._bootstrap_completed = False
+        self._shutdown_in_progress = False
+        self.bootstrap_complete = False
+
+    def _hydrate_bootstrap_phase(self, state: DaemonState) -> None:
+        """Restore Phase 2 readiness from persisted state or a complete on-disk catalog."""
+        if state.bootstrap_complete or is_bootstrap_catalog_complete(self.graph_root):
+            self.bootstrap_complete = True
+            state.bootstrap_complete = True
+        else:
+            self.bootstrap_complete = False
+
+    def _persist_bootstrap_complete(self, state: DaemonState) -> None:
+        state.bootstrap_complete = True
+        save_daemon_state(self.graph_root, state)
+
+    def _effective_lint_config(self) -> PlumberLintConfig:
+        """Return env lint config, or an all-disabled override during Phase 1."""
+        if not self.bootstrap_complete:
+            return bootstrap_phase_lint_config()
+        return load_plumber_lint_config()
+
+    def _compiled_alias_index(self) -> AliasIndex:
+        return cached_build_alias_index(self.graph_root)
+
+    def _register_daemon_signal_handlers(self) -> None:
+        """Install SIGTERM/SIGINT handlers before the polling loop starts."""
+        signal.signal(signal.SIGTERM, self._handle_daemon_graceful_shutdown)
+        signal.signal(signal.SIGINT, self._handle_daemon_graceful_shutdown)
+
+    def _handle_daemon_graceful_shutdown(self, signum: int, _frame: object) -> None:
+        """Safe evacuation: log, persist catalog, drop PID/locks, then exit."""
+        if self._shutdown_in_progress:
+            return
+        self._shutdown_in_progress = True
+        self._stop_requested = True
+
+        with contextlib.suppress(Exception):
+            self.token_logger.log_daemon_shutdown(signum)
+
+        try:
+            load_master_catalog(self.graph_root).save()
+        except Exception as exc:  # noqa: BLE001 - log and continue evacuation
+            with contextlib.suppress(Exception):
+                self.token_logger.log_structural_lint_warning(
+                    target_file=self.graph_root,
+                    message=f"Catalog evacuation save failed: {exc}",
+                    malformed_refs=[],
+                )
+
+        try:
+            state = load_daemon_state(self.graph_root)
+            state.status = "stopped"
+            save_daemon_state(self.graph_root, state)
+        except Exception:  # noqa: BLE001
+            pass
+
+        remove_pid_file(self.graph_root)
+        clear_page_write_locks()
+        sweep_matryca_lock_sidecars(self.graph_root)
+        sys.exit(0)
 
     def _sync_runtime_config(self, state: DaemonState) -> DaemonState:
         """Align LLM client and persisted state with the active environment block."""
@@ -1066,25 +1283,58 @@ class MaintenanceDaemon:
     def request_stop(self) -> None:
         self._stop_requested = True
 
-    def run_bootstrap_pipeline(self) -> None:
-        """Two-phase bootstrap harvest + graph insights before polling."""
-        if self._bootstrap_completed:
+    def run_bootstrap_pipeline(self, state: DaemonState | None = None) -> None:
+        """Phase 1 bootstrap harvest (read/append only) before Phase 2 polling."""
+        if self.bootstrap_complete:
             return
+
+        checkpoint = state or load_daemon_state(self.graph_root)
+        self._hydrate_bootstrap_phase(checkpoint)
+        if self.bootstrap_complete:
+            return
+
         try:
-            run_bootstrap_harvest(
+            metrics = run_bootstrap_harvest(
                 self.graph_root,
                 llm=self.llm_client,
                 incremental=False,
                 rebuild_index=True,
+                phase1_strict=True,
             )
-            run_graph_insights_engine(self.graph_root, llm=self.llm_client)
         except Exception as exc:  # noqa: BLE001 - bootstrap must not block daemon start
             self.token_logger.log_structural_lint_warning(
                 target_file=self.graph_root,
                 message=f"Bootstrap harvest failed: {exc}",
                 malformed_refs=[],
             )
-        self._bootstrap_completed = True
+            return
+
+        master_index = master_index_page_path(self.graph_root)
+        if not master_index.is_file() or metrics.files_created != 0:
+            self.token_logger.log_structural_lint_warning(
+                target_file=self.graph_root,
+                message=(
+                    "Bootstrap Phase 1 incomplete: master index missing or unexpected "
+                    f"concept pages created (files_created={metrics.files_created})."
+                ),
+                malformed_refs=[],
+            )
+            return
+
+        self.bootstrap_complete = True
+        self._persist_bootstrap_complete(checkpoint)
+        self._run_phase2_graph_insights()
+
+    def _run_phase2_graph_insights(self) -> None:
+        """Run graph insights after Phase 1 completes (Phase 2 entry)."""
+        try:
+            run_graph_insights_engine(self.graph_root, llm=self.llm_client)
+        except Exception as exc:  # noqa: BLE001 - insights must not block daemon start
+            self.token_logger.log_structural_lint_warning(
+                target_file=self.graph_root,
+                message=f"Graph insights engine failed: {exc}",
+                malformed_refs=[],
+            )
 
     def refresh_catalog_if_stale(self) -> None:
         """Incrementally sync catalog rows when page mtimes change."""
@@ -1096,6 +1346,45 @@ class MaintenanceDaemon:
                 message=f"Incremental catalog refresh failed: {exc}",
                 malformed_refs=[],
             )
+
+    def _prune_stale_catalog_entries(self) -> None:
+        """Drop ghost catalog rows for deleted or renamed markdown files."""
+        try:
+            catalog = load_master_catalog(self.graph_root)
+            pruned = catalog.prune_missing_pages()
+            if pruned > 0:
+                catalog.save()
+        except Exception as exc:  # noqa: BLE001 - never abort daemon cycle
+            self.token_logger.log_structural_lint_warning(
+                target_file=self.graph_root,
+                message=f"Catalog prune failed: {exc}",
+                malformed_refs=[],
+            )
+
+    def _sync_catalog_after_page_write(self, path: Path, title: str) -> None:
+        """Upsert catalog row from on-disk semantic index immediately after a page write."""
+        try:
+            new_text = path.read_text(encoding="utf-8", errors="replace")
+            mtime = int(path.stat().st_mtime)
+        except OSError as exc:
+            self.token_logger.log_structural_lint_warning(
+                target_file=path,
+                message=f"Catalog sync read failed for {title}: {exc}",
+                malformed_refs=[],
+            )
+            return
+
+        extracted = extract_catalog_fields_from_content(new_text)
+        if extracted is None:
+            return
+
+        catalog = load_master_catalog(self.graph_root)
+        extracted.last_mtime = mtime
+        existing = catalog.get(title)
+        if existing is not None:
+            extracted.orphan = existing.orphan
+        catalog.upsert(title, extracted)
+        catalog.save()
 
     def _quarantine_structural_lint(
         self,
@@ -1140,6 +1429,7 @@ class MaintenanceDaemon:
 
         if not pending:
             self.refresh_catalog_if_stale()
+            self._prune_stale_catalog_entries()
             state.status = "idle"
             save_daemon_state(self.graph_root, state)
             return state
@@ -1155,7 +1445,11 @@ class MaintenanceDaemon:
             content = ""
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
-                malformed_refs = find_malformed_block_refs(content)
+                protected_lines = compute_page_protected_line_indices(content)
+                malformed_refs = find_malformed_block_refs(
+                    content,
+                    protected_lines=protected_lines,
+                )
                 if malformed_refs:
                     self._quarantine_structural_lint(
                         path=path,
@@ -1182,8 +1476,8 @@ class MaintenanceDaemon:
                         status="skipped",
                     )
                     continue
-                lint_config = load_plumber_lint_config()
-                if lint_config.any_enabled:
+                lint_config = self._effective_lint_config()
+                if self.bootstrap_complete and lint_config.any_enabled:
                     run_cognitive_lint_pipeline(
                         self.graph_root,
                         path,
@@ -1193,27 +1487,38 @@ class MaintenanceDaemon:
                         config=lint_config,
                     )
                     content = path.read_text(encoding="utf-8", errors="replace")
+                alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
+                enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
+                enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
                 result, _usage = self.llm_client.index_page(
                     title,
                     content,
                     page_path=path,
                     graph_root=self.graph_root,
+                    alias_index=alias_index,
+                    enable_semantic_routing=enable_semantic_routing,
                 )
                 apply_semantic_page_result(
                     self.graph_root,
                     path,
                     title,
                     result,
-                    backpropagate=lint_config.backpropagate_links,
+                    backpropagate=enable_backprop,
+                    alias_index=alias_index,
                 )
                 state.files[key] = FileState(
                     mtime=path.stat().st_mtime,
                     processed_at=datetime.now(tz=UTC).isoformat(),
                     status="processed",
                 )
+                self._sync_catalog_after_page_write(path, title)
             except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
                 if is_malformed_block_ref_error(exc):
-                    malformed_refs = find_malformed_block_refs(content)
+                    protected_lines = compute_page_protected_line_indices(content)
+                    malformed_refs = find_malformed_block_refs(
+                        content,
+                        protected_lines=protected_lines,
+                    )
                     self._quarantine_structural_lint(
                         path=path,
                         key=key,
@@ -1241,29 +1546,25 @@ class MaintenanceDaemon:
                         malformed_refs=[],
                     )
 
+        self._prune_stale_catalog_entries()
         state.session_prompt_tokens = self.token_logger.session_prompt_tokens
         state.session_completion_tokens = self.token_logger.session_completion_tokens
         if not self._stop_requested:
-            self.refresh_catalog_if_stale()
             state.status = "idle"
         save_daemon_state(self.graph_root, state)
         return state
 
     def run_forever(self) -> None:
         """Infinite polling loop until stop is requested."""
+        self._register_daemon_signal_handlers()
         write_pid_file(self.graph_root)
         state = self._sync_runtime_config(load_daemon_state(self.graph_root))
+        self._hydrate_bootstrap_phase(state)
         state.status = "running"
         save_daemon_state(self.graph_root, state)
 
-        def _handle_signal(_signum: int, _frame: object) -> None:
-            self.request_stop()
-
-        signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
-
         try:
-            self.run_bootstrap_pipeline()
+            self.run_bootstrap_pipeline(state)
             while not self._stop_requested:
                 self.run_cycle(state)
                 state = load_daemon_state(self.graph_root)
@@ -1329,11 +1630,17 @@ def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
     sys.stdin = open(os.devnull)  # noqa: SIM115
     sys.stdout = open(os.devnull, "w")  # noqa: SIM115
     sys.stderr = open(os.devnull, "w")  # noqa: SIM115
+
+    with contextlib.suppress(Exception):
+        from loguru import logger
+
+        logger.remove()
+
     from dotenv import load_dotenv
 
     load_dotenv()
     os.environ["LOGSEQ_GRAPH_PATH"] = str(root)
-    start_daemon_foreground(root)
+    MaintenanceDaemon(root).run_forever()
     os._exit(0)
 
 

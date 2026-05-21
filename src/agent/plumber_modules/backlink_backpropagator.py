@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ...graph.alias_index import AliasIndex, resolve_canonical_page_title
 from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import atomic_write_bytes
 from ...graph.page_write_lock import page_rmw_lock
@@ -31,12 +32,16 @@ class BacklinkCorrection:
     reason: str
 
 
-def _new_wikilinks(original: str, corrected: str) -> list[str]:
+def _new_wikilinks(original: str, corrected: str, *, alias_index: AliasIndex | None) -> list[str]:
     orig = {m.group(1).strip() for m in _WIKILINK.finditer(original)}
     added: list[str] = []
     for match in _WIKILINK.finditer(corrected):
         target = match.group(1).strip()
-        if target and target not in orig:
+        if not target or target in orig:
+            continue
+        if alias_index is not None:
+            target = resolve_canonical_page_title(alias_index, target)
+        if target not in orig and target not in added:
             added.append(target)
     return added
 
@@ -175,6 +180,8 @@ def run_backlink_backpropagator(
     source_title: str,
     corrections: list[BacklinkCorrection],
     applied_details: list[str],
+    *,
+    alias_index: AliasIndex | None = None,
 ) -> ModuleOutcome:
     """Append inverse context blocks on target pages for applied auto_wikilinks.
 
@@ -195,7 +202,11 @@ def run_backlink_backpropagator(
             continue
         if correction.block_uuid not in applied_uuids:
             continue
-        for target in _new_wikilinks(correction.original_text, correction.corrected_text):
+        for target in _new_wikilinks(
+            correction.original_text,
+            correction.corrected_text,
+            alias_index=alias_index,
+        ):
             if target == source_title:
                 continue
             if not page_file_exists(graph_root, target):
