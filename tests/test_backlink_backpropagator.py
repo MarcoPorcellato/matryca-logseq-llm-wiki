@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agent.brain_modules.backlink_backpropagator import (
+from src.agent.plumber_modules.backlink_backpropagator import (
     BacklinkCorrection,
     run_backlink_backpropagator,
 )

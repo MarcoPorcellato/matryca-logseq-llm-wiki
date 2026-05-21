@@ -1,4 +1,4 @@
-"""Matryca Brain Maintenance Daemon — progressive local LLM graph indexing."""
+"""Matryca Plumber Maintenance Daemon — progressive local LLM graph indexing."""
 
 from __future__ import annotations
 
@@ -19,33 +19,10 @@ from pydantic import BaseModel, Field
 
 from ..graph.alias_index import iter_alias_source_paths
 from ..graph.generational_cache import patch_generational_caches_for_paths
+from ..graph.logseq_uuid import find_malformed_block_refs, is_malformed_block_ref_error
 from ..graph.markdown_blocks import atomic_write_bytes, locate_block_by_uuid
 from ..graph.page_write_lock import page_rmw_lock
 from ..utils.token_logger import OperationType, TokenLogger
-from .brain_config import (
-    DEFAULT_LM_BASE_URL,
-    DEFAULT_LM_MODEL,
-    load_brain_lint_config,
-    resolve_lm_base_url,
-    resolve_lm_model,
-)
-from .brain_llm import (
-    ContextualSeedResult,
-    EntityOverlapResult,
-    InferredPropertiesResult,
-    MarpaClassificationResult,
-)
-from .brain_modules import run_cognitive_lint_pipeline
-from .brain_modules.backlink_backpropagator import BacklinkCorrection, run_backlink_backpropagator
-from .brain_modules.marpa_framework import (
-    build_marpa_classify_system_prompt,
-    build_marpa_classify_user_prompt,
-)
-from .brain_modules.semantic_cache_router import (
-    cache_get,
-    cache_put,
-    semantic_cache_key,
-)
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
     MAX_EXECUTION_HISTORY_MESSAGES,
@@ -53,11 +30,36 @@ from .context_compressor import (
     condense_messages,
     extract_persisted_history,
 )
+from .plumber_config import (
+    DEFAULT_LM_BASE_URL,
+    DEFAULT_LM_MODEL,
+    load_plumber_lint_config,
+    resolve_lm_base_url,
+    resolve_lm_model,
+)
+from .plumber_llm import (
+    ContextualSeedResult,
+    EntityOverlapResult,
+    InferredPropertiesResult,
+    MarpaClassificationResult,
+)
+from .plumber_modules import run_cognitive_lint_pipeline
+from .plumber_modules.backlink_backpropagator import BacklinkCorrection, run_backlink_backpropagator
+from .plumber_modules.marpa_framework import (
+    build_marpa_classify_system_prompt,
+    build_marpa_classify_user_prompt,
+)
+from .plumber_modules.semantic_cache_router import (
+    cache_get,
+    cache_put,
+    semantic_cache_key,
+)
 from .prompt_constraints import finalize_system_prompt
 
 STATE_FILENAME = ".matryca_daemon_state.json"
-PID_FILENAME = ".matryca_brain_daemon.pid"
+PID_FILENAME = ".matryca_plumber_daemon.pid"
 SEMANTIC_INDEX_HEADER = "### Matryca Semantic Index"
+STRUCTURAL_LINT_HEADER = "### Matryca Structural Lint"
 DEFAULT_MODEL = DEFAULT_LM_MODEL  # backward-compatible alias for CLI/TUI
 DEFAULT_POLL_SECONDS = 30.0
 
@@ -190,7 +192,7 @@ def resolve_graph_root() -> Path:
     """Return ``LOGSEQ_GRAPH_PATH`` or raise when unset."""
     raw = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
     if not raw:
-        msg = "LOGSEQ_GRAPH_PATH must be set for the Matryca Brain daemon"
+        msg = "LOGSEQ_GRAPH_PATH must be set for the Matryca Plumber daemon"
         raise ValueError(msg)
     return Path(raw).expanduser().resolve(strict=False)
 
@@ -226,13 +228,23 @@ def save_daemon_state(graph_root: Path, state: DaemonState) -> None:
     """Persist daemon state via atomic write under graph root."""
     path = state_path(graph_root)
     data = json.dumps(state.to_json(), indent=2, ensure_ascii=False) + "\n"
-    atomic_write_bytes(path, data.encode("utf-8"), graph_root=graph_root)
+    atomic_write_bytes(
+        path,
+        data.encode("utf-8"),
+        graph_root=graph_root,
+        validate_block_refs=False,
+    )
 
 
 def write_pid_file(graph_root: Path) -> None:
     path = pid_path(graph_root)
     payload = f"{os.getpid()}\n"
-    atomic_write_bytes(path, payload.encode("utf-8"), graph_root=graph_root)
+    atomic_write_bytes(
+        path,
+        payload.encode("utf-8"),
+        graph_root=graph_root,
+        validate_block_refs=False,
+    )
 
 
 def read_pid_file(graph_root: Path) -> int | None:
@@ -330,7 +342,7 @@ def _enumerate_blocks_for_prompt(content: str) -> str:
 
 def _build_semantic_lint_system_prompt() -> str:
     return finalize_system_prompt(
-        "You are Matryca Brain, a semantic linter and indexer for Logseq OG outliner pages. "
+        "You are Matryca Plumber, a semantic linter and indexer for Logseq OG outliner pages. "
         "Behave like a strict compiler: analyze block-by-block, propose only safe additive "
         "micro-corrections, never rewrite whole files. "
         "Rules for semantic_corrections: "
@@ -484,6 +496,44 @@ def _format_index_section(
     return "\n".join(lines)
 
 
+def append_structural_lint_warning(
+    graph_root: Path,
+    page_path: Path,
+    malformed_refs: list[str],
+) -> bool:
+    """Append a non-destructive structural lint section (preserves existing malformed refs)."""
+    if not page_path.is_file() or not malformed_refs:
+        return False
+    text = page_path.read_text(encoding="utf-8", errors="replace")
+    if STRUCTURAL_LINT_HEADER in text:
+        return False
+
+    sample = malformed_refs[:5]
+    section_lines = [
+        "",
+        STRUCTURAL_LINT_HEADER,
+        "- malformed-block-refs::",
+    ]
+    for ref in sample:
+        section_lines.append(f"  - (({ref}))")
+    if len(malformed_refs) > len(sample):
+        section_lines.append(f"  - ... and {len(malformed_refs) - len(sample)} more")
+    section_lines.extend(
+        [
+            "- todo:: #todo [[Matryca Broken Reference]] — fix ((uuid)) typos in Logseq",
+            "",
+        ],
+    )
+    new_text = text.rstrip("\n") + "\n" + "\n".join(section_lines)
+    atomic_write_bytes(
+        page_path,
+        new_text.encode("utf-8"),
+        graph_root=graph_root,
+        validate_block_refs=False,
+    )
+    return True
+
+
 def apply_semantic_page_result(
     graph_root: Path,
     page_path: Path,
@@ -611,7 +661,7 @@ class InstructorLLMClient:
     ) -> tuple[T, object]:
         """Call LM Studio with JSON schema mode, falling back when parsing fails."""
         self.refresh_config()
-        config = load_brain_lint_config()
+        config = load_plumber_lint_config()
         if not config.context_compression:
             self.reset_execution_history()
             messages: list[ChatMessage] = [
@@ -749,7 +799,7 @@ class InstructorLLMClient:
             content,
             namespace_hint=namespace_hint,
         )
-        config = load_brain_lint_config()
+        config = load_plumber_lint_config()
         if config.semantic_routing and page_path is not None and graph_root is not None:
             key = semantic_cache_key(page_path, "marpa_classify")
             cached = cache_get(graph_root, "marpa", key)
@@ -777,7 +827,7 @@ class InstructorLLMClient:
         prompt = _build_index_prompt(page_title, content)
         started = time.perf_counter()
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        config = load_brain_lint_config()
+        config = load_plumber_lint_config()
         try:
             if config.semantic_routing and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
@@ -863,11 +913,12 @@ def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
 
 def list_pending_files(graph_root: Path, state: DaemonState) -> list[Path]:
     pending: list[Path] = []
+    settled_statuses = frozenset({"processed", "skipped"})
     for path in iter_alias_source_paths(graph_root):
         key = str(path.resolve())
         mtime = path.stat().st_mtime
         rec = state.files.get(key)
-        if rec is None or rec.mtime != mtime or rec.status != "processed":
+        if rec is None or rec.mtime != mtime or rec.status not in settled_statuses:
             pending.append(path)
     return pending
 
@@ -917,7 +968,7 @@ class MaintenanceDaemon:
         self.token_logger = token_logger or TokenLogger()
         self.llm_client = llm_client or InstructorLLMClient(token_logger=self.token_logger)
         self.poll_seconds = poll_seconds or float(
-            os.environ.get("MATRYCA_BRAIN_POLL_SECONDS", str(DEFAULT_POLL_SECONDS)),
+            os.environ.get("MATRYCA_PLUMBER_POLL_SECONDS", str(DEFAULT_POLL_SECONDS)),
         )
         self.max_files_per_cycle = max_files_per_cycle
         self._stop_requested = False
@@ -930,6 +981,39 @@ class MaintenanceDaemon:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    def _quarantine_structural_lint(
+        self,
+        *,
+        path: Path,
+        key: str,
+        mtime: float,
+        message: str,
+        malformed_refs: list[str],
+        state: DaemonState,
+    ) -> None:
+        """Log, optionally annotate, and skip a page with malformed ``((uuid))`` refs."""
+        rel_path = path.relative_to(self.graph_root).as_posix()
+        self.token_logger.log_structural_lint_warning(
+            target_file=path,
+            message=f"{message} file={rel_path}",
+            malformed_refs=malformed_refs,
+        )
+        try:
+            append_structural_lint_warning(self.graph_root, path, malformed_refs)
+        except Exception as inj_exc:  # noqa: BLE001 - never crash daemon on annotation
+            self.token_logger.log_structural_lint_warning(
+                target_file=path,
+                message=f"Warning injection failed for {rel_path}: {inj_exc}",
+                malformed_refs=malformed_refs,
+            )
+        recorded_mtime = path.stat().st_mtime if path.is_file() else mtime
+        state.files[key] = FileState(
+            mtime=recorded_mtime,
+            processed_at=datetime.now(tz=UTC).isoformat(),
+            status="skipped",
+            error=message,
+        )
 
     def run_cycle(self, state: DaemonState | None = None) -> DaemonState:
         """Process up to ``max_files_per_cycle`` pending files."""
@@ -952,8 +1036,22 @@ class MaintenanceDaemon:
             mtime = path.stat().st_mtime
             title = _page_title_from_path(self.graph_root, path)
             state.last_file = key
+            content = ""
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
+                malformed_refs = find_malformed_block_refs(content)
+                if malformed_refs:
+                    self._quarantine_structural_lint(
+                        path=path,
+                        key=key,
+                        mtime=mtime,
+                        message=(
+                            "Malformed UUID detected in block ref. Must be standard 36-char format."
+                        ),
+                        malformed_refs=malformed_refs,
+                        state=state,
+                    )
+                    continue
                 if SEMANTIC_INDEX_HEADER in content:
                     state.files[key] = FileState(
                         mtime=mtime,
@@ -968,7 +1066,7 @@ class MaintenanceDaemon:
                         status="skipped",
                     )
                     continue
-                lint_config = load_brain_lint_config()
+                lint_config = load_plumber_lint_config()
                 if lint_config.any_enabled:
                     run_cognitive_lint_pipeline(
                         self.graph_root,
@@ -997,16 +1095,35 @@ class MaintenanceDaemon:
                     processed_at=datetime.now(tz=UTC).isoformat(),
                     status="processed",
                 )
-            except Exception as exc:  # noqa: BLE001
-                state.files[key] = FileState(
-                    mtime=mtime,
-                    processed_at=datetime.now(tz=UTC).isoformat(),
-                    status="error",
-                    error=str(exc),
-                )
+            except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
+                if is_malformed_block_ref_error(exc):
+                    malformed_refs = find_malformed_block_refs(content)
+                    self._quarantine_structural_lint(
+                        path=path,
+                        key=key,
+                        mtime=mtime,
+                        message=str(exc),
+                        malformed_refs=malformed_refs or [],
+                        state=state,
+                    )
+                else:
+                    state.files[key] = FileState(
+                        mtime=mtime,
+                        processed_at=datetime.now(tz=UTC).isoformat(),
+                        status="error",
+                        error=str(exc),
+                    )
             finally:
                 if isinstance(self.llm_client, InstructorLLMClient):
                     self.llm_client.reset_execution_history()
+                try:
+                    save_daemon_state(self.graph_root, state)
+                except Exception as save_exc:  # noqa: BLE001 - log and continue cycle
+                    self.token_logger.log_structural_lint_warning(
+                        target_file=path,
+                        message=f"Checkpoint save failed after {key}: {save_exc}",
+                        malformed_refs=[],
+                    )
 
         state.session_prompt_tokens = self.token_logger.session_prompt_tokens
         state.session_completion_tokens = self.token_logger.session_completion_tokens
@@ -1061,7 +1178,7 @@ def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
             "ok": False,
             "code": "already_running",
             "pid": existing,
-            "message": f"Matryca Brain daemon already running (pid {existing})",
+            "message": f"Matryca Plumber daemon already running (pid {existing})",
         }
 
     pid = os.fork()
@@ -1100,6 +1217,7 @@ __all__ = [
     "apply_semantic_corrections_to_lines",
     "apply_semantic_page_result",
     "append_semantic_index",
+    "append_structural_lint_warning",
     "compute_scan_metrics",
     "load_daemon_state",
     "prune_stale_daemon_file_entries",

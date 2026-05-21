@@ -1,4 +1,4 @@
-"""Tests for Matryca Brain maintenance daemon, token logger, and CLI integration."""
+"""Tests for Matryca Plumber maintenance daemon, token logger, and CLI integration."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from src.agent.maintenance_daemon import (
     SEMANTIC_INDEX_HEADER,
+    STRUCTURAL_LINT_HEADER,
     DaemonState,
     FileState,
     InstructorLLMClient,
@@ -94,7 +95,7 @@ def graph_root(tmp_path: Path) -> Path:
 
 
 def test_token_logger_writes_jsonl_and_counts_session(tmp_path: Path) -> None:
-    log_path = tmp_path / "logs" / "matryca_brain_ops.log"
+    log_path = tmp_path / "logs" / "matryca_plumber_ops.log"
     logger = TokenLogger(log_path=log_path)
     logger.log_turn(
         target_file="pages/Demo.md",
@@ -140,6 +141,34 @@ def test_daemon_state_roundtrip(graph_root: Path, monkeypatch: pytest.MonkeyPatc
     assert loaded.status == "idle"
     assert "/tmp/demo.md" in loaded.files
     assert loaded.files["/tmp/demo.md"].mtime == 123.0
+
+
+def test_save_daemon_state_persists_block_ref_error_text(graph_root: Path) -> None:
+    """Error strings containing ((uuid)) patterns must not block JSON checkpoint writes."""
+    bad_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"
+    error_msg = (
+        "Error: Malformed UUID detected in block ref. "
+        f"Must be standard 36-char format. (example: (({bad_uuid})))."
+    )
+    page_key = str((graph_root / "pages" / "Broken.md").resolve())
+    state = DaemonState(
+        files={
+            page_key: FileState(
+                mtime=1.0,
+                processed_at="2026-01-01T00:00:00+00:00",
+                status="skipped",
+                error=error_msg,
+            ),
+        },
+        status="idle",
+    )
+    save_daemon_state(graph_root, state)
+    loaded = load_daemon_state(graph_root)
+    loaded_error = loaded.files[page_key].error
+    assert loaded.files[page_key].status == "skipped"
+    assert loaded_error == error_msg
+    assert loaded_error is not None
+    assert f"(({bad_uuid}))" in loaded_error
 
 
 def test_append_semantic_index_preserves_content(graph_root: Path) -> None:
@@ -292,16 +321,16 @@ def test_collect_snapshot_reports_metrics(graph_root: Path) -> None:
     assert snap.pending_backlog == 1
 
 
-def test_parser_exposes_brain_subcommands() -> None:
+def test_parser_exposes_plumber_subcommands() -> None:
     parser = build_parser()
-    args = parser.parse_args(["brain", "start", "--foreground"])
-    assert args.command == "brain"
-    assert args.brain_action == "start"
+    args = parser.parse_args(["plumber", "start", "--foreground"])
+    assert args.command == "plumber"
+    assert args.plumber_action == "start"
     assert args.foreground is True
-    args_status = parser.parse_args(["brain", "status"])
-    assert args_status.brain_action == "status"
-    args_stop = parser.parse_args(["brain", "stop"])
-    assert args_stop.brain_action == "stop"
+    args_status = parser.parse_args(["plumber", "status"])
+    assert args_status.plumber_action == "status"
+    args_stop = parser.parse_args(["plumber", "stop"])
+    assert args_stop.plumber_action == "stop"
 
 
 def test_semantic_correction_applies_wikilink(graph_root: Path) -> None:
@@ -509,3 +538,48 @@ def test_instructor_client_explicit_model_overrides_env(
     assert client.model == "override-model"
     client.refresh_config()
     assert client.model == "override-model"
+
+
+def test_daemon_skips_malformed_block_ref_and_processes_healthy_page(
+    graph_root: Path,
+    tmp_path: Path,
+) -> None:
+    bad_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"
+    bad_path = _write_page(graph_root, "BrokenRef", f"- link (({bad_uuid}))\n")
+    good_path = _write_page(graph_root, "Healthy", "- healthy note\n")
+    log_path = tmp_path / "brain.log"
+    logger = TokenLogger(log_path=log_path)
+
+    daemon = MaintenanceDaemon(
+        graph_root,
+        llm_client=StubLLM(),
+        token_logger=logger,
+        max_files_per_cycle=10,
+    )
+    state = daemon.run_cycle()
+
+    bad_key = str(bad_path.resolve())
+    good_key = str(good_path.resolve())
+    assert state.files[bad_key].status == "skipped"
+    assert state.files[good_key].status == "processed"
+    assert list_pending_files(graph_root, state) == []
+
+    bad_text = bad_path.read_text(encoding="utf-8")
+    assert STRUCTURAL_LINT_HEADER in bad_text
+    assert "Matryca Broken Reference" in bad_text
+    assert SEMANTIC_INDEX_HEADER not in bad_text
+
+    good_text = good_path.read_text(encoding="utf-8")
+    assert SEMANTIC_INDEX_HEADER in good_text
+
+    log_lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert any("[STRUCTURAL LINT WARN]" in line for line in log_lines)
+    payload = json.loads(log_lines[0])
+    assert payload["target_file"] == str(bad_path)
+    assert bad_uuid in payload["malformed_refs"]
+
+    persisted = load_daemon_state(graph_root)
+    persisted_error = persisted.files[bad_key].error
+    assert persisted.files[bad_key].status == "skipped"
+    assert persisted_error is not None
+    assert "Malformed UUID" in persisted_error

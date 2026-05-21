@@ -1,4 +1,4 @@
-"""Active context compression for Matryca Brain (Ermes Agent–inspired epistemic condensation)."""
+"""Active context compression for Matryca Plumber (Ermes Agent–inspired epistemic condensation)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ TOKEN_ESTIMATE_SAFETY_MULTIPLIER = 1.12
 MAX_EXECUTION_HISTORY_MESSAGES = 48
 
 _COMPRESSION_SYSTEM_INSTRUCTIONS = (
-    "You are Matryca Brain Context Compressor. Condense maintenance-session history "
+    "You are Matryca Plumber Context Compressor. Condense maintenance-session history "
     "into dense markdown titled '## Consolidated Epistemic State'. Preserve: page titles "
     "processed, MARPA domains assigned, lint corrections applied, entity merges, dangling "
     "links healed, block UUIDs referenced, errors/skips, and open tasks. "
@@ -82,7 +82,7 @@ def serialize_history_for_compression(messages: list[ChatMessage]) -> str:
 def build_compression_user_prompt(history_text: str, *, target_tokens: int) -> str:
     """Build the user payload for the compression call."""
     return (
-        "Compress the Matryca Brain maintenance history below into dense markdown under "
+        "Compress the Matryca Plumber maintenance history below into dense markdown under "
         f"`## Consolidated Epistemic State`. Target <= {target_tokens} estimated tokens. "
         "Preserve factual details; do not invent events.\n\n"
         f"{history_text}"

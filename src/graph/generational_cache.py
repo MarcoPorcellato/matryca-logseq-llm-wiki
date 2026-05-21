@@ -115,7 +115,7 @@ def patch_generational_caches_for_paths(
 ) -> bool:
     """Incrementally refresh alias + BM25 caches for touched paths (no full rebuild).
 
-    Call after the Brain daemon writes a page so MCP sessions keep warm caches.
+    Call after the Plumber daemon writes a page so MCP sessions keep warm caches.
     Returns ``True`` when at least one in-memory cache was patched.
     """
     root = Path(graph_root).expanduser().resolve(strict=False)

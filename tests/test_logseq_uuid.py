@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from src.graph.logseq_uuid import (
     assert_valid_block_refs_in_markdown,
     find_malformed_block_refs,
     is_logseq_block_uuid,
+    is_malformed_block_ref_error,
 )
 from src.graph.markdown_blocks import atomic_write_bytes
 
@@ -43,3 +45,41 @@ def test_atomic_write_bytes_rejects_malformed_block_ref(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True)
     with pytest.raises(ValueError, match="Malformed UUID"):
         atomic_write_bytes(path, f"- ref (({bad}))\n".encode(), graph_root=tmp_path)
+
+
+def test_atomic_write_bytes_can_bypass_block_ref_validation(tmp_path: Path) -> None:
+    bad = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"
+    path = tmp_path / "pages" / "x.md"
+    path.parent.mkdir(parents=True)
+    payload = f"- ref (({bad}))\n".encode()
+    atomic_write_bytes(path, payload, graph_root=tmp_path, validate_block_refs=False)
+    assert path.read_text(encoding="utf-8") == payload.decode()
+
+
+def test_atomic_write_bytes_skips_block_ref_validation_for_non_markdown(tmp_path: Path) -> None:
+    """JSON/PID/log payloads must not trigger ((uuid)) pre-flight even with default validation."""
+    bad = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"
+    payload = json.dumps(
+        {"error": f"Malformed UUID in block ref (({bad}))"},
+        indent=2,
+    ).encode()
+    json_path = tmp_path / ".matryca_daemon_state.json"
+    pid_path = tmp_path / ".matryca_plumber_daemon.pid"
+    log_path = tmp_path / "matryca_plumber_ops.log"
+    atomic_write_bytes(json_path, payload, graph_root=tmp_path)
+    atomic_write_bytes(pid_path, b"12345\n", graph_root=tmp_path)
+    atomic_write_bytes(log_path, payload, graph_root=tmp_path)
+    assert json.loads(json_path.read_text(encoding="utf-8"))["error"].startswith("Malformed UUID")
+    assert pid_path.read_text(encoding="utf-8") == "12345\n"
+    assert log_path.read_text(encoding="utf-8") == payload.decode()
+
+
+def test_is_malformed_block_ref_error_detects_preflight_value_error() -> None:
+    bad = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee"
+    try:
+        assert_valid_block_refs_in_markdown(f"- link (({bad}))")
+    except ValueError as exc:
+        assert is_malformed_block_ref_error(exc)
+    else:
+        pytest.fail("expected ValueError")
+    assert not is_malformed_block_ref_error(ValueError("other"))

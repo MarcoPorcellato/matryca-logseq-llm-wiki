@@ -1,5 +1,5 @@
 # ==============================================================================
-# .repomixignore - Configurazione d'Élite per Matryca Brain OS
+# .repomixignore - Configurazione d'Élite per Matryca Plumber OS
 # ==============================================================================
 
 # --- Version Control & GitHub ---
@@ -26,14 +26,14 @@ dist/
 .coverage
 htmlcov/
 
-# --- Matryca Brain Daemon & State (CRITICO: Esclude i file di runtime del Demone) ---
+# --- Matryca Plumber Daemon & State (CRITICO: Esclude i file di runtime del Demone) ---
 *.pid
-.matryca_brain_daemon.pid
+.matryca_plumber_daemon.pid
 .matryca_daemon_state.json
 .matryca_xray_state.json
 logs/
 logs/*
-logs/matryca_brain_ops.log
+logs/matryca_plumber_ops.log
 
 # --- File di Configurazione Locali e Segreti (Sicurezza) ---
 .env

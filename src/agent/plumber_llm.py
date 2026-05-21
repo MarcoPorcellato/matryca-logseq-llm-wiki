@@ -1,4 +1,4 @@
-"""Structured LLM payloads and protocol for Brain cognitive modules."""
+"""Structured LLM payloads and protocol for Plumber cognitive modules."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class InferredPropertiesResult(BaseModel):
     )
 
 
-class BrainModuleLLM(Protocol):
+class PlumberModuleLLM(Protocol):
     """LLM surface used by cognitive lint modules."""
 
     def generate_contextual_seed(
@@ -87,7 +87,7 @@ class BrainModuleLLM(Protocol):
 
 
 __all__ = [
-    "BrainModuleLLM",
+    "PlumberModuleLLM",
     "ContextualSeedResult",
     "EntityOverlapResult",
     "InferredPropertiesResult",

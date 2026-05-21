@@ -1,4 +1,4 @@
-"""Tests for Matryca Brain active context compression."""
+"""Tests for Matryca Plumber active context compression."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def test_condense_messages_skips_when_under_trigger() -> None:
 
 
 def test_condense_messages_preserves_system_prompt() -> None:
-    system_text = "Immutable Matryca Brain root system prompt."
+    system_text = "Immutable Matryca Plumber root system prompt."
     messages: list[ChatMessage] = [
         {"role": "system", "content": system_text},
         *_build_history(8),
@@ -170,12 +170,12 @@ def test_token_logger_writes_compression_warning(tmp_path: Path) -> None:
     assert "[COMPRESSION WARN]" in payload["message"]
 
 
-def test_load_brain_config_compression_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MATRYCA_BRAIN_CONTEXT_COMPRESSION", raising=False)
+def test_load_plumber_config_compression_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MATRYCA_PLUMBER_CONTEXT_COMPRESSION", raising=False)
     monkeypatch.delenv("MATRYCA_LM_MODEL", raising=False)
-    from src.agent.brain_config import DEFAULT_LM_MODEL, load_brain_lint_config
+    from src.agent.plumber_config import DEFAULT_LM_MODEL, load_plumber_lint_config
 
-    cfg = load_brain_lint_config()
+    cfg = load_plumber_lint_config()
     assert cfg.context_compression is False
     assert cfg.compression_trigger == 100_000
     assert cfg.compression_target == 30_000
@@ -183,7 +183,7 @@ def test_load_brain_config_compression_defaults(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_resolve_lm_model_respects_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.agent.brain_config import DEFAULT_LM_MODEL, resolve_lm_model
+    from src.agent.plumber_config import DEFAULT_LM_MODEL, resolve_lm_model
 
     monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
     assert resolve_lm_model() == "gemma-4-e4b-it"

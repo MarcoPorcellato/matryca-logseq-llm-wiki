@@ -25,9 +25,9 @@ def test_parser_exposes_seven_subcommands() -> None:
         if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
     )
     assert sorted(sub_action.choices) == [
-        "brain",
         "lint",
         "mutate",
+        "plumber",
         "read",
         "refactor",
         "search",

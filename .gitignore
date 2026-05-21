@@ -1,5 +1,5 @@
 # ==============================================================================
-# 🧠 Matryca Brain OS - Git Ignore Configuration
+# 🔧 Matryca Plumber OS - Git Ignore Configuration
 # ==============================================================================
 
 # ========================================
@@ -64,7 +64,7 @@ logs/
 
 # Esclude i file PID e gli stati di checkpoint memorizzati dal demone
 *.pid
-.matryca_brain_daemon.pid
+.matryca_plumber_daemon.pid
 .matryca_daemon_state.json
 .matryca_xray_state.json
 

@@ -1,4 +1,4 @@
-"""Token-accurate JSONL logger for local LLM operations (Matryca Brain)."""
+"""Token-accurate JSONL logger for local LLM operations (Matryca Plumber)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ OperationType = Literal[
     "Context Compression",
 ]
 
-DEFAULT_LOG_PATH = Path("logs") / "matryca_brain_ops.log"
+DEFAULT_LOG_PATH = Path("logs") / "matryca_plumber_ops.log"
 _MAX_PROMPT_CHARS = 12_000
 _MAX_RESPONSE_CHARS = 12_000
 
@@ -33,7 +33,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _default_log_path() -> Path:
-    override = os.environ.get("MATRYCA_BRAIN_LOG_PATH", "").strip()
+    override = os.environ.get("MATRYCA_PLUMBER_LOG_PATH", "").strip()
     if override:
         return Path(override).expanduser()
     return DEFAULT_LOG_PATH
@@ -195,6 +195,35 @@ class TokenLogger:
             "operation": "Context Compression",
             "message": warn_text,
             "model": model,
+            "fallback": True,
+        }
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+        with _write_guard:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+    def log_structural_lint_warning(
+        self,
+        *,
+        target_file: str | Path,
+        message: str,
+        malformed_refs: list[str] | None = None,
+    ) -> None:
+        """Persist a ``[STRUCTURAL LINT WARN]`` record to the ops log."""
+        warn_text = (
+            message
+            if message.startswith("[STRUCTURAL LINT WARN]")
+            else f"[STRUCTURAL LINT WARN] {message}"
+        )
+        entry = {
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "operation": "Health Check",
+            "target_file": str(target_file),
+            "message": warn_text,
+            "malformed_refs": malformed_refs or [],
             "fallback": True,
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"

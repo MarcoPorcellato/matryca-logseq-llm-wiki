@@ -9,7 +9,7 @@ from typing import Literal
 from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import atomic_write_bytes
 from ...graph.page_write_lock import page_rmw_lock
-from ..brain_llm import MarpaClassificationResult
+from ..plumber_llm import MarpaClassificationResult
 from ..prompt_constraints import finalize_system_prompt
 from ._shared import ModuleOutcome
 

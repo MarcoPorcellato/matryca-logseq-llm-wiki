@@ -1,4 +1,4 @@
-"""Shared helpers for Matryca Brain cognitive lint modules."""
+"""Shared helpers for Matryca Plumber cognitive lint modules."""
 
 from __future__ import annotations
 

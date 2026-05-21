@@ -154,19 +154,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install or remove the per-user background service unit",
     )
 
-    brain_p = sub.add_parser(
-        "brain",
-        help="Matryca Brain maintenance daemon (local LLM graph indexing)",
+    plumber_p = sub.add_parser(
+        "plumber",
+        help="Matryca Plumber maintenance daemon (local LLM graph indexing)",
     )
-    brain_sub = brain_p.add_subparsers(dest="brain_action", required=True)
-    brain_start = brain_sub.add_parser("start", help="Start the maintenance daemon")
-    brain_start.add_argument(
+    plumber_sub = plumber_p.add_subparsers(dest="plumber_action", required=True)
+    plumber_start = plumber_sub.add_parser("start", help="Start the maintenance daemon")
+    plumber_start.add_argument(
         "--foreground",
         action="store_true",
         help="Run in the current terminal instead of detaching",
     )
-    brain_sub.add_parser("status", help="Open the live TUI dashboard")
-    brain_sub.add_parser("stop", help="Gracefully stop the running daemon")
+    plumber_sub.add_parser("status", help="Open the live TUI dashboard")
+    plumber_sub.add_parser("stop", help="Gracefully stop the running daemon")
 
     return parser
 
@@ -240,24 +240,24 @@ async def run_cli(args: argparse.Namespace) -> int:
             return 1
         return 0
 
-    if command == "brain":
+    if command == "plumber":
         graph_root = resolve_graph_root()
-        brain_action = args.brain_action
-        if brain_action == "start":
+        plumber_action = args.plumber_action
+        if plumber_action == "start":
             if args.foreground:
                 start_daemon_foreground(graph_root)
                 return 0
             start_out = start_daemon_detached(graph_root)
             _emit_result(start_out)
             return 0 if start_out.get("ok") is not False else 1
-        if brain_action == "status":
+        if plumber_action == "status":
             run_dashboard(graph_root=graph_root)
             return 0
-        if brain_action == "stop":
+        if plumber_action == "stop":
             stop_out = stop_daemon(graph_root)
             _emit_result(stop_out)
             return 0
-        _emit_error(f"unknown brain action: {brain_action}")
+        _emit_error(f"unknown plumber action: {plumber_action}")
         return 2
 
     _emit_error(f"unknown command: {command}")

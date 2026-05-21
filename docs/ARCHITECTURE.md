@@ -416,8 +416,9 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, graceful MCP shutdown |
 | **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
 | **13 — Operational hardening (`v1.4.1`)** | Lifespan **`os.chdir`** to sandbox root; **`mcp_telemetry` privacy sanitizer** (`MATRYCA_DEBUG`); **`service_manager.py`** + CLI **`matryca service`**; **162** strict tests | **Daemon-safe cwd**, **production-safe MCP logs**, **LaunchAgent / systemd** background integration |
+| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`prompt_constraints`**, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; fault-tolerant background processing; **214** strict tests |
 
-**Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
+**Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`docs/PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
 ---
 
@@ -493,6 +494,122 @@ flowchart TB
 | `.github/workflows/ci.yml` | Ruff, Mypy, Pytest on `main` |
 | `.github/workflows/release.yml` | Tag-driven build and GitHub Release |
 | `.github/dependabot.yml` | Automated dependency PRs |
+| `src/agent/maintenance_daemon.py` | Matryca Plumber daemon cycle, semantic index append, structural quarantine |
+| `src/agent/plumber_config.py` | Env-driven cognitive lint flags (`load_plumber_lint_config`) |
+| `src/agent/plumber_modules/` | Env-gated cognitive plugins (MARPA, dangling healer, property hygiene, …) |
+| `src/agent/context_compressor.py` | Ermes-inspired epistemic condensation (100k trigger) |
+| `src/agent/prompt_constraints.py` | Cross-lingual output constraint for Plumber LLM prompts |
+| `src/cli/tui_dashboard.py` | Rich TUI for `matryca plumber status` |
+
+---
+
+## Matryca Plumber — autonomous maintenance daemon (Phase 8)
+
+**Matryca Plumber** is a **local-first background structure & cognitive maintenance daemon** that progressively indexes Logseq markdown with a **local LLM** (LM Studio OpenAI-compatible API). It complements the interactive MCP plane: agents mutate on demand; the daemon **continuously** repairs broken block references, flushes context loops via Ermes compression, appends semantic metadata, runs optional cognitive lint modules, and logs token economics to **`logs/matryca_plumber_ops.log`**.
+
+> **Brand separation:** **Matryca Brain** is reserved exclusively for the Nuitka-compiled Pro enterprise ingestion suite. The open-source maintenance daemon described here is **Matryca Plumber**.
+
+State checkpoint: **`.matryca_daemon_state.json`** at the graph root (per-file `mtime`, `processed` / `skipped` / `error`). Process lock: **`.matryca_plumber_daemon.pid`**.
+
+### Why these mechanisms exist
+
+#### Atomic RMW with OS-level locking (`fcntl.flock`)
+
+Matryca Plumber runs **concurrently** with human edits in Logseq OG and with MCP tool sessions on the same files. Without serialization, read-modify-write cycles (read page → LLM lint → append index → `os.replace`) would interleave and produce torn writes or lost bullets.
+
+**`page_rmw_lock(path)`** (`src/graph/page_write_lock.py`) acquires an exclusive **`fcntl.flock`** on a sidecar lock file beside each page. The Plumber daemon, MCP mutators, and cognitive modules all acquire this lock before mutating a page — **transactional immutability** at the file grain.
+
+#### Incremental cache patching (`patch_generational_caches_for_paths`)
+
+Rebuilding the full BM25 token corpus and alias index after every single-block edit would **CPU-thrash** large graphs. After each Plumber write, **`patch_generational_caches_for_paths`** surgically updates only the touched relative paths inside the in-memory generational caches — preserving Salsa-style `st_mtime_ns` invalidation without vault-wide rescans.
+
+#### Native grammar-based sampling (`JSON_SCHEMA`)
+
+Compact local weights (Gemma 4, Qwen 7B/9B) waste tokens on conversational JSON preambles. **`InstructorLLMClient`** defaults to **`MATRYCA_LM_INSTRUCTOR_MODE=JSON_SCHEMA`**, binding LM Studio grammar sampling so structured fields (`SemanticIndexResult`, `MarpaClassificationResult`, …) fill immediately. **`MATRYCA_LM_INSTRUCTOR_FALLBACK=MD_JSON`** provides a secondary extraction mode when schema binding fails — parsing errors drop to near zero in production graphs.
+
+#### Ermes-inspired context compressor
+
+Long multi-turn maintenance loops inflate the local **KV cache** and degrade attention (“needle in a haystack”). When estimated history tokens exceed **`MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS`** (default **100,000**), **`condense_messages`** collapses intermediate turns into a dense **`## Consolidated Epistemic State`** summary targeting **`MATRYCA_PLUMBER_COMPRESSION_TARGET_TOKENS`** (default **30,000**). The system prompt and trailing user turn are preserved; compression LLM failures fall back to truncation — the daemon never exits.
+
+#### Fault-tolerant block reference quarantine
+
+Human typo'd `((uuid))` tokens must not crash the daemon. **`run_cycle()`** preflights each page with **`find_malformed_block_refs`**. On failure:
+
+1. Log **`[STRUCTURAL LINT WARN]`** to the ops log.
+2. Mark the file **`skipped`** (stable `mtime` — no retry loop).
+3. Append **`### Matryca Structural Lint`** with `#todo [[Matryca Broken Reference]]` (write uses **`validate_block_refs=False`** — zero-destruction of existing prose).
+4. Continue the poll loop — **100% daemon uptime**.
+
+#### IP protection (OSS vs Pro)
+
+Open source exposes **MARPA domain taxonomy**, dangling-link healing, property hygiene, semantic routing cache, and core semantic lint via **Matryca Plumber**. **Pavlyshyn bipartite graph validation**, **Twin Ingestion**, and **Epistemic Guardian** are structurally omitted from OSS — reserved for **Matryca Brain**, the Nuitka-compiled commercial tier (see **`docs/PROJECT_DIARY.md`**).
+
+### Plumber lifecycle (data plane)
+
+```mermaid
+flowchart TD
+  SCAN["Scan directory\niter_alias_source_paths"] --> PENDING["list_pending_files\n(settled: processed + skipped)"]
+  PENDING --> READ["Read page UTF-8"]
+  READ --> PRE{"Preflight\nfind_malformed_block_refs"}
+  PRE -->|malformed| QUAR["Quarantine\nlog STRUCTURAL LINT WARN\nappend Structural Lint section\nstatus=skipped"]
+  PRE -->|ok| COG{"Cognitive modules\nenv-gated pipeline"}
+  COG --> MARPA["MARPA taxonomy\n(optional)"]
+  MARPA --> LLM["Instructor structured inference\nJSON_SCHEMA → MD_JSON fallback"]
+  LLM --> ERMES{"Token estimate\n> compression trigger?"}
+  ERMES -->|yes| COMP["Ermes condensation\nConsolidated Epistemic State"]
+  ERMES -->|no| APPLY
+  COMP --> APPLY["apply_semantic_page_result\npage_rmw_lock + atomic_write_bytes"]
+  APPLY --> PATCH["patch_generational_caches_for_paths"]
+  PATCH --> STATE["Update .matryca_daemon_state.json"]
+  QUAR --> STATE
+  STATE --> SLEEP["sleep MATRYCA_PLUMBER_POLL_SECONDS"]
+  SLEEP --> SCAN
+```
+
+### Hardening mechanisms (latest optimization pass)
+
+| Vector | Implementation | Rationale |
+|--------|----------------|-----------|
+| **Memory history cap** | `MAX_EXECUTION_HISTORY_MESSAGES = 48` in `context_compressor.py`; Instructor client trims `_execution_history` after each page | Constant memory across infinite daemon uptime |
+| **HTTP / compression fallbacks** | `condense_messages` try/except → truncation; compression warnings logged as `[COMPRESSION WARN]` | LM Studio offline must not kill the child process |
+| **Idempotent backlink deduplication** | `run_backlink_backpropagator` + semantic lint skip reasons (`no_change`, `uuid_not_found`) | Prevents duplicate wikilink injection on re-runs |
+| **Token estimate safety buffer** | `TOKEN_ESTIMATE_SAFETY_MULTIPLIER = 1.12` on Qwen/Gemma heuristic | Triggers compression before VRAM cliff on code/CJK-heavy pages |
+
+### Plumber index artifacts (on-disk)
+
+**Semantic index** (appended once per page after successful inference):
+
+```markdown
+### Matryca Semantic Index
+- indexed-at:: 2026-05-21 14:30 UTC
+- summary:: …
+- suggested-tags:: #tag1 #tag2
+- moc-pointers::
+  - [[MOC Example]]
+- cross-references::
+  - concept (relation) → [[Target Page]]
+- semantic-lint-applied::
+  - auto_wikilink:uuid…:reason
+```
+
+**Structural lint** (quarantine annotation — user-facing alert):
+
+```markdown
+### Matryca Structural Lint
+- malformed-block-refs::
+  - ((aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee))
+- todo:: #todo [[Matryca Broken Reference]] — fix ((uuid)) typos in Logseq
+```
+
+**MARPA validation** (when `MATRYCA_LINT_MARPA_FRAMEWORK=true`):
+
+```markdown
+### Matryca MARPA Validation
+- assigned-domain:: progetto
+- detected-tags:: #project
+- ssot-warnings::
+  - ssot_duplicate:pages/Other.md (prefer ((block-uuid)) transclusion)
+```
 
 ---
 
@@ -500,6 +617,7 @@ flowchart TB
 
 - **[`SYSTEM_PROMPT.md`](../SYSTEM_PROMPT.md)** — agent rules (outlines, dry-runs, L1/L2)
 - **[`docs/roadmaps/`](../docs/roadmaps/)** — phased delivery checklists
+- **[`docs/PROJECT_DIARY.md`](PROJECT_DIARY.md)** — phase lifecycle log, ADRs, crushed bottlenecks
 - **[`docs/openspec/README.md`](openspec/README.md)** — trimmed internal specifications
 - **[`SECURITY.md`](../SECURITY.md)** — private vulnerability reporting
 - **[`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)** — community standards

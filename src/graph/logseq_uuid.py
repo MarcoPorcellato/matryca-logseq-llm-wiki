@@ -18,6 +18,8 @@ _BLOCK_REF_PREFLIGHT_ERROR = (
     "Must be standard 36-char format. Please fix the typo and retry"
 )
 
+MALFORMED_BLOCK_REF_MARKER = _BLOCK_REF_PREFLIGHT_ERROR
+
 
 def is_standard_uuid_shape(value: str) -> bool:
     """True when ``value`` is exactly 36 chars and parses as a UUID."""
@@ -59,10 +61,17 @@ def assert_valid_block_refs_in_markdown(text: str) -> None:
         raise ValueError(msg)
 
 
+def is_malformed_block_ref_error(exc: BaseException) -> bool:
+    """True when ``exc`` is the atomic-write preflight rejection for bad ``((uuid))`` tokens."""
+    return isinstance(exc, ValueError) and MALFORMED_BLOCK_REF_MARKER in str(exc)
+
+
 __all__ = [
+    "MALFORMED_BLOCK_REF_MARKER",
     "UUID_CANONICAL_RE",
     "assert_valid_block_refs_in_markdown",
     "find_malformed_block_refs",
     "is_logseq_block_uuid",
+    "is_malformed_block_ref_error",
     "is_standard_uuid_shape",
 ]

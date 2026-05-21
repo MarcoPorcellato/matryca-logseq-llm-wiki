@@ -1,4 +1,4 @@
-"""Environment-driven configuration for Matryca Brain cognitive lint modules."""
+"""Environment-driven configuration for Matryca Plumber cognitive lint modules."""
 
 from __future__ import annotations
 
@@ -69,8 +69,8 @@ def resolve_lm_base_url(*, override: str | None = None) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class BrainLintConfig:
-    """Feature flags and thresholds for advanced Brain lint modules."""
+class PlumberLintConfig:
+    """Feature flags and thresholds for advanced Plumber lint modules."""
 
     lm_model: str = DEFAULT_LM_MODEL
     lm_base_url: str = DEFAULT_LM_BASE_URL
@@ -103,18 +103,18 @@ class BrainLintConfig:
         )
 
 
-def load_brain_lint_config() -> BrainLintConfig:
-    """Load Brain lint settings from environment variables."""
+def load_plumber_lint_config() -> PlumberLintConfig:
+    """Load Plumber lint settings from environment variables."""
     rules_raw = os.environ.get("MATRYCA_LINT_PROPERTY_RULES", "").strip()
     rules_path = Path(rules_raw).expanduser() if rules_raw else None
     if rules_path is None:
         graph = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
         if graph:
-            candidate = Path(graph).expanduser() / "matryca-brain-rules.yml"
+            candidate = Path(graph).expanduser() / "matryca-plumber-rules.yml"
             if candidate.is_file():
                 rules_path = candidate
 
-    return BrainLintConfig(
+    return PlumberLintConfig(
         lm_model=resolve_lm_model(),
         lm_base_url=resolve_lm_base_url(),
         marpa_framework=_env_bool("MATRYCA_LINT_MARPA_FRAMEWORK"),
@@ -129,17 +129,17 @@ def load_brain_lint_config() -> BrainLintConfig:
         property_rules_path=rules_path,
         backpropagate_links=_env_bool("MATRYCA_LINT_BACKPROPAGATE_LINKS"),
         semantic_routing=_env_bool("MATRYCA_LINT_SEMANTIC_ROUTING"),
-        context_compression=_env_bool("MATRYCA_BRAIN_CONTEXT_COMPRESSION"),
-        compression_trigger=_env_int("MATRYCA_BRAIN_COMPRESSION_TRIGGER_TOKENS", 100_000),
-        compression_target=_env_int("MATRYCA_BRAIN_COMPRESSION_TARGET_TOKENS", 30_000),
+        context_compression=_env_bool("MATRYCA_PLUMBER_CONTEXT_COMPRESSION"),
+        compression_trigger=_env_int("MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS", 100_000),
+        compression_target=_env_int("MATRYCA_PLUMBER_COMPRESSION_TARGET_TOKENS", 30_000),
     )
 
 
 __all__ = [
-    "BrainLintConfig",
     "DEFAULT_LM_BASE_URL",
     "DEFAULT_LM_MODEL",
-    "load_brain_lint_config",
+    "PlumberLintConfig",
+    "load_plumber_lint_config",
     "resolve_lm_base_url",
     "resolve_lm_model",
 ]

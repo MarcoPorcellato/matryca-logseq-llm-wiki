@@ -1,4 +1,4 @@
-"""Shared cross-lingual constraints for Matryca Brain LLM system prompts."""
+"""Shared cross-lingual constraints for Matryca Plumber LLM system prompts."""
 
 from __future__ import annotations
 

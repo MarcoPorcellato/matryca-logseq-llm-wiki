@@ -1,27 +1,27 @@
-"""Tests for Matryca Brain cognitive lint modules."""
+"""Tests for Matryca Plumber cognitive lint modules."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from src.agent.brain_config import BrainLintConfig, load_brain_lint_config
-from src.agent.brain_llm import (
+from src.agent.plumber_config import PlumberLintConfig, load_plumber_lint_config
+from src.agent.plumber_llm import (
     ContextualSeedResult,
     EntityOverlapResult,
     InferredPropertiesResult,
     MarpaClassificationResult,
     MarpaDomain,
 )
-from src.agent.brain_modules import run_cognitive_lint_pipeline
-from src.agent.brain_modules.auto_split import run_auto_split
-from src.agent.brain_modules.dangling_healer import run_dangling_healer
-from src.agent.brain_modules.marpa_framework import run_marpa_framework
-from src.agent.brain_modules.property_hygiene import run_property_hygiene
+from src.agent.plumber_modules import run_cognitive_lint_pipeline
+from src.agent.plumber_modules.auto_split import run_auto_split
+from src.agent.plumber_modules.dangling_healer import run_dangling_healer
+from src.agent.plumber_modules.marpa_framework import run_marpa_framework
+from src.agent.plumber_modules.property_hygiene import run_property_hygiene
 from src.graph.page_write_lock import clear_page_write_locks
 
 
-class StubBrainLLM:
+class StubPlumberLLM:
     def generate_contextual_seed(
         self,
         *,
@@ -100,10 +100,18 @@ def _write_page(graph_root: Path, title: str, body: str) -> Path:
     return path
 
 
-def test_load_brain_lint_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MATRYCA_LINT_HEAL_DANGLING", raising=False)
-    monkeypatch.delenv("MATRYCA_LINT_MARPA_FRAMEWORK", raising=False)
-    cfg = load_brain_lint_config()
+def test_load_plumber_lint_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "MATRYCA_LINT_HEAL_DANGLING",
+        "MATRYCA_LINT_MARPA_FRAMEWORK",
+        "MATRYCA_LINT_ENTITY_CONSOLIDATION",
+        "MATRYCA_LINT_AUTO_SPLIT",
+        "MATRYCA_LINT_PROPERTY_HYGIENE",
+        "MATRYCA_LINT_BACKPROPAGATE_LINKS",
+        "MATRYCA_LINT_SEMANTIC_ROUTING",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    cfg = load_plumber_lint_config()
     assert cfg.heal_dangling is False
     assert cfg.marpa_framework is False
     assert cfg.dangling_max_words == 50
@@ -117,7 +125,7 @@ def test_dangling_healer_creates_seed_page(graph_root: Path) -> None:
         source,
         "Source",
         source.read_text(encoding="utf-8"),
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
         max_words=50,
     )
     target = graph_root / "pages" / "Future Concept.md"
@@ -135,7 +143,7 @@ def test_property_hygiene_appends_missing_properties(graph_root: Path) -> None:
         path,
         "Proj",
         path.read_text(encoding="utf-8"),
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
         rules_path=None,
         infer_missing=True,
     )
@@ -166,15 +174,15 @@ def test_cognitive_pipeline_respects_disabled_modules(graph_root: Path) -> None:
         path,
         "Idle",
         path.read_text(encoding="utf-8"),
-        llm=StubBrainLLM(),
-        config=BrainLintConfig(),
+        llm=StubPlumberLLM(),
+        config=PlumberLintConfig(),
     )
     assert outcome.modules_run == []
 
 
 def test_cognitive_pipeline_runs_enabled_modules(graph_root: Path) -> None:
     path = _write_page(graph_root, "Tagged", "- Launch #project now [[Ghost Page]]\n")
-    config = BrainLintConfig(
+    config = PlumberLintConfig(
         heal_dangling=True,
         property_hygiene=True,
         infer_missing_properties=True,
@@ -184,7 +192,7 @@ def test_cognitive_pipeline_runs_enabled_modules(graph_root: Path) -> None:
         path,
         "Tagged",
         path.read_text(encoding="utf-8"),
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
         config=config,
     )
     assert "heal_dangling" in outcome.modules_run
@@ -201,7 +209,7 @@ def test_marpa_framework_classifies_project_with_deadline(graph_root: Path) -> N
         path,
         "Progetti___Lancio",
         body,
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
     )
     text = path.read_text(encoding="utf-8")
     assert "type:: progetto" in text
@@ -218,8 +226,8 @@ def test_marpa_disabled_by_default_leaves_file_untouched(graph_root: Path) -> No
         path,
         "Idle",
         original,
-        llm=StubBrainLLM(),
-        config=BrainLintConfig(),
+        llm=StubPlumberLLM(),
+        config=PlumberLintConfig(),
     )
     assert "marpa_framework" not in outcome.modules_run
     assert path.read_text(encoding="utf-8") == original
@@ -233,7 +241,7 @@ def test_marpa_validation_section_is_replaced_on_rerun(graph_root: Path) -> None
         path,
         "Rerun",
         body,
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
     )
     first = path.read_text(encoding="utf-8")
     assert first.count("### Matryca MARPA Validation") == 1
@@ -245,7 +253,7 @@ def test_marpa_validation_section_is_replaced_on_rerun(graph_root: Path) -> None
         path,
         "Rerun",
         edited,
-        llm=StubBrainLLM(),
+        llm=StubPlumberLLM(),
     )
     second = path.read_text(encoding="utf-8")
     assert second.count("### Matryca MARPA Validation") == 1

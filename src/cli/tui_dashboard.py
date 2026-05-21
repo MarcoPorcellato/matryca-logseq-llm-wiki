@@ -1,4 +1,4 @@
-"""Rich TUI dashboard for monitoring the Matryca Brain maintenance daemon."""
+"""Rich TUI dashboard for monitoring the Matryca Plumber maintenance daemon."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-from ..agent.brain_config import resolve_lm_model
 from ..agent.maintenance_daemon import (
     DEFAULT_MODEL,
     compute_scan_metrics,
@@ -23,6 +22,7 @@ from ..agent.maintenance_daemon import (
     read_pid_file,
     resolve_graph_root,
 )
+from ..agent.plumber_config import resolve_lm_model
 from ..utils.token_logger import TokenLogger
 
 
@@ -30,7 +30,7 @@ from ..utils.token_logger import TokenLogger
 class DashboardSnapshot:
     """Point-in-time metrics for one TUI refresh."""
 
-    title: str = "Matryca Brain Maintenance Daemon"
+    title: str = "Matryca Plumber Maintenance Daemon"
     status: str = "Unknown"
     model: str = DEFAULT_MODEL
     total_pages: int = 0

@@ -102,6 +102,7 @@ def atomic_write_bytes(
     data: bytes,
     *,
     graph_root: str | Path,
+    validate_block_refs: bool = True,
 ) -> None:
     """Write ``data`` to ``file_path`` via temp file, ``fsync``, and atomic ``os.replace``.
 
@@ -109,10 +110,11 @@ def atomic_write_bytes(
     Parent directories are created when missing (same as typical journal append).
 
     Raises:
-        ValueError: When ``file_path`` escapes ``graph_root`` or UTF-8 markdown contains a
-            malformed ``((uuid))`` block reference.
+        ValueError: When ``file_path`` escapes ``graph_root`` or a ``*.md`` payload contains a
+            malformed ``((uuid))`` block reference (unless ``validate_block_refs=False``).
     """
-    if b"((" in data:
+    is_markdown = Path(file_path).suffix.lower() == ".md"
+    if validate_block_refs and is_markdown and b"((" in data:
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
@@ -147,12 +149,23 @@ def atomic_write_file(
     *,
     graph_root: str | Path,
     encoding: str = "utf-8",
+    validate_block_refs: bool = True,
 ) -> None:
     """UTF-8 text or raw bytes; same durability guarantees as :func:`atomic_write_bytes`."""
     if isinstance(contents, bytes):
-        atomic_write_bytes(file_path, contents, graph_root=graph_root)
+        atomic_write_bytes(
+            file_path,
+            contents,
+            graph_root=graph_root,
+            validate_block_refs=validate_block_refs,
+        )
     else:
-        atomic_write_bytes(file_path, contents.encode(encoding), graph_root=graph_root)
+        atomic_write_bytes(
+            file_path,
+            contents.encode(encoding),
+            graph_root=graph_root,
+            validate_block_refs=validate_block_refs,
+        )
 
 
 def sweep_dangling_atomic_tmp_files(graph_root: str | Path) -> int:

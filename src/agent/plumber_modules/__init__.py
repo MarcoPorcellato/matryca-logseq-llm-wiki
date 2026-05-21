@@ -1,11 +1,11 @@
-"""Matryca Brain cognitive lint plugins (env-gated)."""
+"""Matryca Plumber cognitive lint plugins (env-gated)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..brain_config import BrainLintConfig
+from ..plumber_config import PlumberLintConfig
 from .auto_split import run_auto_split
 from .dangling_healer import run_dangling_healer
 from .entity_consolidation import run_entity_consolidation
@@ -30,7 +30,7 @@ def run_cognitive_lint_pipeline(
     content: str,
     *,
     llm: object,
-    config: BrainLintConfig,
+    config: PlumberLintConfig,
 ) -> CognitiveLintOutcome:
     """Run enabled cognitive lint modules before the semantic index pass."""
     outcome = CognitiveLintOutcome()
