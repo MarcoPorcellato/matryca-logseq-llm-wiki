@@ -70,3 +70,39 @@ def test_tail_activity_summaries_skips_shutdown_noise(tmp_path: Path) -> None:
 def test_tail_lines_gracefully_handles_missing_or_unreadable_log(tmp_path: Path) -> None:
     logger = TokenLogger(log_path=tmp_path / "missing.log")
     assert logger.tail_lines(5) == []
+
+
+def test_session_token_totals_from_log_sums_since_last_shutdown(tmp_path: Path) -> None:
+    log_path = tmp_path / "ops.log"
+    logger = TokenLogger(log_path=log_path)
+    lines = [
+        json.dumps(
+            {
+                "timestamp": "2026-05-21T08:00:00+00:00",
+                "operation": "Concept Indexing",
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+            },
+        ),
+        json.dumps(
+            {
+                "timestamp": "2026-05-21T09:00:00+00:00",
+                "operation": "Daemon Lifecycle",
+                "message": "[DAEMON SHUTDOWN RECEIVED] stop",
+            },
+        ),
+        json.dumps(
+            {
+                "timestamp": "2026-05-21T10:00:00+00:00",
+                "operation": "Concept Indexing",
+                "prompt_tokens": 40,
+                "completion_tokens": 5,
+            },
+        ),
+    ]
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    prompt_total, completion_total = logger.session_token_totals_from_log()
+
+    assert prompt_total == 40
+    assert completion_total == 5

@@ -210,6 +210,8 @@ class DaemonState:
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
     current_cluster: str | None = None
+    current_cluster_files_total: int = 0
+    current_cluster_files_done: int = 0
     phase2_llm_turns: int = 0
     last_scan_at: str | None = None
     last_file: str | None = None
@@ -223,6 +225,8 @@ class DaemonState:
             "session_prompt_tokens": self.session_prompt_tokens,
             "session_completion_tokens": self.session_completion_tokens,
             "current_cluster": self.current_cluster,
+            "current_cluster_files_total": self.current_cluster_files_total,
+            "current_cluster_files_done": self.current_cluster_files_done,
             "phase2_llm_turns": self.phase2_llm_turns,
             "last_scan_at": self.last_scan_at,
             "last_file": self.last_file,
@@ -264,6 +268,8 @@ class DaemonState:
                 if payload.get("current_cluster") not in (None, "")
                 else None
             ),
+            current_cluster_files_total=int(payload.get("current_cluster_files_total", 0)),
+            current_cluster_files_done=int(payload.get("current_cluster_files_done", 0)),
             phase2_llm_turns=int(payload.get("phase2_llm_turns", 0)),
             last_scan_at=payload.get("last_scan_at"),
             last_file=payload.get("last_file"),
@@ -862,8 +868,46 @@ class InstructorLLMClient:
         messages.append({"role": "user", "content": prompt})
         return messages
 
+    @staticmethod
+    def _extract_completion_usage(completion: object) -> dict[str, int]:
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        usage_obj = getattr(completion, "usage", None)
+        if usage_obj is not None:
+            usage["prompt_tokens"] = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
+            usage["completion_tokens"] = int(getattr(usage_obj, "completion_tokens", 0) or 0)
+        return usage
+
+    def _log_completion_turn(
+        self,
+        *,
+        completion: object,
+        target_file: str,
+        operation: OperationType,
+        prompt: str,
+        response: str,
+        latency_seconds: float,
+        ok: bool = True,
+        error: str | None = None,
+    ) -> dict[str, int]:
+        """Record one structured LLM completion on the shared token logger."""
+        usage = self._extract_completion_usage(completion)
+        self.token_logger.log_turn(
+            target_file=target_file,
+            operation=operation,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            prompt=prompt,
+            response=response,
+            latency_seconds=latency_seconds,
+            model=self.model,
+            ok=ok,
+            error=error,
+        )
+        return usage
+
     def _compress_history_via_llm(self, compression_prompt: str) -> str:
         """Send isolated history to LM Studio for epistemic condensation."""
+        started = time.perf_counter()
         response = self._raw_client.chat.completions.create(
             model=self.model,
             messages=[
@@ -873,9 +917,18 @@ class InstructorLLMClient:
             temperature=0.1,
         )
         content = response.choices[0].message.content
-        return content.strip() if content else ""
+        text = content.strip() if content else ""
+        self._log_completion_turn(
+            completion=response,
+            target_file="execution_history",
+            operation="Context Compression",
+            prompt=compression_prompt,
+            response=text,
+            latency_seconds=time.perf_counter() - started,
+        )
+        return text
 
-    def _raw_json_completion(self, messages: list[ChatMessage]) -> str:
+    def _raw_json_completion(self, messages: list[ChatMessage]) -> tuple[str, object]:
         """Request a raw JSON completion when instructor parsing fails."""
         api_messages = cast(Any, messages)
         try:
@@ -894,7 +947,29 @@ class InstructorLLMClient:
         content = response.choices[0].message.content
         if content is None or not content.strip():
             raise RuntimeError("Empty raw JSON completion")
-        return str(content.strip())
+        return str(content.strip()), response
+
+    def _finalize_structured_completion[T: BaseModel](
+        self,
+        *,
+        parsed: T,
+        completion: object,
+        prompt: str,
+        started: float,
+        telemetry_target: str | None,
+        telemetry_operation: OperationType | None,
+        log_tokens: bool,
+    ) -> tuple[T, object]:
+        if log_tokens and telemetry_target and telemetry_operation:
+            self._log_completion_turn(
+                completion=completion,
+                target_file=telemetry_target,
+                operation=telemetry_operation,
+                prompt=prompt,
+                response=parsed.model_dump_json(),
+                latency_seconds=time.perf_counter() - started,
+            )
+        return parsed, completion
 
     def _completion_with_structured_output[T: BaseModel](
         self,
@@ -903,8 +978,12 @@ class InstructorLLMClient:
         response_model: type[T],
         system_prompt: str,
         stateless: bool = False,
+        telemetry_target: str | None = None,
+        telemetry_operation: OperationType | None = None,
+        log_tokens: bool = True,
     ) -> tuple[T, object]:
         """Call LM Studio with JSON schema mode, falling back when parsing fails."""
+        started = time.perf_counter()
         self.refresh_config()
         config = load_plumber_lint_config()
         messages = self._completion_messages(
@@ -950,17 +1029,33 @@ class InstructorLLMClient:
                     self._append_execution_turn(prompt, parsed.model_dump_json())
                 if stateless:
                     self.reset_execution_history()
-                return parsed, completion
+                return self._finalize_structured_completion(
+                    parsed=parsed,
+                    completion=completion,
+                    prompt=prompt,
+                    started=started,
+                    telemetry_target=telemetry_target,
+                    telemetry_operation=telemetry_operation,
+                    log_tokens=log_tokens,
+                )
             except Exception as exc:  # noqa: BLE001 - try next instructor mode
                 errors.append(f"{mode.name}: {exc}")
         try:
-            raw_text = self._raw_json_completion(messages)
+            raw_text, completion = self._raw_json_completion(messages)
             parsed = parse_llm_json(raw_text, response_model)
             if use_history:
                 self._append_execution_turn(prompt, parsed.model_dump_json())
             if stateless:
                 self.reset_execution_history()
-            return parsed, raw_text
+            return self._finalize_structured_completion(
+                parsed=parsed,
+                completion=completion,
+                prompt=prompt,
+                started=started,
+                telemetry_target=telemetry_target,
+                telemetry_operation=telemetry_operation,
+                log_tokens=log_tokens,
+            )
         except Exception as exc:  # noqa: BLE001 - include lenient repair in failure chain
             errors.append(f"lenient-repair: {exc}")
         msg = "Structured output failed for all instructor modes: " + "; ".join(errors)
@@ -988,6 +1083,8 @@ class InstructorLLMClient:
                 "You seed new Logseq pages from local context. Return JSON only. "
                 "Write a neutral, concise definition without markdown headings."
             ),
+            telemetry_target=source_page,
+            telemetry_operation="Semantic Linting",
         )
         return result
 
@@ -1011,6 +1108,8 @@ class InstructorLLMClient:
                 "You are an entity consolidation linter for Logseq. Prefer one canonical title "
                 "and register the other as alias. Never suggest merging file contents."
             ),
+            telemetry_target=title_a,
+            telemetry_operation="Semantic Linting",
         )
         return result
 
@@ -1037,6 +1136,8 @@ class InstructorLLMClient:
                 "Infer Logseq block properties from context. Use empty string when unknown. "
                 "Return JSON with a properties object."
             ),
+            telemetry_target=page_title,
+            telemetry_operation="Semantic Linting",
         )
         return result
 
@@ -1065,6 +1166,8 @@ class InstructorLLMClient:
             prompt=prompt,
             response_model=MarpaClassificationResult,
             system_prompt=build_marpa_classify_system_prompt(),
+            telemetry_target=page_title,
+            telemetry_operation="Semantic Linting",
         )
         if config.semantic_routing and page_path is not None and graph_root is not None:
             key = semantic_cache_key(page_path, "marpa_classify")
@@ -1110,6 +1213,9 @@ class InstructorLLMClient:
                 system_prompt=_build_semantic_lint_system_prompt(
                     alias_index_context=alias_context,
                 ),
+                telemetry_target=page_title,
+                telemetry_operation="Concept Indexing",
+                log_tokens=False,
             )
             result = _normalize_index_result_aliases(result, alias_index)
             latency = time.perf_counter() - started
@@ -1174,6 +1280,8 @@ class InstructorLLMClient:
                 "Write one crisp English sentence summarizing the page."
             ),
             stateless=True,
+            telemetry_target=page_title,
+            telemetry_operation="Concept Indexing",
         )
         _ = (page_path, graph_root)
         return result
@@ -1194,8 +1302,9 @@ class InstructorLLMClient:
             prompt=prompt,
             response_model=GraphInsightsLLMResult,
             system_prompt=INSIGHTS_SYSTEM_PROMPT,
+            telemetry_target=str(graph_root),
+            telemetry_operation="Concept Indexing",
         )
-        _ = graph_root
         return result
 
 
@@ -1222,6 +1331,79 @@ def _mtime_matches(stored: float, current: float) -> bool:
     return math.isclose(stored, current, rel_tol=0.0, abs_tol=1e-6)
 
 
+def _read_page_content(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _page_is_terminal_skip(content: str) -> bool:
+    """Pages that should never enter the LLM queue (empty or structurally unsafe)."""
+    if not content.strip():
+        return True
+    protected_lines = compute_page_protected_line_indices(content)
+    return bool(find_malformed_block_refs(content, protected_lines=protected_lines))
+
+
+def page_needs_phase2_cognitive(
+    graph_root: Path,
+    path: Path,
+    state: DaemonState,
+    *,
+    content: str | None = None,
+) -> bool:
+    """Return whether a page still needs the Phase 2 cognitive pass."""
+    title = _page_title_from_path(graph_root, path)
+    if title in MATRYCA_GENERATED_PAGE_TITLES:
+        return False
+
+    text = content if content is not None else _read_page_content(path)
+    if _page_is_terminal_skip(text):
+        return False
+
+    key = str(path.resolve())
+    mtime = path.stat().st_mtime
+    rec = state.files.get(key)
+    if rec is None:
+        return True
+    if not _mtime_matches(rec.mtime, mtime):
+        return True
+    if rec.status == "processed":
+        return False
+    if rec.status == "error":
+        return False
+    if rec.status == "skipped":
+        return SEMANTIC_INDEX_HEADER in text
+    return True
+
+
+def compute_phase2_progress_metrics(
+    graph_root: Path,
+    state: DaemonState,
+) -> tuple[int, int, int, int]:
+    """Return total, cognitive_done, cognitive_pending, terminal_skipped page counts."""
+    total = 0
+    cognitive_done = 0
+    cognitive_pending = 0
+    terminal_skipped = 0
+    for path in iter_alias_source_paths(graph_root):
+        title = _page_title_from_path(graph_root, path)
+        if title in MATRYCA_GENERATED_PAGE_TITLES:
+            continue
+        total += 1
+        key = str(path.resolve())
+        mtime = path.stat().st_mtime if path.is_file() else 0.0
+        rec = state.files.get(key)
+        if rec is not None and _mtime_matches(rec.mtime, mtime) and rec.status == "processed":
+            cognitive_done += 1
+        elif page_needs_phase2_cognitive(graph_root, path, state):
+            cognitive_pending += 1
+        else:
+            terminal_skipped += 1
+    return total, cognitive_done, cognitive_pending, terminal_skipped
+
+
 def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
     files = iter_alias_source_paths(graph_root)
     total = len(files)
@@ -1243,12 +1425,22 @@ def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
     return ScanMetrics(total=total, processed=processed, pending=pending)
 
 
-def list_pending_files(graph_root: Path, state: DaemonState) -> list[Path]:
+def list_pending_files(
+    graph_root: Path,
+    state: DaemonState,
+    *,
+    bootstrap_complete: bool | None = None,
+) -> list[Path]:
     pending: list[Path] = []
+    phase2 = state.bootstrap_complete if bootstrap_complete is None else bootstrap_complete
     settled_statuses = frozenset({"processed", "skipped"})
     for path in iter_alias_source_paths(graph_root):
         title = _page_title_from_path(graph_root, path)
         if title in MATRYCA_GENERATED_PAGE_TITLES:
+            continue
+        if phase2:
+            if page_needs_phase2_cognitive(graph_root, path, state):
+                pending.append(path)
             continue
         key = str(path.resolve())
         mtime = path.stat().st_mtime
@@ -1306,6 +1498,7 @@ class MaintenanceDaemon:
         self.graph_root = graph_root
         self.token_logger = token_logger or TokenLogger()
         self.llm_client = llm_client or InstructorLLMClient(token_logger=self.token_logger)
+        self._ensure_shared_token_logger()
         self.poll_seconds = poll_seconds or float(
             os.environ.get("MATRYCA_PLUMBER_POLL_SECONDS", str(DEFAULT_POLL_SECONDS)),
         )
@@ -1314,12 +1507,54 @@ class MaintenanceDaemon:
         self._shutdown_in_progress = False
         self.bootstrap_complete = False
 
+    def _ensure_shared_token_logger(self) -> None:
+        """Bind the LLM client to the daemon's central token logger."""
+        if isinstance(self.llm_client, InstructorLLMClient):
+            self.llm_client.token_logger = self.token_logger
+
+    def _absorb_token_logger_delta(
+        self,
+        other: TokenLogger,
+        *,
+        baseline_prompt: int,
+        baseline_completion: int,
+    ) -> None:
+        """Merge token deltas from a submodule logger into the central session counters."""
+        if other is self.token_logger:
+            return
+        delta_prompt = other.session_prompt_tokens - baseline_prompt
+        delta_completion = other.session_completion_tokens - baseline_completion
+        if delta_prompt:
+            self.token_logger.session_prompt_tokens += delta_prompt
+        if delta_completion:
+            self.token_logger.session_completion_tokens += delta_completion
+
+    def _hydrate_token_logger_from_state(self, state: DaemonState) -> None:
+        """Restore in-memory session counters from the last persisted checkpoint."""
+        self.token_logger.session_prompt_tokens = max(
+            self.token_logger.session_prompt_tokens,
+            state.session_prompt_tokens,
+        )
+        self.token_logger.session_completion_tokens = max(
+            self.token_logger.session_completion_tokens,
+            state.session_completion_tokens,
+        )
+        log_prompt, log_completion = self.token_logger.session_token_totals_from_log()
+        self.token_logger.session_prompt_tokens = max(
+            self.token_logger.session_prompt_tokens,
+            log_prompt,
+        )
+        self.token_logger.session_completion_tokens = max(
+            self.token_logger.session_completion_tokens,
+            log_completion,
+        )
+
     def _hydrate_bootstrap_phase(self, state: DaemonState) -> None:
         """Restore Phase 2 readiness from persisted state or a complete on-disk catalog."""
         if state.bootstrap_complete or is_bootstrap_catalog_complete(self.graph_root):
             self.bootstrap_complete = True
             state.bootstrap_complete = True
-        else:
+        elif not self.bootstrap_complete:
             self.bootstrap_complete = False
 
     def _persist_bootstrap_complete(self, state: DaemonState) -> None:
@@ -1374,6 +1609,7 @@ class MaintenanceDaemon:
 
     def _sync_runtime_config(self, state: DaemonState) -> DaemonState:
         """Align LLM client and persisted state with the active environment block."""
+        self._ensure_shared_token_logger()
         if isinstance(self.llm_client, InstructorLLMClient):
             self.llm_client.refresh_config()
         return sync_daemon_state_from_env(state)
@@ -1586,7 +1822,7 @@ class MaintenanceDaemon:
                 state=state,
             )
             return True
-        if SEMANTIC_INDEX_HEADER in content:
+        if SEMANTIC_INDEX_HEADER in content and not self.bootstrap_complete:
             state.files[key] = FileState(
                 mtime=mtime,
                 processed_at=datetime.now(tz=UTC).isoformat(),
@@ -1637,6 +1873,18 @@ class MaintenanceDaemon:
                     llm=self.llm_client,
                     config=lint_config,
                 )
+                if isinstance(self.llm_client, InstructorLLMClient):
+                    self._absorb_token_logger_delta(
+                        self.llm_client.token_logger,
+                        baseline_prompt=prompt_before,
+                        baseline_completion=completion_before,
+                    )
+                self._sync_live_telemetry(
+                    state,
+                    cluster_id=cluster_id,
+                    mark_running=True,
+                )
+                self._save_cycle_checkpoint(state, path=path)
                 content = path.read_text(encoding="utf-8", errors="replace")
             alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
             enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
@@ -1738,12 +1986,18 @@ class MaintenanceDaemon:
     def run_cycle(self, state: DaemonState | None = None) -> DaemonState:
         """Drain fast-skippable pending files, then up to ``max_files_per_cycle`` LLM turns."""
         state = self._sync_runtime_config(state or load_daemon_state(self.graph_root))
+        self._hydrate_bootstrap_phase(state)
+        self._hydrate_token_logger_from_state(state)
         prune_stale_daemon_file_entries(state, self.graph_root)
         state.status = "running"
         state.last_scan_at = datetime.now(tz=UTC).isoformat()
         self._sync_live_telemetry(state, mark_running=True)
         save_daemon_state(self.graph_root, state)
-        pending = list_pending_files(self.graph_root, state)
+        pending = list_pending_files(
+            self.graph_root,
+            state,
+            bootstrap_complete=self.bootstrap_complete,
+        )
 
         if not pending:
             self.refresh_catalog_if_stale()
@@ -1765,7 +2019,11 @@ class MaintenanceDaemon:
             save_daemon_state(self.graph_root, state)
             return state
 
-        pending_llm = list_pending_files(self.graph_root, state)
+        pending_llm = list_pending_files(
+            self.graph_root,
+            state,
+            bootstrap_complete=self.bootstrap_complete,
+        )
         lint_config = self._effective_lint_config()
         cluster_cycle = self._use_semantic_cluster_cycle(lint_config)
         llm_turns_this_cycle = 0
@@ -1783,8 +2041,13 @@ class MaintenanceDaemon:
                 break
             if cluster_cycle:
                 self._begin_cluster_context(cluster_id, cluster_paths)
+                state.current_cluster_files_total = len(cluster_paths)
+                state.current_cluster_files_done = 0
                 self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
                 self._save_cycle_checkpoint(state)
+            else:
+                state.current_cluster_files_total = 0
+                state.current_cluster_files_done = 0
             for path in cluster_paths:
                 if self._stop_requested:
                     state.status = "stopped"
@@ -1798,6 +2061,9 @@ class MaintenanceDaemon:
                     reset_history_after=not cluster_cycle,
                     cluster_id=cluster_id if cluster_cycle else None,
                 )
+                if cluster_cycle:
+                    state.current_cluster_files_done += 1
+                self._sync_live_telemetry(state, mark_running=True)
                 self._save_cycle_checkpoint(state, path=path)
                 if llm_called_this_turn:
                     llm_turns_this_cycle += 1
@@ -1817,6 +2083,7 @@ class MaintenanceDaemon:
         write_pid_file(self.graph_root)
         state = self._sync_runtime_config(load_daemon_state(self.graph_root))
         self._hydrate_bootstrap_phase(state)
+        self._hydrate_token_logger_from_state(state)
         state.status = "running"
         save_daemon_state(self.graph_root, state)
 

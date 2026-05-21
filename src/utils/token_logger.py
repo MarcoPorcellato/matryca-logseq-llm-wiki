@@ -322,6 +322,49 @@ class TokenLogger:
                 handle.flush()
                 os.fsync(handle.fileno())
 
+    def session_token_totals_from_log(self, *, since_iso: str | None = None) -> tuple[int, int]:
+        """Sum prompt/completion tokens from JSONL records after a session boundary."""
+        if not self.log_path.is_file():
+            return 0, 0
+
+        cutoff = since_iso
+        raw_lines: list[str] = []
+        try:
+            raw_lines = self.tail_lines(2000)
+        except OSError:
+            return 0, 0
+        if not raw_lines:
+            return 0, 0
+
+        if cutoff is None:
+            for raw in reversed(raw_lines):
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                message = str(payload.get("message", ""))
+                if message.startswith("[DAEMON SHUTDOWN RECEIVED]"):
+                    cutoff = str(payload.get("timestamp", ""))
+                    break
+
+        prompt_total = 0
+        completion_total = 0
+        for raw in raw_lines:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            timestamp = str(payload.get("timestamp", ""))
+            if cutoff and timestamp <= cutoff:
+                continue
+            prompt_total += int(payload.get("prompt_tokens", 0) or 0)
+            completion_total += int(payload.get("completion_tokens", 0) or 0)
+        return prompt_total, completion_total
+
     def log_structural_lint_warning(
         self,
         *,

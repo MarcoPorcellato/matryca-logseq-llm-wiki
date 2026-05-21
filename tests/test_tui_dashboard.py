@@ -126,6 +126,26 @@ def test_collect_snapshot_phase2_panel_fields(graph_root: Path) -> None:
     assert snap.session_completion_tokens == 10
 
 
+def test_collect_snapshot_phase2_cluster_progress_bar(graph_root: Path) -> None:
+    _write_page(graph_root, "Phase", "- phase\n")
+    state = DaemonState(
+        bootstrap_complete=True,
+        status="running",
+        current_cluster="cluster-9",
+        current_cluster_files_total=4,
+        current_cluster_files_done=2,
+        phase2_llm_turns=10,
+    )
+    save_daemon_state(graph_root, state)
+    logger = TokenLogger(log_path=graph_root / "ops.log")
+
+    snap = collect_snapshot(graph_root=graph_root, token_logger=logger)
+
+    assert snap.current_cluster_files_total == 4
+    assert snap.current_cluster_files_done == 2
+    assert snap.percent_complete == 50.0
+
+
 def test_collect_snapshot_safe_falls_back_to_last_good_state_on_read_failure(
     graph_root: Path,
 ) -> None:

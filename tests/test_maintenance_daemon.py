@@ -661,7 +661,7 @@ def test_completion_with_structured_output_uses_lenient_json_repair(
     monkeypatch.setattr(
         client,
         "_raw_json_completion",
-        lambda _messages: malformed,
+        lambda _messages: (malformed, type("Usage", (), {"usage": None})()),
     )
 
     parsed, _completion = client._completion_with_structured_output(
@@ -712,8 +712,9 @@ def test_harvest_page_summary_passes_stateless_flag(
         response_model: type[object],
         system_prompt: str,
         stateless: bool = False,
+        **_kwargs: object,
     ) -> tuple[BootstrapSummaryResult, object]:
-        _ = (self, prompt, response_model, system_prompt)
+        _ = (self, prompt, response_model, system_prompt, _kwargs)
         captured["stateless"] = stateless
         return BootstrapSummaryResult(summary="ok"), object()
 
@@ -1074,3 +1075,93 @@ def test_run_cycle_increments_phase2_turns_and_persists_tokens(
     assert loaded.phase2_llm_turns >= 1
     assert loaded.last_file is not None
     assert loaded.last_file.endswith("PhaseTwo.md")
+
+
+def test_structured_completion_logs_tokens_to_shared_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logger = TokenLogger(log_path=Path("logs/test_structured_tokens.log"))
+    client = InstructorLLMClient(
+        base_url="http://localhost:1234/v1",
+        token_logger=logger,
+    )
+
+    class FakeUsage:
+        prompt_tokens = 120
+        completion_tokens = 30
+
+    class FakeCompletion:
+        usage = FakeUsage()
+
+    class FakeCompletions:
+        def create_with_completion(self, **_kwargs: object) -> tuple[object, object]:
+            from src.agent.plumber_llm import EntityOverlapResult
+
+            return (
+                EntityOverlapResult(
+                    overlap_score=0.5,
+                    canonical_title="Alpha",
+                    alias_title="Beta",
+                    should_merge_alias=False,
+                    reason="stub",
+                ),
+                FakeCompletion(),
+            )
+
+    class FakeClient:
+        chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.instructor.from_openai",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+    client.assess_entity_overlap(title_a="Alpha", title_b="Beta", context="shared context")
+
+    assert logger.session_prompt_tokens == 120
+    assert logger.session_completion_tokens == 30
+
+
+def test_ensure_shared_token_logger_rebinds_injected_client(graph_root: Path) -> None:
+    central = TokenLogger(log_path=graph_root / "central.log")
+    isolated = TokenLogger(log_path=graph_root / "isolated.log")
+    llm = InstructorLLMClient(token_logger=isolated)
+    _daemon = MaintenanceDaemon(graph_root, llm_client=llm, token_logger=central)
+
+    assert llm.token_logger is central
+    assert llm.token_logger is _daemon.token_logger
+
+
+def test_phase2_requeues_semantic_index_skipped_pages(graph_root: Path) -> None:
+    path = _write_page(
+        graph_root,
+        "IndexedPhaseTwo",
+        f"- body\n\n{SEMANTIC_INDEX_HEADER}\n- summary:: cached\n",
+    )
+    key = str(path.resolve())
+    state = DaemonState(
+        bootstrap_complete=True,
+        files={
+            key: FileState(
+                mtime=path.stat().st_mtime,
+                processed_at="2026-01-01T00:00:00+00:00",
+                status="skipped",
+            ),
+        },
+    )
+
+    pending = list_pending_files(graph_root, state, bootstrap_complete=True)
+
+    assert path in pending
+
+
+def test_phase2_fast_track_does_not_skip_semantic_index_pages(graph_root: Path) -> None:
+    path = _write_page(
+        graph_root,
+        "StillNeedsCognitive",
+        f"- body\n\n{SEMANTIC_INDEX_HEADER}\n- summary:: cached\n",
+    )
+    daemon = MaintenanceDaemon(graph_root, llm_client=StubLLM())
+    daemon.bootstrap_complete = True
+    state = DaemonState(bootstrap_complete=True)
+
+    assert daemon._try_fast_track_cycle_file(path, state) is False

@@ -22,6 +22,7 @@ from ..agent.maintenance_daemon import (
     DEFAULT_MODEL,
     PID_FILENAME,
     DaemonState,
+    compute_phase2_progress_metrics,
     compute_scan_metrics,
     is_process_alive,
     load_daemon_state,
@@ -52,6 +53,8 @@ class DashboardSnapshot:
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
     current_cluster: str | None = None
+    current_cluster_files_total: int = 0
+    current_cluster_files_done: int = 0
     phase2_llm_turns: int = 0
     last_file: str | None = None
     pid: int | None = None
@@ -128,7 +131,22 @@ def collect_snapshot(
 
     checkpoint_processed, skipped, errors = _tally_checkpoint_files(state)
     total_pages = metrics.total if metrics is not None else 0
-    if metrics is not None and total_pages > 0:
+    if state.bootstrap_complete:
+        try:
+            phase2_total, phase2_done, phase2_pending, phase2_skipped = (
+                compute_phase2_progress_metrics(root, state)
+            )
+        except Exception:
+            phase2_total = total_pages
+            phase2_done = checkpoint_processed
+            phase2_pending = max(0, total_pages - checkpoint_processed - skipped - errors)
+            phase2_skipped = skipped
+        processed_pages = phase2_done
+        skipped = phase2_skipped
+        pending_backlog = phase2_pending
+        total_pages = phase2_total
+        percent_complete = round(100.0 * phase2_done / max(phase2_total, 1), 1)
+    elif metrics is not None and total_pages > 0:
         # Checkpoint tally reflects completed daemon work; scan metrics only count
         # pages whose on-disk mtime still matches the checkpoint (mtime drift =>
         # pending re-index). The TUI progress bar tracks work done, not strict freshness.
@@ -139,6 +157,13 @@ def collect_snapshot(
         processed_pages = checkpoint_processed
         pending_backlog = 0
         percent_complete = 0.0
+
+    log_prompt_tokens, log_completion_tokens = logger.session_token_totals_from_log()
+    session_prompt_tokens = max(state.session_prompt_tokens, log_prompt_tokens)
+    session_completion_tokens = max(
+        state.session_completion_tokens,
+        log_completion_tokens,
+    )
 
     pid = read_pid_file(root)
     running = pid is not None and is_process_alive(pid)
@@ -153,7 +178,7 @@ def collect_snapshot(
         if (
             status == "Idle"
             and state.bootstrap_complete
-            and (state.session_prompt_tokens or state.session_completion_tokens)
+            and (session_prompt_tokens or session_completion_tokens or pending_backlog > 0)
         ):
             status = "Running"
 
@@ -165,8 +190,17 @@ def collect_snapshot(
     with contextlib.suppress(Exception):
         activity_lines = logger.tail_activity_summaries(5)
 
-    phase2_progress_total = max(state.phase2_llm_turns + pending_backlog, 1)
-    phase2_percent = round(100.0 * state.phase2_llm_turns / phase2_progress_total, 1)
+    if state.bootstrap_complete and state.current_cluster_files_total > 0:
+        phase2_progress_total = state.current_cluster_files_total
+        phase2_done = min(state.current_cluster_files_done, phase2_progress_total)
+        phase2_percent = round(100.0 * phase2_done / phase2_progress_total, 1)
+    elif state.bootstrap_complete:
+        phase2_progress_total = max(processed_pages + pending_backlog, 1)
+        phase2_done = processed_pages
+        phase2_percent = round(100.0 * phase2_done / phase2_progress_total, 1)
+    else:
+        phase2_progress_total = max(state.phase2_llm_turns + pending_backlog, 1)
+        phase2_percent = round(100.0 * state.phase2_llm_turns / phase2_progress_total, 1)
 
     return DashboardSnapshot(
         status=status,
@@ -179,9 +213,11 @@ def collect_snapshot(
         pending_backlog=pending_backlog,
         percent_complete=phase2_percent if state.bootstrap_complete else percent_complete,
         activity_lines=activity_lines,
-        session_prompt_tokens=state.session_prompt_tokens,
-        session_completion_tokens=state.session_completion_tokens,
+        session_prompt_tokens=session_prompt_tokens,
+        session_completion_tokens=session_completion_tokens,
         current_cluster=state.current_cluster,
+        current_cluster_files_total=state.current_cluster_files_total,
+        current_cluster_files_done=state.current_cluster_files_done,
         phase2_llm_turns=state.phase2_llm_turns,
         last_file=last_file,
         pid=pid,
@@ -274,12 +310,17 @@ def _apply_snapshot(layout: Layout, snapshot: DashboardSnapshot) -> None:
         expand=True,
     )
     if snapshot.bootstrap_complete:
-        phase2_total = max(snapshot.phase2_llm_turns + snapshot.pending_backlog, 1)
+        if snapshot.current_cluster_files_total > 0:
+            phase2_total = snapshot.current_cluster_files_total
+            completed = min(snapshot.current_cluster_files_done, phase2_total)
+        else:
+            phase2_total = max(snapshot.processed_pages + snapshot.pending_backlog, 1)
+            completed = snapshot.processed_pages
         task_label = "Phase 2 cognitive"
         if snapshot.current_cluster:
             task_label = f"Phase 2 · cluster {snapshot.current_cluster}"
         task_id = progress.add_task(task_label, total=phase2_total)
-        progress.update(task_id, completed=snapshot.phase2_llm_turns)
+        progress.update(task_id, completed=completed)
     else:
         task_id = progress.add_task("Graph indexing (Phase 1)", total=max(snapshot.total_pages, 1))
         progress.update(task_id, completed=snapshot.processed_pages)
@@ -288,6 +329,11 @@ def _apply_snapshot(layout: Layout, snapshot: DashboardSnapshot) -> None:
     if snapshot.bootstrap_complete:
         stats.add_row("Phase", "2 — cognitive")
         stats.add_row("Semantic cluster", snapshot.current_cluster or "—")
+        if snapshot.current_cluster_files_total > 0:
+            stats.add_row(
+                "Cluster progress",
+                f"{snapshot.current_cluster_files_done}/{snapshot.current_cluster_files_total}",
+            )
         stats.add_row("LLM turns (session)", str(snapshot.phase2_llm_turns))
         stats.add_row("Pending backlog", str(snapshot.pending_backlog))
         stats.add_row("Completion", f"{snapshot.percent_complete}%")
