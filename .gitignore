@@ -1,3 +1,7 @@
+# ==============================================================================
+# 🧠 Matryca Brain OS - Git Ignore Configuration
+# ==============================================================================
+
 # ========================================
 # 🐍 Python
 # ========================================
@@ -29,6 +33,7 @@ MANIFEST
 # 📦 Virtual Environments (uv/venv)
 # ========================================
 .env
+.env.*
 .venv/
 venv/
 ENV/
@@ -36,7 +41,7 @@ env.bak/
 venv.bak/
 
 # ========================================
-# 🛠️ Tooling & Testing
+# 🛠️ Tooling & Testing (Ruff, MyPy, Pytest)
 # ========================================
 .pytest_cache/
 .coverage
@@ -50,17 +55,45 @@ coverage.xml
 .mypy_cache/
 
 # ========================================
-# 📝 Logseq & Data
+# ⚙️ Matryca Daemon Engine Runtime & Logs (CRITICO)
 # ========================================
-# Escludi eventuali test-graph locali o database
+# Esclude i registri operativi generali e le cartelle di log locali
+logs/
+**/logs/
+*.log
+
+# Esclude i file PID e gli stati di checkpoint memorizzati dal demone
+*.pid
+.matryca_brain_daemon.pid
+.matryca_daemon_state.json
+.matryca_xray_state.json
+
+# Esclude la cartella invisibile della cache semantica locale
+.matryca_semantic_cache/
+**/.matryca_semantic_cache/
+
+# Esclude i file temporanei atomici e i file di lock di concorrenza (.matryca.lock)
+*.lock
+*.matryca.lock
+.*.matryca.lock
+*.tmp
+.*.tmp
+*.bak
+
+# ========================================
+# 📝 Logseq Graphs & Test Vaults
+# ========================================
+# Esclude tassativamente la cartella di test del tuo grafo con spazi nel nome
 LOGSEQ copy test LLM/
+**/LOGSEQ copy test LLM/
+
+# Esclude le directory e i file di database nativi di Logseq
+.logseq/
+logseq/
+journals/
+pages/
 *.sqlite3
 *.db
-.logseq/
-journals/
-logseq/
-pages/
-LOGSEQ copy test LLM/logs/matryca_brain_ops.log
 
 # ========================================
 # 💻 OS (macOS/Windows)
@@ -88,6 +121,7 @@ ehthumbs.db
 # ========================================
 repomix-output.xml
 repomix-output.txt
+repomix-output.json
 .repomix-cache/
 .cursor/
 !.cursor/rules/
