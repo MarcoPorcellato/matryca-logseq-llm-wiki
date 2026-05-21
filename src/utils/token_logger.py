@@ -21,6 +21,13 @@ OperationType = Literal[
 ]
 
 DEFAULT_LOG_PATH = Path("logs") / "matryca_plumber_ops.log"
+_LOG_TAG_PREFIXES = (
+    "[COMPRESSION LLM FAULT]",
+    "[COMPRESSION WARN]",
+    "[CONTEXT COMPRESSION EVENT]",
+    "[STRUCTURAL LINT WARN]",
+    "[DAEMON SHUTDOWN RECEIVED]",
+)
 _MAX_PROMPT_CHARS = 12_000
 _MAX_RESPONSE_CHARS = 12_000
 
@@ -33,11 +40,36 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + f"... [truncated {len(text) - limit} chars]"
 
 
-def _default_log_path() -> Path:
+def resolve_plumber_log_path() -> Path:
+    """Resolve the Matryca Plumber ops log path from env or the default JSONL location."""
     override = os.environ.get("MATRYCA_PLUMBER_LOG_PATH", "").strip()
     if override:
         return Path(override).expanduser()
     return DEFAULT_LOG_PATH
+
+
+def _default_log_path() -> Path:
+    return resolve_plumber_log_path()
+
+
+def format_activity_summary(payload: dict[str, Any]) -> str:
+    """Render one JSONL ops-log record for the Plumber TUI activity feed."""
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        if message.startswith(_LOG_TAG_PREFIXES):
+            target = payload.get("target_file")
+            if target:
+                target_name = Path(str(target)).name
+                return f"{message[:96]} · {target_name}"
+            return message[:120]
+        return message[:120]
+
+    op = str(payload.get("operation", "?"))
+    target = Path(str(payload.get("target_file", "?"))).name
+    prompt_tokens = int(payload.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(payload.get("completion_tokens", 0) or 0)
+    latency = payload.get("latency_seconds", 0)
+    return f"{op} · {target} · p={prompt_tokens} c={completion_tokens} · {latency}s"
 
 
 @dataclass
@@ -140,12 +172,10 @@ class TokenLogger:
             except json.JSONDecodeError:
                 summaries.append(raw[:120])
                 continue
-            op = payload.get("operation", "?")
-            target = Path(str(payload.get("target_file", "?"))).name
-            pt = payload.get("prompt_tokens", 0)
-            ct = payload.get("completion_tokens", 0)
-            lat = payload.get("latency_seconds", 0)
-            summaries.append(f"{op} · {target} · p={pt} c={ct} · {lat}s")
+            if not isinstance(payload, dict):
+                summaries.append(raw[:120])
+                continue
+            summaries.append(format_activity_summary(payload))
         return summaries
 
     def log_compression_event(
@@ -263,4 +293,6 @@ __all__ = [
     "OperationType",
     "TokenLogEntry",
     "TokenLogger",
+    "format_activity_summary",
+    "resolve_plumber_log_path",
 ]

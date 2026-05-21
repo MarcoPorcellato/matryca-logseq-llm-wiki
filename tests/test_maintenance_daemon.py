@@ -33,11 +33,11 @@ from src.agent.maintenance_daemon import (
 )
 from src.agent.plumber_llm import BootstrapSummaryResult, GraphInsightsLLMResult
 from src.cli import build_parser
-from src.cli.tui_dashboard import collect_snapshot
+from src.cli.tui_dashboard import MONITOR_TITLE, collect_snapshot
 from src.graph.bootstrap_harvest import run_bootstrap_harvest
 from src.graph.master_catalog import CatalogEntry, load_master_catalog, master_index_page_path
 from src.graph.page_write_lock import clear_page_write_locks, page_rmw_lock
-from src.utils.token_logger import TokenLogger
+from src.utils.token_logger import TokenLogger, format_activity_summary, resolve_plumber_log_path
 
 BLOCK_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -388,8 +388,67 @@ def test_collect_snapshot_reports_metrics(graph_root: Path) -> None:
         graph_root=graph_root,
         token_logger=TokenLogger(log_path=graph_root / "x.log"),
     )
+    assert snap.title == MONITOR_TITLE
     assert snap.total_pages == 1
     assert snap.pending_backlog == 1
+    assert snap.pid_file == ".matryca_plumber_daemon.pid"
+    assert snap.bootstrap_complete is False
+
+
+def test_resolve_plumber_log_path_defaults_to_plumber_ops_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MATRYCA_PLUMBER_LOG_PATH", raising=False)
+    assert resolve_plumber_log_path() == Path("logs") / "matryca_plumber_ops.log"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_fragment"),
+    [
+        (
+            {
+                "operation": "Context Compression",
+                "message": "[COMPRESSION LLM FAULT] model timeout",
+            },
+            "[COMPRESSION LLM FAULT]",
+        ),
+        (
+            {
+                "operation": "Health Check",
+                "target_file": "pages/Broken.md",
+                "message": "[STRUCTURAL LINT WARN] malformed block ref",
+            },
+            "[STRUCTURAL LINT WARN]",
+        ),
+        (
+            {
+                "operation": "Context Compression",
+                "message": "[CONTEXT COMPRESSION EVENT] initial=100 post=40 ratio=0.4000",
+            },
+            "[CONTEXT COMPRESSION EVENT]",
+        ),
+    ],
+)
+def test_format_activity_summary_handles_plumber_log_tags(
+    payload: dict[str, object],
+    expected_fragment: str,
+) -> None:
+    summary = format_activity_summary(payload)
+    assert expected_fragment in summary
+
+
+def test_token_logger_tail_summaries_surface_structural_lint_warnings(tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "matryca_plumber_ops.log"
+    logger = TokenLogger(log_path=log_path)
+    logger.log_structural_lint_warning(
+        target_file="pages/Broken.md",
+        message="malformed block ref",
+        malformed_refs=["((dead-ref))"],
+    )
+    summaries = logger.tail_summaries(1)
+    assert summaries
+    assert "[STRUCTURAL LINT WARN]" in summaries[0]
+    assert "Broken.md" in summaries[0]
 
 
 def test_parser_exposes_plumber_subcommands() -> None:

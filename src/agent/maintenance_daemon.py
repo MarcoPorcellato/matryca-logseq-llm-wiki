@@ -1654,6 +1654,7 @@ __all__ = [
     "LLMClient",
     "LintType",
     "MaintenanceDaemon",
+    "PID_FILENAME",
     "ScanMetrics",
     "SemanticIndexResult",
     "SemanticLintCorrection",

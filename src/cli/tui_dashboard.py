@@ -16,6 +16,8 @@ from rich.text import Text
 
 from ..agent.maintenance_daemon import (
     DEFAULT_MODEL,
+    PID_FILENAME,
+    DaemonState,
     compute_scan_metrics,
     is_process_alive,
     load_daemon_state,
@@ -23,18 +25,23 @@ from ..agent.maintenance_daemon import (
     resolve_graph_root,
 )
 from ..agent.plumber_config import resolve_lm_model
-from ..utils.token_logger import TokenLogger
+from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
+
+MONITOR_TITLE = "[MATRYCA PLUMBER MONITOR]"
 
 
 @dataclass
 class DashboardSnapshot:
     """Point-in-time metrics for one TUI refresh."""
 
-    title: str = "Matryca Plumber Maintenance Daemon"
+    title: str = MONITOR_TITLE
     status: str = "Unknown"
     model: str = DEFAULT_MODEL
+    bootstrap_complete: bool = False
     total_pages: int = 0
     processed_pages: int = 0
+    skipped_pages: int = 0
+    error_pages: int = 0
     pending_backlog: int = 0
     percent_complete: float = 0.0
     activity_lines: list[str] | None = None
@@ -42,6 +49,8 @@ class DashboardSnapshot:
     session_completion_tokens: int = 0
     last_file: str | None = None
     pid: int | None = None
+    pid_file: str = PID_FILENAME
+    log_file: str = ""
 
     def __post_init__(self) -> None:
         if self.activity_lines is None:
@@ -55,6 +64,24 @@ def _resolve_graph_root_safe() -> Path | None:
         return None
 
 
+def _tally_checkpoint_files(state: DaemonState) -> tuple[int, int, int]:
+    processed = 0
+    skipped = 0
+    errors = 0
+    for record in state.files.values():
+        if record.status == "processed":
+            processed += 1
+        elif record.status == "skipped":
+            skipped += 1
+        elif record.status == "error":
+            errors += 1
+    return processed, skipped, errors
+
+
+def _plumber_token_logger() -> TokenLogger:
+    return TokenLogger(log_path=resolve_plumber_log_path())
+
+
 def collect_snapshot(
     *,
     graph_root: Path | None = None,
@@ -62,15 +89,18 @@ def collect_snapshot(
 ) -> DashboardSnapshot:
     """Build a dashboard snapshot from on-disk state and logs."""
     root = graph_root or _resolve_graph_root_safe()
-    logger = token_logger or TokenLogger()
+    logger = token_logger or _plumber_token_logger()
+    log_file = str(logger.log_path)
     if root is None:
         return DashboardSnapshot(
             status="Error",
             activity_lines=["LOGSEQ_GRAPH_PATH is not set"],
+            log_file=log_file,
         )
 
     state = load_daemon_state(root)
     metrics = compute_scan_metrics(root, state)
+    _, skipped, errors = _tally_checkpoint_files(state)
     pid = read_pid_file(root)
     running = pid is not None and is_process_alive(pid)
     status = "Stopped"
@@ -89,8 +119,11 @@ def collect_snapshot(
     return DashboardSnapshot(
         status=status,
         model=state.model or resolve_lm_model(),
+        bootstrap_complete=state.bootstrap_complete,
         total_pages=metrics.total,
         processed_pages=metrics.processed,
+        skipped_pages=skipped,
+        error_pages=errors,
         pending_backlog=metrics.pending,
         percent_complete=metrics.percent_complete,
         activity_lines=logger.tail_summaries(5),
@@ -100,13 +133,15 @@ def collect_snapshot(
         ),
         last_file=last_file,
         pid=pid,
+        pid_file=PID_FILENAME,
+        log_file=log_file,
     )
 
 
 def _build_layout(snapshot: DashboardSnapshot) -> Layout:
     layout = Layout()
     layout.split_column(
-        Layout(name="header", size=3),
+        Layout(name="header", size=4),
         Layout(name="body"),
         Layout(name="footer", size=8),
     )
@@ -120,6 +155,12 @@ def _build_layout(snapshot: DashboardSnapshot) -> Layout:
         "\n",
         ("Status: ", "bold"),
         (snapshot.status, "green" if snapshot.status in {"Running", "Idle"} else "yellow"),
+        "   ",
+        ("Bootstrap: ", "bold"),
+        (
+            "Complete" if snapshot.bootstrap_complete else "In progress",
+            "green" if snapshot.bootstrap_complete else "yellow",
+        ),
         "   ",
         ("Model: ", "bold"),
         (snapshot.model, "magenta"),
@@ -140,10 +181,15 @@ def _build_layout(snapshot: DashboardSnapshot) -> Layout:
     stats = Table.grid(padding=(0, 1))
     stats.add_row("Total pages", str(snapshot.total_pages))
     stats.add_row("Processed", str(snapshot.processed_pages))
+    stats.add_row("Skipped", str(snapshot.skipped_pages))
+    stats.add_row("Errors", str(snapshot.error_pages))
     stats.add_row("Pending backlog", str(snapshot.pending_backlog))
     stats.add_row("Completion", f"{snapshot.percent_complete}%")
     if snapshot.last_file:
         stats.add_row("Current file", snapshot.last_file)
+    stats.add_row("PID file", snapshot.pid_file)
+    if snapshot.log_file:
+        stats.add_row("Ops log", snapshot.log_file)
 
     layout["progress"].update(
         Panel(
@@ -174,9 +220,9 @@ def run_dashboard(
 ) -> None:
     """Run the live TUI until interrupted."""
     interval = 1.0 / max(refresh_hz, 0.1)
-    logger = TokenLogger()
+    logger = _plumber_token_logger()
     initial = _build_layout(collect_snapshot(graph_root=graph_root, token_logger=logger))
-    with Live(initial, refresh_per_second=4) as live:
+    with Live(initial, refresh_per_second=4, screen=True) as live:
         try:
             while True:
                 time.sleep(interval)
@@ -186,4 +232,9 @@ def run_dashboard(
             return
 
 
-__all__ = ["DashboardSnapshot", "collect_snapshot", "run_dashboard"]
+__all__ = [
+    "MONITOR_TITLE",
+    "DashboardSnapshot",
+    "collect_snapshot",
+    "run_dashboard",
+]
