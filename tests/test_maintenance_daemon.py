@@ -151,6 +151,25 @@ def test_token_logger_writes_jsonl_and_counts_session(tmp_path: Path) -> None:
     assert "Concept Indexing" in summaries[0]
 
 
+def test_token_logger_tail_lines_reads_trailing_lines_without_full_load(tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "matryca_plumber_ops.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    filler = "x" * 5000
+    lines_written = [
+        json.dumps({"message": f"line-{index}", "payload": filler}) for index in range(200)
+    ]
+    log_path.write_text("\n".join(lines_written) + "\n", encoding="utf-8")
+
+    logger = TokenLogger(log_path=log_path)
+    tail = logger.tail_lines(3)
+
+    assert tail == lines_written[-3:]
+    summaries = logger.tail_summaries(2)
+    assert len(summaries) == 2
+    assert "line-198" in summaries[0]
+    assert "line-199" in summaries[1]
+
+
 def test_load_daemon_state_self_heals_corrupt_json(graph_root: Path) -> None:
     from src.agent.maintenance_daemon import state_path
 

@@ -156,12 +156,40 @@ class TokenLogger:
                 os.fsync(handle.fileno())
 
     def tail_lines(self, count: int = 5) -> list[str]:
-        """Return the last ``count`` non-empty log lines (raw JSONL)."""
-        if not self.log_path.is_file():
+        """Return the last ``count`` non-empty log lines (raw JSONL).
+
+        Reads backward from the file end in fixed-size blocks so memory use
+        stays bounded regardless of log file size.
+        """
+        if count <= 0 or not self.log_path.is_file():
             return []
-        text = self.log_path.read_text(encoding="utf-8", errors="replace")
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        return lines[-count:]
+
+        block_size = 8192
+        collected: list[bytes] = []
+        with self.log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            if position == 0:
+                return []
+
+            pending = b""
+            while position > 0 and len(collected) < count:
+                read_size = min(block_size, position)
+                position -= read_size
+                handle.seek(position)
+                pending = handle.read(read_size) + pending
+                parts = pending.split(b"\n")
+                pending = parts[0]
+                for part in reversed(parts[1:]):
+                    if part.strip():
+                        collected.append(part)
+                        if len(collected) >= count:
+                            break
+
+            if len(collected) < count and pending.strip():
+                collected.append(pending)
+
+        return [line.decode("utf-8", errors="replace") for line in reversed(collected[:count])]
 
     def tail_summaries(self, count: int = 5) -> list[str]:
         """Human-readable summaries for the TUI activity feed."""

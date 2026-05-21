@@ -3,7 +3,7 @@
 > Agentic Knowledge Management for Logseq OG. An MCP server and **local cognitive maintenance daemon** that turns your favorite AI into a spatial Knowledge Architect — heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). It treats your vault as a tree of blocks, not a flat document store. Local-first, database-free, and Markdown-purist.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-214%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-262%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -13,7 +13,7 @@ Matryca is a **100% headless, sandboxed** MCP server and CLI that turns your loc
 
 **Matryca Plumber** extends this with a **sovereign, local-first background daemon**: it polls your graph, repairs broken block references, flushes context loops via Ermes compression, calls a local LLM (LM Studio), appends semantic indexes, runs optional cognitive lint modules, and logs every token transaction — while you edit the same files in Logseq or via MCP.
 
-The **v1.4.0 Headless Revolution** removed HTTP JSON-RPC; **v1.5** adds the production-hardened Plumber plane (Ermes context compression, `JSON_SCHEMA` grammar sampling, structural quarantine, 214-test CI bar).
+The **v1.4.0 Headless Revolution** removed HTTP JSON-RPC; **v1.5** adds the production-hardened Plumber plane (Ermes context compression, `JSON_SCHEMA` grammar sampling, structural quarantine, GraphRAG Louvain clustering, 262-test CI bar).
 
 > **Brand note:** **Matryca Brain** is reserved exclusively for the Nuitka-compiled Pro enterprise ingestion suite. The open-source maintenance daemon, linter, and indexing subsystem is **Matryca Plumber**.
 
@@ -31,32 +31,40 @@ The **v1.4.0 Headless Revolution** removed HTTP JSON-RPC; **v1.5** adds the prod
 
 ---
 
-## 🔧 Matryca Plumber — local structure & cognitive maintenance
+## 🪠 Matryca Plumber: L'Infrastruttura Semantica Locale
 
-Matryca Plumber is a **background maintenance daemon** that keeps the graph markdown pipeline clean — repairing broken block references, flushing long context loops, and progressively indexing pages:
+Matryca Plumber è un motore di manutenzione asincrono, deterministico e ad alte prestazioni progettato per indicizzare, connettere e ottimizzare grandi grafi di conoscenza Logseq (3.000+ pagine) in locale. Sfruttando un'architettura a separazione rigorosa di fase e un motore GraphRAG nativo a costo token zero, il sistema elimina il lag di rendering della UI e previene la saturazione della memoria dei modelli linguistici (KV-Cache) su macchine consumer.
 
-1. Scans `pages/` and `journals/` for modified markdown.
-2. **Preflights** each file for malformed `((uuid))` block references (quarantines without crashing).
-3. Optionally runs **cognitive lint modules** (MARPA taxonomy, dangling-link healer, property hygiene, …).
-4. Calls your **local LLM** with Instructor **`JSON_SCHEMA`** structured output.
-5. Appends a **`### Matryca Semantic Index`** section and patches BM25/alias caches incrementally.
+### 🌟 Funzionalità Chiave di Grado Industriale
+
+- **Ingestione Stateless ad Alta Velocità (Phase 1):** Scansione iniziale parallela dei file Markdown. Calcola i blocchi di codice protetti (fences) per evitare falsi positivi, estrae riassunti sintetici via LLM locale (Gemma 4) azzerando la memoria rolling tra una pagina e l'altra per abbattere i tempi di Prompt Prefill da 25 a meno di 2 secondi per file.
+- **Motore GraphRAG Nativo (Phase 2 Clustering):** Partizionamento deterministico delle pagine in "quartieri semantici" isolati (5-35 pagine) tramite l'algoritmo di modularità di Louvain, calcolato in RAM in meno di un secondo tramite matrici ibride TF-IDF (con filtri Stopwords) e somiglianza di Jaccard sui tag.
+- **Isolamento del Contesto (Scudo Termico Ermes):** Durante l'analisi cognitiva di Phase 2, la cronologia dei messaggi viene confinata rigorosamente all'interno del singolo cluster geografico, iniettando un nodo ancora centrale (*Cluster Hub Anchor*), massimizzando la coerenza e azzerando le allucinazioni generative.
+- **Tolleranza ai Guasti e Self-Healing:** Immunità Unicode universale (`errors="replace"`), resilienza ai blocchi dei driver cloud (iCloud, Dropbox) tramite degradazione elegante di `flock`, auto-riparazione da corruzione dei file di stato, ed Error Backoff per evitare loop infiniti di CPU su file corrotti non modificati.
+- **Monitoraggio Constante $O(1)$:** Rich TUI Dashboard sincronizzata che legge i flussi di log JSONL al contrario a blocchi di buffer da 8KB, azzerando i picchi di allocazione RAM indipendentemente dalla dimensione dello storico dei log.
 
 **Prerequisites:** LM Studio (or any OpenAI-compatible local server) at `MATRYCA_LM_BASE_URL`, model loaded matching `MATRYCA_LM_MODEL`.
 
-### Plumber CLI
+### 🛠️ Interfaccia a Riga di Comando (CLI)
 
 ```bash
-# Detached background daemon (fork + pid file)
+# Avvia il demone Plumber in background (produzione notturna)
 matryca plumber start
 
-# Foreground — debug in current terminal (recommended first run)
+# Avvia l'ingestione in primo piano (ideale per il monitoraggio iniziale)
 matryca plumber start --foreground
 
-# Rich TUI: scan progress, token totals, ops-log tail
+# Sblocca la dashboard TUI interattiva in tempo reale
 matryca plumber status
 
-# Graceful SIGTERM stop
+# Forza l'arresto sincronizzato e controllato del demone (Graceful Evacuation)
 matryca plumber stop
+
+# Esegue una radiografia analitica del grafo spuando metriche in formato JSON
+matryca plumber audit
+
+# Calcola e ispeziona manualmente i quartieri semantici del grafo
+matryca plumber cluster
 ```
 
 Ops log default: `logs/matryca_plumber_ops.log` (override with `MATRYCA_PLUMBER_LOG_PATH`). Daemon state: `.matryca_daemon_state.json` at graph root. PID lock: `.matryca_plumber_daemon.pid`.
@@ -187,7 +195,7 @@ Requires [uv](https://docs.astral.sh/uv/) on `PATH`. Restart the MCP host after 
 
 ## 🧪 Stability Markers
 
-* **214 passing tests** (211 run + 1 skipped integration), **0 Mypy strict issues**.
+* **262 passing tests**, **0 Mypy strict issues**.
 * **Ruff** format + lint clean on `src/` and `tests/`.
 * Enforced on `main` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — run locally:
 
@@ -240,7 +248,7 @@ Lifecycle log: [`docs/PROJECT_DIARY.md`](docs/PROJECT_DIARY.md) — Phases 1–8
 |:-----:|-------------------|
 | **1–8** | MCP bridge → Ironclad data plane (fences, atomic writes, generational cache) |
 | **9–13** | Trust plane, delivery CI, Fortress sandbox, Headless Revolution, service installer |
-| **14 — Plumber OS** | Local LLM daemon, cognitive lint modules, Ermes compression, structural quarantine, `JSON_SCHEMA` inference |
+| **14 — Plumber OS** | Local LLM daemon, cognitive lint modules, Ermes compression, Louvain GraphRAG clustering, structural quarantine, `JSON_SCHEMA` inference |
 
 Full MCP tool matrix: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § Complete phase evolution history.
 
@@ -306,7 +314,7 @@ cp .env.example .env   # edit LOGSEQ_GRAPH_PATH + LM settings
 ### Verify
 
 ```bash
-make check    # Ruff + Mypy strict + 214 tests
+make check    # Ruff + Mypy strict + 262 tests
 matryca plumber start --foreground   # optional smoke test
 ```
 

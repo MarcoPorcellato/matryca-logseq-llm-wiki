@@ -199,8 +199,8 @@ def _louvain_communities(
     community: dict[str, int] = {node: index for index, node in enumerate(nodes)}
     degree: dict[str, float] = {node: sum(adjacency[node].values()) for node in nodes}
     total_weight = sum(degree.values())
-    if total_weight <= 0.0:
-        return {node: index for index, node in enumerate(nodes)}
+    if total_weight == 0.0:
+        return community
 
     improved = True
     iteration = 0
@@ -650,6 +650,8 @@ def _cluster_hub_anchor(
         if weighted_degree > best_degree:
             best_degree = weighted_degree
             best_title = title
+    if best_title is None and titles:
+        return titles[0]
     return best_title
 
 
@@ -660,10 +662,13 @@ def format_cluster_neighborhood(
     """Build the cluster boundary prompt block for Ermes context injection."""
     raw_pages = catalog_data.get("pages", {})
     hub_anchor = _cluster_hub_anchor(titles, catalog_data)
+    anchor_title: str | None = hub_anchor if hub_anchor else None
     lines: list[str] = []
     for title in sorted(titles):
         prefix = (
-            "[CLUSTER FOCUS ANCHOR NODE] " if hub_anchor is not None and title == hub_anchor else ""
+            "[CLUSTER FOCUS ANCHOR NODE] "
+            if anchor_title is not None and title == anchor_title
+            else ""
         )
         record = raw_pages.get(title) if isinstance(raw_pages, dict) else None
         if isinstance(record, dict):

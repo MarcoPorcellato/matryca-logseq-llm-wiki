@@ -156,6 +156,12 @@ def test_louvain_communities_respects_iteration_ceiling() -> None:
     assert set(assignments) == {"a", "b", "c"}
 
 
+def test_louvain_communities_zero_weight_graph_returns_flat_assignment() -> None:
+    adjacency: dict[str, dict[str, float]] = {"alpha": {}, "beta": {}, "gamma": {}}
+    assignments = _louvain_communities(adjacency)
+    assert assignments == {"alpha": 0, "beta": 1, "gamma": 2}
+
+
 def test_format_cluster_neighborhood_marks_hub_anchor() -> None:
     catalog: dict[str, object] = {
         "pages": {
@@ -176,3 +182,18 @@ def test_format_cluster_neighborhood_marks_hub_anchor() -> None:
     rendered = format_cluster_neighborhood(catalog, ["Alpha", "Beta", "Gamma"])
     assert "[CLUSTER FOCUS ANCHOR NODE]" in rendered
     assert rendered.count("[CLUSTER FOCUS ANCHOR NODE]") == 1
+
+
+def test_format_cluster_neighborhood_disconnected_cluster_does_not_crash() -> None:
+    catalog: dict[str, object] = {
+        "pages": {
+            "Solo A": {"summary": "Unique topic alpha", "tags": ["alpha"]},
+            "Solo B": {"summary": "Unique topic beta", "tags": ["beta"]},
+            "Solo C": {"summary": "Unique topic gamma", "tags": ["gamma"]},
+        },
+    }
+    rendered = format_cluster_neighborhood(catalog, ["Solo A", "Solo B", "Solo C"])
+    assert "Solo A" in rendered
+    assert "Solo B" in rendered
+    assert "Solo C" in rendered
+    assert rendered.count("[CLUSTER FOCUS ANCHOR NODE]") <= 1

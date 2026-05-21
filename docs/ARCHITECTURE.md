@@ -416,7 +416,7 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, graceful MCP shutdown |
 | **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
 | **13 — Operational hardening (`v1.4.1`)** | Lifespan **`os.chdir`** to sandbox root; **`mcp_telemetry` privacy sanitizer** (`MATRYCA_DEBUG`); **`service_manager.py`** + CLI **`matryca service`**; **162** strict tests | **Daemon-safe cwd**, **production-safe MCP logs**, **LaunchAgent / systemd** background integration |
-| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`prompt_constraints`**, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; fault-tolerant background processing; **214** strict tests |
+| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`semantic_clustering.py`** (Louvain GraphRAG), strict phase separation, **`prompt_constraints`**, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; fault-tolerant background processing; **262** strict tests |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`docs/PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
@@ -610,6 +610,57 @@ flowchart TD
 - ssot-warnings::
   - ssot_duplicate:pages/Other.md (prefer ((block-uuid)) transclusion)
 ```
+
+---
+
+## Architettura del Ciclo di Vita e della Tolleranza ai Guasti
+
+### 1. Pipeline a Separazione Rigorosa di Fase (Strict Phase Separation)
+
+Per prevenire loop infiniti di allucinazione concettuale (in cui l'LLM crea pagine orfane durante il censimento iniziale che allungano ricorsivamente la coda di scansione), Matryca Plumber impone un muro di separazione invalicabile tra la raccolta dei dati e l'evoluzione logica del grafo.
+
+```
+[ Grafo Logseq ] ──► PHASE 1 (Stateless Ingestion) ──► Genera Master Index & Catalogo
+│
+▼
+[ MODULO DI LOUVAIN ] ──► Raggruppamento in Quartieri Semantici (5-35 pag)
+│
+▼
+PHASE 2 (Cognitive Loop) ──► Alias-First Semantics & Link Backpropagation
+```
+
+#### Phase 1: Pure Bootstrap Harvesting (Read/Append Only)
+
+Durante questa fase, tutti i moduli mutativi e generativi (`Semantic Routing`, `Link Backpropagation`) sono forzatamente disattivati via codice.
+
+- L'esecuzione è **Stateless**: la cronologia dell'Instructor LLM Client viene azzerata dopo ogni singola pagina scritta.
+- Viene popolata la mappa piatta `master_catalog.json` e compilato il file strutturato `pages/Matryca Master Index.md` impostando la proprietà nativa Logseq `collapsed:: true` sulle macro-sezioni MARPA per preservare le prestazioni del DOM visivo.
+- Non è permessa la creazione di alcun file markdown aggiuntivo.
+
+#### Phase 2: Neighborhood-Contextualized Cognitive Engine
+
+Lo stato `bootstrap_complete` viene commutato a `True` solo quando il backlog pendente è a zero e l'indice principale è su disco.
+
+- Al subentrare di modifiche sui file, il demone attiva l'analisi cognitiva.
+- Invece di scorrere le pagine in modo piatto, il sistema le elabora blocco per blocco in base al cluster di appartenenza.
+- All'ingresso di un cluster, viene eseguito un `reset_execution_history()` e iniettata una mappa di quartiere contestuale, forzando la memoria rolling di Ermes (48 messaggi) a rimanere confinata nello stesso perimetro concettuale.
+
+### 2. Il Motore di Clustering Semantico Deterministico
+
+Sviluppato in Python puro per escludere dipendenze C pesanti o database vettoriali esterni, il modulo `semantic_clustering.py` esegue il partizionamento gerarchico delle comunità ispirandosi al paradigma Microsoft GraphRAG.
+
+1. **Tokenizzazione e Filtro Stopwords:** Il testo dei riassunti viene ripulito tramite un set statico di stop-words italiane e inglesi, impedendo alla prosa strutturale di inquinare i calcoli.
+2. **Matrice di Somiglianza Ibrida:** Viene costruita una rete pesata dove la vicinanza tra due nodi $A$ e $B$ è definita dalla combinazione lineare:
+   $$\text{Similarity}(A, B) = (0.55 \times \text{CosineSimilarity}_{\text{TF-IDF}}) + (0.45 \times \text{JaccardIndex}_{\text{Tags}})$$
+3. **Algoritmo di Louvain Bilanciato con Loop Guard:** L'ottimizzazione della modularità in RAM è protetta da una costante `LOUVAIN_MAX_ITERATIONS = 20` per prevenire oscillazioni infinite su grafi degeneri. I cluster risultanti vengono bilanciati rigidamente tra un minimo di 5 e un massimo di 35 pagine per preservare i limiti di contesto dei modelli locali.
+4. **Cluster Hub Anchor:** Per ogni quartiere, viene calcolato matematicamente il nodo con il massimo grado pesato (l'epicentro strutturale). Questo nodo viene marcato esplicitamente nel prompt come ancora cognitiva (`[CLUSTER FOCUS ANCHOR NODE]`), migliorando drasticamente la precisione del recupero associativo.
+
+### 3. Meccanismi di Hardening del Sistema Operativo
+
+- **Universal Unicode Resilience:** Ogni operazione di decodifica/codifica I/O impone il flag `errors="replace"` per digerire frammenti web corrotti senza mai sollevare un `UnicodeDecodeError`.
+- **Graceful Signal Evacuation (`SIGTERM`/`SIGINT`):** All'intercettazione dei segnali di spegnimento, un hook atomico scrive lo stato corrente, persiste il catalogo in RAM, svuota tutti i descrittori di lock di processo (`*.matryca.lock`) e disalloca il file PID prima del `sys.exit(0)`.
+- **Streaming Log Tail in $O(1)$ Memory:** La visualizzazione dei log nella TUI Rich esegue una scansione inversa a ritroso a blocchi fissi di 8KB dal fondo del file, garantendo il refresh a 1Hz a consumo di RAM costante, impedendo i memory-bloat causati da file di log multi-megabyte.
+- **Error Backoff:** Le pagine che falliscono l'indicizzazione per cause esterne (es. timeout VRAM di LM Studio) vengono marcate come `"error"`. Il demone le esclude dai cicli di scansione successivi finché il loro `st_mtime` sul disco non subisce una modifica fisica da parte dell'utente, azzerando lo spreco di cicli CPU.
 
 ---
 
