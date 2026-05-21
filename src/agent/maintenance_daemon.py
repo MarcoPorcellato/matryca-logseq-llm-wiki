@@ -209,6 +209,8 @@ class DaemonState:
     bootstrap_complete: bool = False
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
+    current_cluster: str | None = None
+    phase2_llm_turns: int = 0
     last_scan_at: str | None = None
     last_file: str | None = None
 
@@ -220,6 +222,8 @@ class DaemonState:
             "bootstrap_complete": self.bootstrap_complete,
             "session_prompt_tokens": self.session_prompt_tokens,
             "session_completion_tokens": self.session_completion_tokens,
+            "current_cluster": self.current_cluster,
+            "phase2_llm_turns": self.phase2_llm_turns,
             "last_scan_at": self.last_scan_at,
             "last_file": self.last_file,
             "files": {
@@ -255,6 +259,12 @@ class DaemonState:
             bootstrap_complete=bool(payload.get("bootstrap_complete", False)),
             session_prompt_tokens=int(payload.get("session_prompt_tokens", 0)),
             session_completion_tokens=int(payload.get("session_completion_tokens", 0)),
+            current_cluster=(
+                str(payload["current_cluster"])
+                if payload.get("current_cluster") not in (None, "")
+                else None
+            ),
+            phase2_llm_turns=int(payload.get("phase2_llm_turns", 0)),
             last_scan_at=payload.get("last_scan_at"),
             last_file=payload.get("last_file"),
         )
@@ -1519,8 +1529,24 @@ class MaintenanceDaemon:
         neighborhood = format_cluster_neighborhood(catalog.to_json(), cluster_titles)
         self.llm_client.inject_cluster_focus_context(neighborhood)
 
+    def _sync_live_telemetry(
+        self,
+        state: DaemonState,
+        *,
+        cluster_id: str | None = None,
+        mark_running: bool = False,
+    ) -> None:
+        """Mirror in-memory token totals and cluster focus onto the checkpoint plane."""
+        state.session_prompt_tokens = self.token_logger.session_prompt_tokens
+        state.session_completion_tokens = self.token_logger.session_completion_tokens
+        if cluster_id is not None:
+            state.current_cluster = cluster_id
+        if mark_running and state.status != "stopped":
+            state.status = "running"
+
     def _save_cycle_checkpoint(self, state: DaemonState, *, path: Path | None = None) -> None:
         """Persist daemon state after one file settles in the cycle flywheel."""
+        self._sync_live_telemetry(state)
         try:
             save_daemon_state(self.graph_root, state)
         except Exception as save_exc:  # noqa: BLE001 - log and continue cycle
@@ -1583,12 +1609,19 @@ class MaintenanceDaemon:
         lint_config: PlumberLintConfig,
         *,
         reset_history_after: bool,
+        cluster_id: str | None = None,
     ) -> bool:
         """Index one pending page via LLM path. Returns whether inference ran this turn."""
         key = str(path.resolve())
         mtime = path.stat().st_mtime
         title = _page_title_from_path(self.graph_root, path)
         state.last_file = key
+        self._sync_live_telemetry(
+            state,
+            cluster_id=cluster_id,
+            mark_running=True,
+        )
+        self._save_cycle_checkpoint(state, path=path)
         content = ""
         prompt_before = self.token_logger.session_prompt_tokens
         completion_before = self.token_logger.session_completion_tokens
@@ -1663,7 +1696,11 @@ class MaintenanceDaemon:
             self.token_logger.session_prompt_tokens > prompt_before
             or self.token_logger.session_completion_tokens > completion_before
         )
-        return llm_called_from_usage or llm_called_from_logger
+        llm_called = llm_called_from_usage or llm_called_from_logger
+        if llm_called and self.bootstrap_complete:
+            state.phase2_llm_turns += 1
+        self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
+        return llm_called
 
     def _quarantine_structural_lint(
         self,
@@ -1704,6 +1741,8 @@ class MaintenanceDaemon:
         prune_stale_daemon_file_entries(state, self.graph_root)
         state.status = "running"
         state.last_scan_at = datetime.now(tz=UTC).isoformat()
+        self._sync_live_telemetry(state, mark_running=True)
+        save_daemon_state(self.graph_root, state)
         pending = list_pending_files(self.graph_root, state)
 
         if not pending:
@@ -1722,8 +1761,7 @@ class MaintenanceDaemon:
 
         if self._stop_requested:
             self._prune_stale_catalog_entries()
-            state.session_prompt_tokens = self.token_logger.session_prompt_tokens
-            state.session_completion_tokens = self.token_logger.session_completion_tokens
+            self._sync_live_telemetry(state)
             save_daemon_state(self.graph_root, state)
             return state
 
@@ -1745,6 +1783,8 @@ class MaintenanceDaemon:
                 break
             if cluster_cycle:
                 self._begin_cluster_context(cluster_id, cluster_paths)
+                self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
+                self._save_cycle_checkpoint(state)
             for path in cluster_paths:
                 if self._stop_requested:
                     state.status = "stopped"
@@ -1756,6 +1796,7 @@ class MaintenanceDaemon:
                     state,
                     lint_config,
                     reset_history_after=not cluster_cycle,
+                    cluster_id=cluster_id if cluster_cycle else None,
                 )
                 self._save_cycle_checkpoint(state, path=path)
                 if llm_called_this_turn:
@@ -1764,8 +1805,7 @@ class MaintenanceDaemon:
                         time.sleep(lint_config.thermal_delay_cognitive)
 
         self._prune_stale_catalog_entries()
-        state.session_prompt_tokens = self.token_logger.session_prompt_tokens
-        state.session_completion_tokens = self.token_logger.session_completion_tokens
+        self._sync_live_telemetry(state)
         if not self._stop_requested:
             state.status = "idle"
         save_daemon_state(self.graph_root, state)

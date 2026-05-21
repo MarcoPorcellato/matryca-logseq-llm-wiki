@@ -51,6 +51,8 @@ class DashboardSnapshot:
     activity_lines: list[str] | None = None
     session_prompt_tokens: int = 0
     session_completion_tokens: int = 0
+    current_cluster: str | None = None
+    phase2_llm_turns: int = 0
     last_file: str | None = None
     pid: int | None = None
     pid_file: str = PID_FILENAME
@@ -142,12 +144,18 @@ def collect_snapshot(
     running = pid is not None and is_process_alive(pid)
     status = "Stopped"
     if running:
-        if state.status == "idle":
-            status = "Idle"
-        elif state.status == "running":
+        if state.status == "running":
             status = "Running"
+        elif state.status == "idle":
+            status = "Idle"
         else:
             status = state.status.capitalize()
+        if (
+            status == "Idle"
+            and state.bootstrap_complete
+            and (state.session_prompt_tokens or state.session_completion_tokens)
+        ):
+            status = "Running"
 
     last_file = None
     if state.last_file:
@@ -156,6 +164,9 @@ def collect_snapshot(
     activity_lines: list[str] = []
     with contextlib.suppress(Exception):
         activity_lines = logger.tail_activity_summaries(5)
+
+    phase2_progress_total = max(state.phase2_llm_turns + pending_backlog, 1)
+    phase2_percent = round(100.0 * state.phase2_llm_turns / phase2_progress_total, 1)
 
     return DashboardSnapshot(
         status=status,
@@ -166,10 +177,12 @@ def collect_snapshot(
         skipped_pages=skipped,
         error_pages=errors,
         pending_backlog=pending_backlog,
-        percent_complete=percent_complete,
+        percent_complete=phase2_percent if state.bootstrap_complete else percent_complete,
         activity_lines=activity_lines,
         session_prompt_tokens=state.session_prompt_tokens,
         session_completion_tokens=state.session_completion_tokens,
+        current_cluster=state.current_cluster,
+        phase2_llm_turns=state.phase2_llm_turns,
         last_file=last_file,
         pid=pid,
         pid_file=PID_FILENAME,
@@ -221,12 +234,23 @@ def _init_layout() -> Layout:
     return layout
 
 
+def _token_style(snapshot: DashboardSnapshot) -> str:
+    if snapshot.session_prompt_tokens > 0 or snapshot.session_completion_tokens > 0:
+        return "bold green"
+    return ""
+
+
 def _apply_snapshot(layout: Layout, snapshot: DashboardSnapshot) -> None:
+    status_style = (
+        "green"
+        if snapshot.status == "Running"
+        else ("green" if snapshot.status == "Idle" else "yellow")
+    )
     header_text = Text.assemble(
         (snapshot.title, "bold cyan"),
         "\n",
         ("Status: ", "bold"),
-        (snapshot.status, "green" if snapshot.status in {"Running", "Idle"} else "yellow"),
+        (snapshot.status, status_style),
         "   ",
         ("Bootstrap: ", "bold"),
         (
@@ -249,36 +273,64 @@ def _apply_snapshot(layout: Layout, snapshot: DashboardSnapshot) -> None:
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         expand=True,
     )
-    task_id = progress.add_task("Graph indexing", total=max(snapshot.total_pages, 1))
-    progress.update(task_id, completed=snapshot.processed_pages)
+    if snapshot.bootstrap_complete:
+        phase2_total = max(snapshot.phase2_llm_turns + snapshot.pending_backlog, 1)
+        task_label = "Phase 2 cognitive"
+        if snapshot.current_cluster:
+            task_label = f"Phase 2 · cluster {snapshot.current_cluster}"
+        task_id = progress.add_task(task_label, total=phase2_total)
+        progress.update(task_id, completed=snapshot.phase2_llm_turns)
+    else:
+        task_id = progress.add_task("Graph indexing (Phase 1)", total=max(snapshot.total_pages, 1))
+        progress.update(task_id, completed=snapshot.processed_pages)
 
     stats = Table.grid(padding=(0, 1))
-    stats.add_row("Total pages", str(snapshot.total_pages))
-    stats.add_row("Processed", str(snapshot.processed_pages))
-    stats.add_row("Skipped", str(snapshot.skipped_pages))
-    stats.add_row("Errors", str(snapshot.error_pages))
-    stats.add_row("Pending backlog", str(snapshot.pending_backlog))
-    stats.add_row("Completion", f"{snapshot.percent_complete}%")
+    if snapshot.bootstrap_complete:
+        stats.add_row("Phase", "2 — cognitive")
+        stats.add_row("Semantic cluster", snapshot.current_cluster or "—")
+        stats.add_row("LLM turns (session)", str(snapshot.phase2_llm_turns))
+        stats.add_row("Pending backlog", str(snapshot.pending_backlog))
+        stats.add_row("Completion", f"{snapshot.percent_complete}%")
+        stats.add_row("Catalog processed", str(snapshot.processed_pages))
+        stats.add_row("Catalog skipped", str(snapshot.skipped_pages))
+    else:
+        stats.add_row("Total pages", str(snapshot.total_pages))
+        stats.add_row("Processed", str(snapshot.processed_pages))
+        stats.add_row("Skipped", str(snapshot.skipped_pages))
+        stats.add_row("Errors", str(snapshot.error_pages))
+        stats.add_row("Pending backlog", str(snapshot.pending_backlog))
+        stats.add_row("Completion", f"{snapshot.percent_complete}%")
     if snapshot.last_file:
         stats.add_row("Current file", snapshot.last_file)
     stats.add_row("PID file", snapshot.pid_file)
     if snapshot.log_file:
         stats.add_row("Ops log", snapshot.log_file)
 
+    progress_title = "Phase 2 Progress" if snapshot.bootstrap_complete else "Progress"
     layout["progress"].update(
         Panel(
             Group(progress, "", stats),
-            title="Progress",
+            title=progress_title,
             border_style="blue",
         ),
     )
 
+    token_style = _token_style(snapshot)
     token_table = Table.grid(padding=(0, 1))
-    token_table.add_row("Prompt tokens", str(snapshot.session_prompt_tokens))
-    token_table.add_row("Completion tokens", str(snapshot.session_completion_tokens))
+    token_table.add_row(
+        "Prompt tokens",
+        Text(str(snapshot.session_prompt_tokens), style=token_style),
+    )
+    token_table.add_row(
+        "Completion tokens",
+        Text(str(snapshot.session_completion_tokens), style=token_style),
+    )
     token_table.add_row(
         "Session total",
-        str(snapshot.session_prompt_tokens + snapshot.session_completion_tokens),
+        Text(
+            str(snapshot.session_prompt_tokens + snapshot.session_completion_tokens),
+            style=token_style,
+        ),
     )
     layout["tokens"].update(Panel(token_table, title="Token Counter", border_style="green"))
 

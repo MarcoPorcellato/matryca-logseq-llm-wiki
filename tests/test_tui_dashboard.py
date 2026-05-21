@@ -104,6 +104,28 @@ def test_collect_snapshot_includes_refresh_timestamp(graph_root: Path) -> None:
     assert len(snap.refreshed_at) == 8
 
 
+def test_collect_snapshot_phase2_panel_fields(graph_root: Path) -> None:
+    _write_page(graph_root, "Phase", "- phase\n")
+    state = DaemonState(
+        bootstrap_complete=True,
+        status="running",
+        current_cluster="cluster-3",
+        phase2_llm_turns=2,
+        session_prompt_tokens=50,
+        session_completion_tokens=10,
+    )
+    save_daemon_state(graph_root, state)
+    logger = TokenLogger(log_path=graph_root / "ops.log")
+
+    snap = collect_snapshot(graph_root=graph_root, token_logger=logger)
+
+    assert snap.bootstrap_complete is True
+    assert snap.current_cluster == "cluster-3"
+    assert snap.phase2_llm_turns == 2
+    assert snap.session_prompt_tokens == 50
+    assert snap.session_completion_tokens == 10
+
+
 def test_collect_snapshot_safe_falls_back_to_last_good_state_on_read_failure(
     graph_root: Path,
 ) -> None:

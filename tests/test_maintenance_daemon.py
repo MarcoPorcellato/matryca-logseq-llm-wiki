@@ -989,3 +989,88 @@ def test_run_cycle_thermal_delay_only_after_llm_inference(
     sleeps.clear()
     daemon.run_cycle()
     assert sleeps == [2.0]
+
+
+def test_daemon_state_serializes_phase2_telemetry_fields(graph_root: Path) -> None:
+    state = DaemonState(
+        status="running",
+        bootstrap_complete=True,
+        session_prompt_tokens=120,
+        session_completion_tokens=45,
+        current_cluster="cluster-7",
+        phase2_llm_turns=3,
+    )
+    save_daemon_state(graph_root, state)
+    loaded = load_daemon_state(graph_root)
+    assert loaded.current_cluster == "cluster-7"
+    assert loaded.phase2_llm_turns == 3
+    assert loaded.session_prompt_tokens == 120
+    assert loaded.session_completion_tokens == 45
+
+
+def test_save_cycle_checkpoint_syncs_live_token_counters(graph_root: Path) -> None:
+    logger = TokenLogger(log_path=graph_root / "ops.log")
+    logger.log_turn(
+        target_file="pages/Live.md",
+        operation="Semantic Linting",
+        prompt_tokens=11,
+        completion_tokens=4,
+        prompt="lint",
+        response="ok",
+        latency_seconds=0.1,
+    )
+    daemon = MaintenanceDaemon(graph_root, token_logger=logger, llm_client=StubLLM())
+    state = DaemonState(status="idle")
+    daemon._sync_live_telemetry(state, cluster_id="cluster-a", mark_running=True)
+    daemon._save_cycle_checkpoint(state)
+
+    loaded = load_daemon_state(graph_root)
+    assert loaded.session_prompt_tokens == 11
+    assert loaded.session_completion_tokens == 4
+    assert loaded.current_cluster == "cluster-a"
+    assert loaded.status == "running"
+
+
+def test_run_cycle_increments_phase2_turns_and_persists_tokens(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_THERMAL_DELAY_COGNITIVE", "0")
+
+    class TokenUsageLLM(StubLLM):
+        def index_page(
+            self,
+            page_title: str,
+            content: str,
+            *,
+            page_path: Path | None = None,
+            graph_root: Path | None = None,
+            alias_index: object | None = None,
+            enable_semantic_routing: bool = False,
+        ) -> tuple[SemanticIndexResult, dict[str, int]]:
+            result, _usage = super().index_page(
+                page_title,
+                content,
+                page_path=page_path,
+                graph_root=graph_root,
+                alias_index=alias_index,
+                enable_semantic_routing=enable_semantic_routing,
+            )
+            return result, {"prompt_tokens": 8, "completion_tokens": 2}
+
+    run_bootstrap_harvest(graph_root, llm=StubLLM(), incremental=False, phase1_strict=True)
+    _write_page(graph_root, "PhaseTwo", "- phase two body\n")
+    logger = TokenLogger(log_path=graph_root / "phase2.log")
+    daemon = MaintenanceDaemon(
+        graph_root,
+        llm_client=TokenUsageLLM(),
+        token_logger=logger,
+        max_files_per_cycle=1,
+    )
+    daemon.bootstrap_complete = True
+    daemon.run_cycle()
+
+    loaded = load_daemon_state(graph_root)
+    assert loaded.phase2_llm_turns >= 1
+    assert loaded.last_file is not None
+    assert loaded.last_file.endswith("PhaseTwo.md")
