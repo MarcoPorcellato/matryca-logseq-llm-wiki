@@ -19,6 +19,8 @@ dependencies = [
     "openai>=1.50.0,<2.0.0",
     "instructor>=1.7.0,<2.0.0",
     "rich>=13.9.0,<14.0.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn>=0.32.0,<1.0.0",
 ]
 
 [project.scripts]
@@ -85,6 +87,18 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "rich.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "fastapi.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "uvicorn.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "starlette.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

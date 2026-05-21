@@ -479,6 +479,8 @@ def test_parser_exposes_plumber_subcommands() -> None:
     assert args.foreground is True
     args_status = parser.parse_args(["plumber", "status"])
     assert args_status.plumber_action == "status"
+    args_ui = parser.parse_args(["plumber", "ui"])
+    assert args_ui.plumber_action == "ui"
     args_stop = parser.parse_args(["plumber", "stop"])
     assert args_stop.plumber_action == "stop"
     args_audit = parser.parse_args(["plumber", "audit"])

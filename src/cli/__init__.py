@@ -37,7 +37,7 @@ from ..agent.maintenance_daemon import (
 )
 from ..config import load_matryca_wiki_config
 from ..graph.service_manager import manage_matryca_service
-from .tui_dashboard import run_dashboard
+from .ui_server import run_ui_server
 
 READ_TARGETS: tuple[ReadGraphTarget, ...] = (
     "page",
@@ -167,7 +167,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run in the current terminal instead of detaching",
     )
-    plumber_sub.add_parser("status", help="Open the live TUI dashboard")
+    plumber_sub.add_parser("status", help="Open the Plumber web UI (alias for ui)")
+    plumber_sub.add_parser("ui", help="Start the FastAPI web UI and open Swagger docs")
     plumber_sub.add_parser("stop", help="Gracefully stop the running daemon")
     plumber_sub.add_parser(
         "audit",
@@ -260,8 +261,8 @@ async def run_cli(args: argparse.Namespace) -> int:
             start_out = start_daemon_detached(graph_root)
             _emit_result(start_out)
             return 0 if start_out.get("ok") is not False else 1
-        if plumber_action == "status":
-            run_dashboard(graph_root=graph_root)
+        if plumber_action in {"status", "ui"}:
+            run_ui_server()
             return 0
         if plumber_action == "stop":
             stop_out = stop_daemon(graph_root)
