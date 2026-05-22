@@ -38,8 +38,14 @@ export interface PlumberConfig {
   mapreduce_trigger_chars: number
   mapreduce_chunk_chars: number
   context_compression: boolean
-  backpropagate_links: boolean
+  semantic_routing: boolean
+  entity_consolidation: boolean
+  property_hygiene: boolean
+  marpa_framework: boolean
   heal_dangling: boolean
+  backpropagate_links: boolean
+  enable_inline_semantic_corrections: boolean
+  auto_split: boolean
 }
 
 export type ConnectionStatus = 'live' | 'connecting' | 'offline'

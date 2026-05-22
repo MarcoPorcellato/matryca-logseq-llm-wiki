@@ -69,8 +69,14 @@ def test_get_config_returns_live_lint_settings(
     monkeypatch.setenv("MATRYCA_PLUMBER_MAPREDUCE_TRIGGER_CHARS", "30000")
     monkeypatch.setenv("MATRYCA_PLUMBER_MAPREDUCE_CHUNK_CHARS", "12000")
     monkeypatch.setenv("MATRYCA_PLUMBER_CONTEXT_COMPRESSION", "true")
+    monkeypatch.setenv("MATRYCA_LINT_SEMANTIC_ROUTING", "true")
+    monkeypatch.setenv("MATRYCA_LINT_ENTITY_CONSOLIDATION", "true")
+    monkeypatch.setenv("MATRYCA_LINT_PROPERTY_HYGIENE", "true")
+    monkeypatch.setenv("MATRYCA_LINT_MARPA_FRAMEWORK", "true")
     monkeypatch.setenv("MATRYCA_LINT_BACKPROPAGATE_LINKS", "true")
     monkeypatch.setenv("MATRYCA_LINT_HEAL_DANGLING", "true")
+    monkeypatch.setenv("MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS", "false")
+    monkeypatch.setenv("MATRYCA_LINT_AUTO_SPLIT", "true")
 
     with TestClient(app) as client:
         response = client.get("/api/config")
@@ -85,8 +91,14 @@ def test_get_config_returns_live_lint_settings(
     assert payload["mapreduce_trigger_chars"] == 30_000
     assert payload["mapreduce_chunk_chars"] == 12_000
     assert payload["context_compression"] is True
+    assert payload["semantic_routing"] is True
+    assert payload["entity_consolidation"] is True
+    assert payload["property_hygiene"] is True
+    assert payload["marpa_framework"] is True
     assert payload["backpropagate_links"] is True
     assert payload["heal_dangling"] is True
+    assert payload["enable_inline_semantic_corrections"] is True
+    assert payload["auto_split"] is True
 
 
 def test_post_config_updates_dotenv(
@@ -106,8 +118,14 @@ def test_post_config_updates_dotenv(
         "mapreduce_trigger_chars": 20000,
         "mapreduce_chunk_chars": 10000,
         "context_compression": False,
+        "semantic_routing": True,
+        "entity_consolidation": False,
+        "property_hygiene": True,
+        "marpa_framework": False,
         "backpropagate_links": True,
         "heal_dangling": False,
+        "enable_inline_semantic_corrections": True,
+        "auto_split": False,
     }
 
     with TestClient(app) as client:
@@ -117,9 +135,12 @@ def test_post_config_updates_dotenv(
     payload = response.json()
     assert payload["logseq_graph_path"] == "/new/graph"
     assert payload["backpropagate_links"] is True
+    assert payload["enable_inline_semantic_corrections"] is True
     written = env_path.read_text(encoding="utf-8")
     assert "LOGSEQ_GRAPH_PATH=/new/graph" in written
     assert "MATRYCA_LINT_BACKPROPAGATE_LINKS=true" in written
+    assert "MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS=false" in written
+    assert "MATRYCA_LINT_PROPERTY_HYGIENE=true" in written
 
 
 def test_daemon_start_schedules_background_launch(

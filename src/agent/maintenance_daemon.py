@@ -36,7 +36,7 @@ from ..graph.insights_engine import (
     run_graph_insights_engine,
 )
 from ..graph.logseq_uuid import find_malformed_block_refs, is_malformed_block_ref_error
-from ..graph.markdown_blocks import atomic_write_bytes, locate_block_by_uuid
+from ..graph.markdown_blocks import atomic_write_bytes, bullet_indent_unit, locate_block_by_uuid
 from ..graph.master_catalog import (
     extract_catalog_fields_from_content,
     is_bootstrap_catalog_complete,
@@ -112,6 +112,7 @@ MATRYCA_GENERATED_PAGE_TITLES = frozenset(
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _ID_LINE = re.compile(r"^\s*id::\s*(.+?)\s*$", re.IGNORECASE)
+_MATRYCA_PLUMBER_LINE = re.compile(r"^\s*matryca-plumber::\s*", re.IGNORECASE)
 _WIKILINK = re.compile(r"\[\[([^\]#|]+)(?:\|[^\]]+)?\]\]")
 
 DaemonStatus = Literal["running", "idle", "stopped", "error"]
@@ -458,6 +459,23 @@ def _set_bullet_inline_text(line: str, new_text: str) -> str:
     return f"{match.group(1)}- {new_text}{newline}"
 
 
+def _stamp_matryca_plumber_property(
+    lines: list[str],
+    bullet_idx: int,
+    id_idx: int,
+    block_end: int,
+) -> None:
+    """Append ``matryca-plumber:: true`` under the modified block (Logseq audit trail)."""
+    for i in range(bullet_idx + 1, min(block_end, len(lines))):
+        if _MATRYCA_PLUMBER_LINE.match(lines[i].rstrip("\n")):
+            return
+    stripped = [ln.rstrip("\n") for ln in lines]
+    indent = bullet_indent_unit(stripped, bullet_idx)
+    insert_at = id_idx + 1 if id_idx >= bullet_idx else bullet_idx + 1
+    insert_at = min(insert_at, block_end)
+    lines.insert(insert_at, f"{indent}matryca-plumber:: true\n")
+
+
 def _enumerate_blocks_for_prompt(content: str) -> str:
     """Serialize blocks with UUIDs so the LLM can target surgical lint corrections."""
     lines = content.splitlines()
@@ -647,17 +665,21 @@ def apply_semantic_corrections_to_lines(
         return outcome
 
     stripped = [ln.rstrip("\n") for ln in lines]
-    pending: list[tuple[int, SemanticLintCorrection]] = []
+    pending: list[tuple[int, int, int, SemanticLintCorrection]] = []
     for correction in corrections:
         located = locate_block_by_uuid(stripped, correction.block_uuid)
         if located is None:
             outcome.skipped += 1
             outcome.skip_reasons.append(f"uuid_not_found:{correction.block_uuid}")
             continue
-        bullet_idx, _id_idx, _end = located
-        pending.append((bullet_idx, correction))
+        bullet_idx, id_idx, block_end = located
+        pending.append((bullet_idx, id_idx, block_end, correction))
 
-    for bullet_idx, correction in sorted(pending, key=lambda item: item[0], reverse=True):
+    for bullet_idx, id_idx, block_end, correction in sorted(
+        pending,
+        key=lambda item: item[0],
+        reverse=True,
+    ):
         current_text = _bullet_inline_text(lines[bullet_idx])
         if _normalize_block_text(current_text) != _normalize_block_text(correction.original_text):
             outcome.skipped += 1
@@ -680,6 +702,7 @@ def apply_semantic_corrections_to_lines(
             outcome.skip_reasons.append(f"no_change:{correction.block_uuid}")
             continue
         lines[bullet_idx] = _set_bullet_inline_text(lines[bullet_idx], correction.corrected_text)
+        _stamp_matryca_plumber_property(lines, bullet_idx, id_idx, block_end)
         outcome.applied += 1
         outcome.applied_details.append(
             f"{correction.lint_type}:{correction.block_uuid}:{correction.reason}",
@@ -775,6 +798,7 @@ def apply_semantic_page_result(
     *,
     backpropagate: bool = False,
     alias_index: AliasIndex | None = None,
+    disable_semantic_corrections: bool = True,
 ) -> CorrectionOutcome:
     """Lint blocks surgically, then append the semantic index (one locked transaction)."""
     with page_rmw_lock(page_path):
@@ -783,7 +807,10 @@ def apply_semantic_page_result(
         else:
             prev = ""
         lines = prev.splitlines(keepends=True)
-        lint_outcome = apply_semantic_corrections_to_lines(lines, result.semantic_corrections)
+        if disable_semantic_corrections:
+            lint_outcome = CorrectionOutcome()
+        else:
+            lint_outcome = apply_semantic_corrections_to_lines(lines, result.semantic_corrections)
         body = "".join(lines)
         if SEMANTIC_INDEX_HEADER not in body:
             body = body.rstrip("\n") + _format_index_section(result, lint_outcome=lint_outcome)
@@ -2011,6 +2038,7 @@ class MaintenanceDaemon:
                 result,
                 backpropagate=enable_backprop,
                 alias_index=alias_index,
+                disable_semantic_corrections=lint_config.disable_semantic_corrections,
             )
             state.files[key] = FileState(
                 mtime=path.stat().st_mtime,

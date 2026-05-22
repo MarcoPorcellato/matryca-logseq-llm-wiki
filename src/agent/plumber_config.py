@@ -104,6 +104,7 @@ class PlumberLintConfig:
     property_rules_path: Path | None = None
     backpropagate_links: bool = False
     semantic_routing: bool = False
+    disable_semantic_corrections: bool = True
     context_compression: bool = False
     compression_trigger: int = 100_000
     compression_target: int = 30_000
@@ -184,6 +185,10 @@ def load_plumber_lint_config(*, reload_env: bool = False) -> PlumberLintConfig:
         property_rules_path=rules_path,
         backpropagate_links=_env_bool("MATRYCA_LINT_BACKPROPAGATE_LINKS"),
         semantic_routing=_env_bool("MATRYCA_LINT_SEMANTIC_ROUTING"),
+        disable_semantic_corrections=_env_bool(
+            "MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS",
+            True,
+        ),
         context_compression=_env_bool("MATRYCA_PLUMBER_CONTEXT_COMPRESSION"),
         compression_trigger=_env_int("MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS", 100_000),
         compression_target=_env_int("MATRYCA_PLUMBER_COMPRESSION_TARGET_TOKENS", 30_000),

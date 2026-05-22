@@ -91,8 +91,14 @@ class PlumberConfigResponse(BaseModel):
     mapreduce_trigger_chars: int
     mapreduce_chunk_chars: int
     context_compression: bool
-    backpropagate_links: bool
+    semantic_routing: bool
+    entity_consolidation: bool
+    property_hygiene: bool
+    marpa_framework: bool
     heal_dangling: bool
+    backpropagate_links: bool
+    enable_inline_semantic_corrections: bool
+    auto_split: bool
 
     @classmethod
     def from_lint_config(cls, config: PlumberLintConfig) -> PlumberConfigResponse:
@@ -106,8 +112,14 @@ class PlumberConfigResponse(BaseModel):
             mapreduce_trigger_chars=config.mapreduce_trigger_chars,
             mapreduce_chunk_chars=config.mapreduce_chunk_chars,
             context_compression=config.context_compression,
-            backpropagate_links=config.backpropagate_links,
+            semantic_routing=config.semantic_routing,
+            entity_consolidation=config.entity_consolidation,
+            property_hygiene=config.property_hygiene,
+            marpa_framework=config.marpa_framework,
             heal_dangling=config.heal_dangling,
+            backpropagate_links=config.backpropagate_links,
+            enable_inline_semantic_corrections=not config.disable_semantic_corrections,
+            auto_split=config.auto_split,
         )
 
 
@@ -129,8 +141,13 @@ _ENV_KEY_MAP: dict[str, str] = {
     "mapreduce_trigger_chars": "MATRYCA_PLUMBER_MAPREDUCE_TRIGGER_CHARS",
     "mapreduce_chunk_chars": "MATRYCA_PLUMBER_MAPREDUCE_CHUNK_CHARS",
     "context_compression": "MATRYCA_PLUMBER_CONTEXT_COMPRESSION",
-    "backpropagate_links": "MATRYCA_LINT_BACKPROPAGATE_LINKS",
+    "semantic_routing": "MATRYCA_LINT_SEMANTIC_ROUTING",
+    "entity_consolidation": "MATRYCA_LINT_ENTITY_CONSOLIDATION",
+    "property_hygiene": "MATRYCA_LINT_PROPERTY_HYGIENE",
+    "marpa_framework": "MATRYCA_LINT_MARPA_FRAMEWORK",
     "heal_dangling": "MATRYCA_LINT_HEAL_DANGLING",
+    "backpropagate_links": "MATRYCA_LINT_BACKPROPAGATE_LINKS",
+    "auto_split": "MATRYCA_LINT_AUTO_SPLIT",
 }
 
 
@@ -172,6 +189,9 @@ def _update_dotenv(payload: PlumberConfigResponse) -> None:
         env_key: _serialize_config_value(field, getattr(payload, field))
         for field, env_key in _ENV_KEY_MAP.items()
     }
+    updates["MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS"] = (
+        "false" if payload.enable_inline_semantic_corrections else "true"
+    )
 
     if env_path.is_file():
         lines = env_path.read_text(encoding="utf-8").splitlines()

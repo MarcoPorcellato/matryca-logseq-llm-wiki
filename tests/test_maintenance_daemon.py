@@ -568,13 +568,67 @@ def test_semantic_correction_applies_wikilink(graph_root: Path) -> None:
             ),
         ],
     )
-    outcome = apply_semantic_page_result(graph_root, path, "LintDemo", result)
+    outcome = apply_semantic_page_result(
+        graph_root,
+        path,
+        "LintDemo",
+        result,
+        disable_semantic_corrections=False,
+    )
     text = path.read_text(encoding="utf-8")
     assert outcome.applied == 1
     assert "[[Redis]]" in text
+    assert "matryca-plumber:: true" in text
     assert SEMANTIC_INDEX_HEADER in text
     assert "- semantic-lint-applied::" in text
     assert f"id:: {BLOCK_UUID}" in text
+
+
+def test_semantic_correction_disabled_by_default(graph_root: Path) -> None:
+    path = _write_page(
+        graph_root,
+        "SafeDemo",
+        f"- Learn about Redis caching\n  id:: {BLOCK_UUID}\n",
+    )
+    result = SemanticIndexResult(
+        summary="Redis notes",
+        semantic_corrections=[
+            SemanticLintCorrection(
+                block_uuid=BLOCK_UUID,
+                original_text="Learn about Redis caching",
+                corrected_text="Learn about [[Redis]] caching",
+                lint_type="auto_wikilink",
+                reason="Canonical link",
+            ),
+        ],
+    )
+    outcome = apply_semantic_page_result(graph_root, path, "SafeDemo", result)
+    text = path.read_text(encoding="utf-8")
+    assert outcome.applied == 0
+    assert "[[Redis]]" not in text
+    assert "matryca-plumber:: true" not in text
+    assert SEMANTIC_INDEX_HEADER in text
+
+
+def test_semantic_correction_stamps_matryca_plumber_property() -> None:
+    body = f"- Learn about Redis caching\n  id:: {BLOCK_UUID}\n"
+    lines = body.splitlines(keepends=True)
+    outcome = apply_semantic_corrections_to_lines(
+        lines,
+        [
+            SemanticLintCorrection(
+                block_uuid=BLOCK_UUID,
+                original_text="Learn about Redis caching",
+                corrected_text="Learn about [[Redis]] caching",
+                lint_type="auto_wikilink",
+                reason="Canonical link",
+            ),
+        ],
+    )
+    merged = "".join(lines)
+    assert outcome.applied == 1
+    assert "Learn about [[Redis]] caching" in merged
+    assert "matryca-plumber:: true" in merged
 
 
 def test_semantic_correction_skips_on_original_mismatch(graph_root: Path) -> None:
@@ -595,7 +649,13 @@ def test_semantic_correction_skips_on_original_mismatch(graph_root: Path) -> Non
             ),
         ],
     )
-    outcome = apply_semantic_page_result(graph_root, path, "LintDemo", result)
+    outcome = apply_semantic_page_result(
+        graph_root,
+        path,
+        "LintDemo",
+        result,
+        disable_semantic_corrections=False,
+    )
     after = path.read_text(encoding="utf-8")
     assert outcome.applied == 0
     assert outcome.skipped == 1
@@ -650,7 +710,12 @@ def test_anomaly_warning_does_not_modify_block(graph_root: Path) -> None:
     assert "Possible duplicate concept" in text
 
 
-def test_maintenance_daemon_applies_semantic_lint(graph_root: Path, tmp_path: Path) -> None:
+def test_maintenance_daemon_applies_semantic_lint(
+    graph_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS", "false")
     log_path = tmp_path / "brain.log"
     logger = TokenLogger(log_path=log_path)
     path = _write_page(
@@ -658,12 +723,14 @@ def test_maintenance_daemon_applies_semantic_lint(graph_root: Path, tmp_path: Pa
         "RedisPage",
         f"- Learn about Redis caching\n  id:: {BLOCK_UUID}\n",
     )
+    run_bootstrap_harvest(graph_root, llm=StubLLM(), incremental=False, phase1_strict=True)
     daemon = MaintenanceDaemon(
         graph_root,
         llm_client=StubLLM(),
         token_logger=logger,
         max_files_per_cycle=5,
     )
+    daemon.bootstrap_complete = True
     daemon.run_cycle()
     text = path.read_text(encoding="utf-8")
     assert "[[Redis]]" in text
