@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from .markdown_blocks import atomic_write_bytes, graph_safe_page_path
+from .page_path import filename_to_page_title
 from .page_write_lock import page_rmw_lock
 
 
@@ -14,8 +15,7 @@ def _safe_page_write_path(graph_root: Path, page_title: str) -> Path:
     if not raw or ".." in raw or raw.startswith(("/", "\\")):
         msg = "invalid_page_title"
         raise ValueError(msg)
-    safe = raw.replace("/", "___")
-    return graph_safe_page_path(graph_root, safe)
+    return graph_safe_page_path(graph_root, raw)
 
 
 def collect_pages_for_namespace(graph_root: Path, namespace: str) -> list[tuple[str, str]]:
@@ -27,7 +27,7 @@ def collect_pages_for_namespace(graph_root: Path, namespace: str) -> list[tuple[
         return out
     for p in sorted(pages.glob("*.md")):
         stem = p.stem
-        title = stem.replace("___", "/")
+        title = filename_to_page_title(p.name)
         if stem == ns or stem.startswith(f"{ns}___") or title.startswith(f"{ns}/"):
             rel = p.relative_to(graph_root).as_posix()
             out.append((title, rel))

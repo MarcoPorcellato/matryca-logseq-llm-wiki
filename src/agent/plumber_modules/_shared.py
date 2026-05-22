@@ -7,12 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...graph.markdown_blocks import graph_safe_page_path
+from ...graph.page_path import filename_to_page_title, resolve_existing_page_title
+from ...graph.page_properties import page_property_keys as _page_property_keys
 from ...graph.path_sandbox import resolved_graph_root
 
 _WIKILINK = re.compile(r"\[\[([^\]#|]+)(?:\|[^\]]+)?\]\]")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
 _TAG = re.compile(r"(?<![\w/])#([\w/-]+)")
-_PROPERTY = re.compile(r"^\s*([a-zA-Z0-9_-]+)::\s*(.*)$")
 
 
 @dataclass
@@ -35,12 +36,18 @@ def extract_wikilink_targets(text: str) -> list[str]:
     return out
 
 
-def page_file_exists(graph_root: Path, page_title: str) -> bool:
+def is_journal_page_path(graph_root: Path, page_path: Path) -> bool:
+    """True when ``page_path`` lives under the graph ``journals/`` tree."""
+    root = resolved_graph_root(graph_root)
     try:
-        path = graph_safe_page_path(graph_root, page_title)
+        rel = page_path.expanduser().resolve(strict=False).relative_to(root.resolve())
     except ValueError:
         return False
-    return path.is_file()
+    return bool(rel.parts) and rel.parts[0] == "journals"
+
+
+def page_file_exists(graph_root: Path, page_title: str) -> bool:
+    return resolve_existing_page_title(graph_root, page_title) is not None
 
 
 def resolve_page_path(graph_root: Path, page_title: str) -> Path | None:
@@ -93,12 +100,7 @@ def extract_inline_tags(text: str) -> set[str]:
 
 
 def page_property_keys(text: str) -> dict[str, str]:
-    keys: dict[str, str] = {}
-    for line in text.splitlines():
-        match = _PROPERTY.match(line)
-        if match:
-            keys[match.group(1).casefold()] = match.group(2).strip()
-    return keys
+    return _page_property_keys(text)
 
 
 def list_existing_page_titles(graph_root: Path) -> set[str]:
@@ -109,8 +111,7 @@ def list_existing_page_titles(graph_root: Path) -> set[str]:
     titles: set[str] = set()
     for path in pages_dir.rglob("*.md"):
         if path.is_file():
-            rel = path.relative_to(root).as_posix()
-            titles.add(rel.removeprefix("pages/").removesuffix(".md"))
+            titles.add(filename_to_page_title(path.name))
     return titles
 
 
@@ -119,6 +120,7 @@ __all__ = [
     "context_around_wikilink",
     "extract_inline_tags",
     "extract_wikilink_targets",
+    "is_journal_page_path",
     "list_existing_page_titles",
     "page_file_exists",
     "page_property_keys",

@@ -15,6 +15,7 @@ from .alias_index import (
     iter_alias_source_paths,
     remove_page_from_alias_index,
 )
+from .page_path import page_title_from_graph_relpath
 
 _lock = threading.Lock()
 _alias_cache: dict[str, tuple[frozenset[tuple[str, int]], AliasIndex]] = {}
@@ -72,7 +73,7 @@ def _patch_signature(
 
 
 def _page_title_from_rel(rel: str) -> str:
-    return rel.removesuffix(".md").replace("pages/", "").replace("journals/", "")
+    return page_title_from_graph_relpath(rel)
 
 
 def _remove_bm25_doc(corpus: Bm25Corpus, rel: str) -> None:

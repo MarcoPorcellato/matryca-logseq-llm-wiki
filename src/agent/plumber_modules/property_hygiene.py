@@ -8,6 +8,7 @@ import yaml
 
 from ...agent.plumber_config import PlumberLintConfig, apply_thermal_pause_cognitive
 from ...graph.markdown_blocks import atomic_write_bytes
+from ...graph.page_properties import inject_page_properties
 from ...graph.page_write_lock import page_rmw_lock
 from ._shared import ModuleOutcome, extract_inline_tags, page_property_keys
 
@@ -101,10 +102,9 @@ def run_property_hygiene(
 
     with page_rmw_lock(page_path):
         text = page_path.read_text(encoding="utf-8", errors="replace")
-        additions = "".join(f"{key}:: {value}\n" for key, value in sorted(inferred.items()))
-        if additions.strip() in text:
+        new_text = inject_page_properties(text, inferred)
+        if new_text == text:
             return outcome
-        new_text = text.rstrip("\n") + "\n" + additions
         atomic_write_bytes(page_path, new_text.encode("utf-8"), graph_root=graph_root)
 
     outcome.pages_modified.append(page_title)

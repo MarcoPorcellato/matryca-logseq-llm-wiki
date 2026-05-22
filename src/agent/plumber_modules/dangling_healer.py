@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ...agent.plumber_config import PlumberLintConfig, apply_thermal_pause_cognitive
 from ...graph.markdown_blocks import atomic_write_bytes
+from ...graph.page_properties import inject_page_properties
 from ...graph.page_write_lock import page_rmw_lock
 from ._shared import (
     ModuleOutcome,
@@ -55,10 +56,13 @@ def run_dangling_healer(
         new_path = resolve_page_path(graph_root, target)
         if new_path is None:
             continue
-        body = (
-            f"- {definition}\n"
-            f"  seeded-from:: [[{page_title}]]\n"
-            f"  matryca-seed:: contextual dangling-link healer\n"
+        body = f"- {definition}\n"
+        body = inject_page_properties(
+            body,
+            {
+                "seeded-from": f"[[{page_title}]]",
+                "matryca-seed": "contextual dangling-link healer",
+            },
         )
         with page_rmw_lock(new_path):
             if new_path.is_file():

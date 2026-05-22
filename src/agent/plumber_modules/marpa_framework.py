@@ -9,6 +9,7 @@ from typing import Literal
 from ...agent.plumber_config import PlumberLintConfig, apply_thermal_pause_cognitive
 from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import atomic_write_bytes
+from ...graph.page_properties import inject_page_properties, page_property_keys
 from ...graph.page_write_lock import page_rmw_lock
 from ..plumber_llm import MarpaClassificationResult
 from ..prompt_constraints import finalize_system_prompt
@@ -65,7 +66,6 @@ def build_marpa_classify_user_prompt(
     )
 
 
-_TYPE_LINE = re.compile(r"^\s*type::\s*(\S+)\s*$", re.IGNORECASE)
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _MIN_DUP_CHARS = 80
 _MARPA_HEADER = "### Matryca MARPA Validation"
@@ -81,7 +81,7 @@ def detect_marpa_namespace(page_title: str) -> str | None:
 
 
 def _has_top_level_type(content: str) -> bool:
-    return any(_TYPE_LINE.match(line) for line in content.splitlines()[:12])
+    return "type" in page_property_keys(content)
 
 
 def _scan_ssot_duplication(graph_root: Path, page_path: Path, content: str) -> list[str]:
@@ -119,28 +119,18 @@ def _scan_ssot_duplication(graph_root: Path, page_path: Path, content: str) -> l
 
 
 def _inject_type_and_properties(
-    lines: list[str],
+    text: str,
     domain: MarpaDomain,
     inferred: dict[str, str],
-) -> None:
-    """Insert ``type::`` and inferred properties under the first list bullet."""
-    for idx, line in enumerate(lines):
-        if not _BULLET.match(line.rstrip("\n")):
+) -> str:
+    """Insert ``type::`` and inferred properties as page-level frontmatter."""
+    props: dict[str, str] = {"type": domain}
+    for key, value in inferred.items():
+        if key.casefold() == "type":
             continue
-        window = lines[idx : idx + 8]
-        if any(_TYPE_LINE.match(w.rstrip("\n")) for w in window):
-            return
-        indent = "  "
-        insert: list[str] = [f"{indent}type:: {domain}\n"]
-        for key, value in inferred.items():
-            if key.casefold() == "type":
-                continue
-            if value.strip():
-                insert.append(f"{indent}{key}:: {value.strip()}\n")
-        lines[idx + 1 : idx + 1] = insert
-        return
-
-    lines.insert(0, f"- MARPA classified page\n  type:: {domain}\n")
+        if value.strip():
+            props[key] = value.strip()
+    return inject_page_properties(text, props)
 
 
 def _strip_marpa_validation_section(text: str) -> str:
@@ -201,13 +191,9 @@ def run_marpa_framework(
 
     if has_type:
         domain: MarpaDomain = "risorsa"
-        for line in content.splitlines()[:12]:
-            match = _TYPE_LINE.match(line)
-            if match:
-                raw = match.group(1).casefold()
-                if raw in {"mappa", "area", "risorsa", "progetto", "archivio"}:
-                    domain = raw  # type: ignore[assignment]
-                break
+        existing_type = page_property_keys(content).get("type", "").casefold()
+        if existing_type in {"mappa", "area", "risorsa", "progetto", "archivio"}:
+            domain = existing_type  # type: ignore[assignment]
         classification = MarpaClassificationResult(assigned_domain=domain)
     else:
         llm_body = (llm_context if llm_context is not None else content)[:8000]
@@ -229,11 +215,12 @@ def run_marpa_framework(
             text = content
         lines = text.splitlines(keepends=True)
         if not has_type:
-            _inject_type_and_properties(
-                lines,
+            text = _inject_type_and_properties(
+                text,
                 classification.assigned_domain,
                 classification.inferred_properties,
             )
+            lines = text.splitlines(keepends=True)
         _upsert_validation_section(lines, classification, ssot_flags)
         new_text = "".join(lines)
         if new_text == text:

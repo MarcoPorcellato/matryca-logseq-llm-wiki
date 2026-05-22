@@ -20,6 +20,7 @@ from .link_tag_hop import (
 )
 from .markdown_blocks import atomic_write_bytes
 from .master_catalog import MasterCatalog, load_master_catalog
+from .page_path import filename_to_page_title
 from .path_sandbox import graph_safe_page_path
 
 GRAPH_INSIGHTS_TITLE = "Matryca Graph Insights"
@@ -89,7 +90,7 @@ def _incoming_backlink_counts(graph_root: Path) -> dict[str, int]:
         for match in _WIKILINK.finditer(text):
             other = _resolve_target_to_stem(match.group(1), pages_dir)
             if other and other in stems:
-                target_title = other.replace("___", "/")
+                target_title = filename_to_page_title(f"{other}.md")
                 incoming[target_title] = incoming.get(target_title, 0) + 1
     return incoming
 

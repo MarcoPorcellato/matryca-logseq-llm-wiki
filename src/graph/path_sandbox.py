@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .page_path import page_title_to_filename
+
 SECURITY_VIOLATION_MSG = "Security Violation: Path traversal attempt blocked."
 
 
@@ -25,16 +27,25 @@ def assert_path_within_graph(path: Path | str, graph_root: str | Path) -> Path:
     return resolved
 
 
+def _validate_page_ref(raw: str) -> None:
+    normalized = raw.strip().replace("\\", "/")
+    if not normalized or ".." in normalized or normalized.startswith("/"):
+        raise ValueError(SECURITY_VIOLATION_MSG)
+
+
 def graph_safe_page_path(graph_root: str | Path, page_ref: str) -> Path:
     """Resolve ``page_ref`` (``pages/Foo.md`` or ``Foo``) to an absolute path under the graph."""
     root = resolved_graph_root(graph_root)
     raw = page_ref.strip().replace("\\", "/")
+    _validate_page_ref(raw)
     if raw.startswith("pages/"):
-        candidate = (root / raw).resolve(strict=False)
+        rel = raw.removeprefix("pages/")
+        _validate_page_ref(rel)
+        filename = rel if rel.endswith(".md") else page_title_to_filename(rel.removesuffix(".md"))
+        candidate = (root / "pages" / filename).resolve(strict=False)
     else:
-        candidate = (root / "pages" / (raw if raw.endswith(".md") else f"{raw}.md")).resolve(
-            strict=False
-        )
+        filename = raw if raw.endswith(".md") else page_title_to_filename(raw.removesuffix(".md"))
+        candidate = (root / "pages" / filename).resolve(strict=False)
     if not candidate.is_relative_to(root):
         raise ValueError(SECURITY_VIOLATION_MSG)
     return candidate

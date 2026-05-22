@@ -24,6 +24,7 @@ from src.agent.plumber_modules.dangling_healer import run_dangling_healer
 from src.agent.plumber_modules.marpa_framework import run_marpa_framework
 from src.agent.plumber_modules.property_hygiene import run_property_hygiene
 from src.graph.page_write_lock import clear_page_write_locks
+from src.graph.path_sandbox import graph_safe_page_path
 
 
 class StubPlumberLLM:
@@ -100,7 +101,8 @@ def graph_root(tmp_path: Path) -> Path:
 def _write_page(graph_root: Path, title: str, body: str) -> Path:
     pages = graph_root / "pages"
     pages.mkdir(parents=True, exist_ok=True)
-    path = pages / f"{title}.md"
+    path = graph_safe_page_path(graph_root, title)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -166,6 +168,49 @@ def test_dangling_healer_creates_seed_page(graph_root: Path) -> None:
     assert outcome.pages_created == ["Future Concept"]
 
 
+def test_dangling_healer_skips_existing_page_case_insensitive(graph_root: Path) -> None:
+    _write_page(graph_root, "Machine Learning", "- canonical page\n")
+    source = _write_page(graph_root, "Source", "- See [[MACHINE LEARNING]] for details\n")
+    outcome = run_dangling_healer(
+        graph_root,
+        source,
+        "Source",
+        source.read_text(encoding="utf-8"),
+        llm=StubPlumberLLM(),
+        max_words=50,
+    )
+    assert outcome.pages_created == []
+
+
+def test_cognitive_pipeline_skips_marpa_and_property_hygiene_for_journal(
+    graph_root: Path,
+) -> None:
+    journals = graph_root / "journals"
+    journals.mkdir(parents=True, exist_ok=True)
+    path = journals / "2026_05_22.md"
+    path.write_text("- daily note #project\n", encoding="utf-8")
+    config = PlumberLintConfig(
+        marpa_framework=True,
+        property_hygiene=True,
+        infer_missing_properties=True,
+        entity_consolidation=True,
+    )
+    outcome = run_cognitive_lint_pipeline(
+        graph_root,
+        path,
+        "2026_05_22",
+        path.read_text(encoding="utf-8"),
+        llm=StubPlumberLLM(),
+        config=config,
+    )
+    assert "marpa_framework" not in outcome.modules_run
+    assert "property_hygiene" not in outcome.modules_run
+    assert "entity_consolidation" not in outcome.modules_run
+    text = path.read_text(encoding="utf-8")
+    assert "type::" not in text
+    assert "alias::" not in text
+
+
 def test_property_hygiene_appends_missing_properties(graph_root: Path) -> None:
     path = _write_page(graph_root, "Proj", "- Launch #project roadmap\n")
     outcome = run_property_hygiene(
@@ -180,6 +225,11 @@ def test_property_hygiene_appends_missing_properties(graph_root: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "status:: inferred" in text
     assert "deadline:: inferred" in text
+    lines = text.splitlines()
+    status_idx = next(i for i, line in enumerate(lines) if "status:: inferred" in line)
+    first_bullet_idx = next(i for i, line in enumerate(lines) if line.startswith("- "))
+    assert status_idx < first_bullet_idx
+    assert not lines[status_idx].lstrip().startswith("- ")
     assert outcome.pages_modified == ["Proj"]
 
 
@@ -193,7 +243,7 @@ def test_auto_split_extracts_dense_subtree(graph_root: Path) -> None:
     assert outcome.pages_modified == ["Dense"]
     updated = path.read_text(encoding="utf-8")
     assert "[[" in updated
-    child = graph_root / "pages" / f"{outcome.pages_created[0]}.md"
+    child = graph_safe_page_path(graph_root, outcome.pages_created[0])
     assert child.is_file()
 
 
@@ -233,11 +283,12 @@ def test_cognitive_pipeline_runs_enabled_modules(graph_root: Path) -> None:
 
 def test_marpa_framework_classifies_project_with_deadline(graph_root: Path) -> None:
     body = "- Launch MVP #project\n  Deliverable due 2026-06-01 with hard deadline\n"
-    path = _write_page(graph_root, "Progetti___Lancio", body)
+    page_title = "Progetti/Lancio"
+    path = _write_page(graph_root, page_title, body)
     outcome = run_marpa_framework(
         graph_root,
         path,
-        "Progetti___Lancio",
+        page_title,
         body,
         llm=StubPlumberLLM(),
     )
@@ -245,7 +296,9 @@ def test_marpa_framework_classifies_project_with_deadline(graph_root: Path) -> N
     assert "type:: progetto" in text
     assert "deadline:: 2026-06-01" in text
     assert "### Matryca MARPA Validation" in text
-    assert outcome.pages_modified == ["Progetti___Lancio"]
+    assert outcome.pages_modified == [page_title]
+    type_line_idx = next(i for i, line in enumerate(text.splitlines()) if "type:: progetto" in line)
+    assert not text.splitlines()[type_line_idx].lstrip().startswith("- ")
 
 
 def test_marpa_disabled_by_default_leaves_file_untouched(graph_root: Path) -> None:

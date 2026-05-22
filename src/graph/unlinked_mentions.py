@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .global_fence_scanner import compute_page_protected_line_indices
 from .markdown_blocks import iter_graph_markdown_files
+from .page_path import filename_to_page_title
 
 
 def _page_titles_from_graph(graph_root: Path) -> list[str]:
@@ -15,7 +16,7 @@ def _page_titles_from_graph(graph_root: Path) -> list[str]:
     pages = graph_root / "pages"
     if pages.is_dir():
         for p in pages.glob("*.md"):
-            titles.add(p.stem.replace("___", "/"))
+            titles.add(filename_to_page_title(p.name))
     return sorted(titles, key=len, reverse=True)
 
 

@@ -129,6 +129,18 @@ class MasterCatalog:
         with self._lock:
             return self.pages.get(page_title)
 
+    def get_case_insensitive(self, page_title: str) -> tuple[str, CatalogEntry] | None:
+        """Return ``(canonical_title, entry)`` matching ``page_title`` without case sensitivity."""
+        with self._lock:
+            entry = self.pages.get(page_title)
+            if entry is not None:
+                return page_title, entry
+            fold = page_title.casefold()
+            for title, row in self.pages.items():
+                if title.casefold() == fold:
+                    return title, row
+            return None
+
     def remove(self, page_title: str) -> None:
         with self._lock:
             self.pages.pop(page_title, None)

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .page_path import page_title_from_path as _page_title_from_path
+
 _ALIAS_LINE = re.compile(r"(?im)^\s*alias::\s*(.+?)\s*$")
 
 
@@ -66,8 +68,7 @@ def is_scannable_graph_markdown(path: Path, graph_root: Path) -> bool:
 
 def page_title_from_path(graph_root: Path, path: Path) -> str:
     """Derive Logseq-style page title from a path under ``pages/`` or ``journals/``."""
-    rel = path.relative_to(graph_root)
-    return rel.with_suffix("").as_posix().replace("pages/", "").replace("journals/", "")
+    return _page_title_from_path(graph_root, path)
 
 
 @dataclass

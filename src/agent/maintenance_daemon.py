@@ -43,6 +43,8 @@ from ..graph.master_catalog import (
     load_master_catalog,
     master_index_page_path,
 )
+from ..graph.mldoc_properties import parse_logseq_property_line
+from ..graph.page_path import page_title_from_path
 from ..graph.page_write_lock import (
     clear_page_write_locks,
     page_rmw_lock,
@@ -431,13 +433,7 @@ def stop_daemon(graph_root: Path) -> dict[str, Any]:
 
 
 def _page_title_from_path(graph_root: Path, path: Path) -> str:
-    rel = path.relative_to(graph_root)
-    stem = rel.with_suffix("").as_posix()
-    if stem.startswith("pages/"):
-        return stem.removeprefix("pages/")
-    if stem.startswith("journals/"):
-        return stem.removeprefix("journals/")
-    return stem
+    return page_title_from_path(graph_root, path)
 
 
 def _normalize_block_text(text: str) -> str:
@@ -655,6 +651,23 @@ class CorrectionOutcome:
     applied_details: list[str] = field(default_factory=list)
 
 
+def _direct_block_property_lines(
+    lines: list[str],
+    bullet_idx: int,
+    block_end: int,
+) -> list[str]:
+    """Non-bullet property lines under a block that must survive bullet text edits."""
+    stripped = [ln.rstrip("\n") for ln in lines]
+    props: list[str] = []
+    for i in range(bullet_idx + 1, min(block_end, len(lines))):
+        line = stripped[i]
+        if _BULLET.match(line):
+            continue
+        if parse_logseq_property_line(line) or _ID_LINE.match(line):
+            props.append(line)
+    return props
+
+
 def apply_semantic_corrections_to_lines(
     lines: list[str],
     corrections: list[SemanticLintCorrection],
@@ -701,7 +714,27 @@ def apply_semantic_corrections_to_lines(
             outcome.skipped += 1
             outcome.skip_reasons.append(f"no_change:{correction.block_uuid}")
             continue
+        original_bullet = lines[bullet_idx]
+        property_snapshot = _direct_block_property_lines(lines, bullet_idx, block_end)
         lines[bullet_idx] = _set_bullet_inline_text(lines[bullet_idx], correction.corrected_text)
+
+        relocated = locate_block_by_uuid(
+            [ln.rstrip("\n") for ln in lines],
+            correction.block_uuid,
+        )
+        if relocated is None:
+            lines[bullet_idx] = original_bullet
+            outcome.skipped += 1
+            outcome.skip_reasons.append(f"id_orphaned:{correction.block_uuid}")
+            continue
+        _, _, new_block_end = relocated
+        preserved = _direct_block_property_lines(lines, bullet_idx, new_block_end)
+        if property_snapshot and not all(item in preserved for item in property_snapshot):
+            lines[bullet_idx] = original_bullet
+            outcome.skipped += 1
+            outcome.skip_reasons.append(f"property_lost:{correction.block_uuid}")
+            continue
+
         _stamp_matryca_plumber_property(lines, bullet_idx, id_idx, block_end)
         outcome.applied += 1
         outcome.applied_details.append(

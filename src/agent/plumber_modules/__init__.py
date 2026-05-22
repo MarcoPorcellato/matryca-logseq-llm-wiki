@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..llm_context_payload import prepare_llm_context_payload
 from ..plumber_config import PlumberLintConfig
+from ._shared import is_journal_page_path
 from .auto_split import run_auto_split
 from .dangling_healer import run_dangling_healer
 from .entity_consolidation import run_entity_consolidation
@@ -38,6 +39,8 @@ def run_cognitive_lint_pipeline(
     if not config.any_enabled:
         return outcome
 
+    journal_page = is_journal_page_path(graph_root, page_path)
+
     llm_context, _payload_source = prepare_llm_context_payload(
         graph_root,
         page_title,
@@ -45,7 +48,7 @@ def run_cognitive_lint_pipeline(
         config=config,
     )
 
-    if config.marpa_framework:
+    if config.marpa_framework and not journal_page:
         sub = run_marpa_framework(
             graph_root,
             page_path,
@@ -76,7 +79,7 @@ def run_cognitive_lint_pipeline(
         outcome.pages_modified.extend(sub.pages_modified)
         outcome.details.extend(sub.details)
 
-    if config.entity_consolidation:
+    if config.entity_consolidation and not journal_page:
         sub = run_entity_consolidation(
             graph_root,
             page_path,
@@ -105,7 +108,7 @@ def run_cognitive_lint_pipeline(
         if page_path.is_file():
             content = page_path.read_text(encoding="utf-8", errors="replace")
 
-    if config.property_hygiene:
+    if config.property_hygiene and not journal_page:
         sub = run_property_hygiene(
             graph_root,
             page_path,

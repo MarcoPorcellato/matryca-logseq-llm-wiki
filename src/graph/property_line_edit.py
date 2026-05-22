@@ -14,6 +14,7 @@ from .alias_index import normalize_concept_key
 from .global_fence_scanner import compute_page_protected_line_indices
 from .markdown_blocks import atomic_write_bytes, graph_safe_page_path
 from .mldoc_properties import is_logseq_block_property_line, split_logseq_property_list_values
+from .page_properties import inject_page_property
 from .page_write_lock import page_rmw_lock
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+")
@@ -532,19 +533,17 @@ def append_page_alias_line(
     else:
         use_wiki = " " in alias.strip()
         new_tok = _format_alias_token(alias, use_wikilink=use_wiki)
-        suffix = f"alias:: {new_tok}\n"
-        sep = "" if not text.endswith("\n") and text.strip() else ("\n" if text.strip() else "")
-        new_text_body = text + sep + ("\n" if text.strip() else "") + suffix
+        new_text_body = inject_page_property(text, "alias", new_tok)
         new_bytes_preview = new_text_body.encode("utf-8")
         if dry_run:
             return PageAliasAppendResult(
                 ok=True,
                 code="dry_run_ok",
-                hint="No `alias::` line found; would append a new line at EOF.",
+                hint="No `alias::` line found; would inject page-level `alias::` frontmatter.",
                 dry_run=True,
                 added=True,
                 line_before=None,
-                line_after=suffix.strip(),
+                line_after=f"alias:: {new_tok}",
                 previous_size_bytes=previous_size,
                 current_size_bytes=len(new_bytes_preview),
             )
@@ -555,11 +554,11 @@ def append_page_alias_line(
         return PageAliasAppendResult(
             ok=True,
             code="applied",
-            hint=f"New alias line appended; backup `{bak.name}`.",
+            hint=f"Page-level alias injected as frontmatter; backup `{bak.name}`.",
             dry_run=False,
             added=True,
             line_before=None,
-            line_after=suffix.strip(),
+            line_after=f"alias:: {new_tok}",
             previous_size_bytes=previous_size,
             current_size_bytes=final,
         )

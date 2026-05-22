@@ -44,9 +44,11 @@ def _resolve_phase1_summary(
     content: str,
 ) -> str | None:
     catalog = load_master_catalog(graph_root)
-    entry = catalog.get(page_title)
-    if entry is not None and entry.summary.strip():
-        return _format_summary_payload(entry)
+    resolved = catalog.get_case_insensitive(page_title)
+    if resolved is not None:
+        _, entry = resolved
+        if entry.summary.strip():
+            return _format_summary_payload(entry)
 
     extracted = extract_catalog_fields_from_content(content)
     if extracted is not None and extracted.summary.strip():

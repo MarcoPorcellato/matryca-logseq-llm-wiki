@@ -7,7 +7,8 @@ import uuid
 from pathlib import Path
 
 from ...graph.generational_cache import patch_generational_caches_for_paths
-from ...graph.markdown_blocks import atomic_write_bytes, locate_block_by_uuid
+from ...graph.markdown_blocks import atomic_write_bytes, graph_safe_page_path, locate_block_by_uuid
+from ...graph.page_properties import inject_page_property
 from ...graph.page_write_lock import page_rmw_lock
 from ._shared import ModuleOutcome, sanitize_page_title
 
@@ -89,17 +90,21 @@ def run_auto_split(
             if not subtree.strip():
                 continue
             child_title = sanitize_page_title(f"{page_title} — {snippet}")
-            new_page_path = graph_root / "pages" / f"{child_title}.md"
+            try:
+                new_page_path = graph_safe_page_path(graph_root, child_title)
+            except ValueError:
+                continue
             new_page_path.parent.mkdir(parents=True, exist_ok=True)
 
             if not new_page_path.is_file():
-                header = (
-                    f"- Extracted from [[{page_title}]] ({block_count} blocks)\n"
-                    f"  matryca-split:: auto\n\n"
+                header = inject_page_property(
+                    f"- Extracted from [[{page_title}]] ({block_count} blocks)\n",
+                    "matryca-split",
+                    "auto",
                 )
                 atomic_write_bytes(
                     new_page_path,
-                    (header + subtree).encode("utf-8"),
+                    (header + "\n" + subtree).encode("utf-8"),
                     graph_root=graph_root,
                 )
                 outcome.pages_created.append(child_title)
@@ -120,7 +125,10 @@ def run_auto_split(
 
     patch_generational_caches_for_paths(graph_root, [page_path])
     for title in outcome.pages_created:
-        created = graph_root / "pages" / f"{title}.md"
+        try:
+            created = graph_safe_page_path(graph_root, title)
+        except ValueError:
+            continue
         if created.is_file():
             patch_generational_caches_for_paths(graph_root, [created])
 

@@ -628,7 +628,30 @@ def test_semantic_correction_stamps_matryca_plumber_property() -> None:
     merged = "".join(lines)
     assert outcome.applied == 1
     assert "Learn about [[Redis]] caching" in merged
+    assert f"id:: {BLOCK_UUID}" in merged
     assert "matryca-plumber:: true" in merged
+
+
+def test_semantic_correction_preserves_block_id_and_sibling_properties() -> None:
+    body = f"- Learn about Redis caching\n  id:: {BLOCK_UUID}\n  status:: active\n"
+    lines = body.splitlines(keepends=True)
+    outcome = apply_semantic_corrections_to_lines(
+        lines,
+        [
+            SemanticLintCorrection(
+                block_uuid=BLOCK_UUID,
+                original_text="Learn about Redis caching",
+                corrected_text="Learn about [[Redis]] caching",
+                lint_type="auto_wikilink",
+                reason="Canonical link",
+            ),
+        ],
+    )
+    merged = "".join(lines)
+    assert outcome.applied == 1
+    assert f"id:: {BLOCK_UUID}" in merged
+    assert "status:: active" in merged
+    assert "Learn about [[Redis]] caching" in merged
 
 
 def test_semantic_correction_skips_on_original_mismatch(graph_root: Path) -> None:

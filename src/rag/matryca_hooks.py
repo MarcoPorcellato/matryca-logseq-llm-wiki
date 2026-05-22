@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from loguru import logger
 
+from ..graph.page_path import page_title_to_filename
 from ..graph.path_sandbox import assert_path_within_graph
 
 try:
@@ -70,8 +71,7 @@ def _page_md_candidates(pages_dir: Path, page_name: str) -> list[Path]:
         pages_dir / f"{quote(page_name, safe='')}.md",
     ]
     if "/" in page_name:
-        # Logseq OG encodes namespace slashes as triple underscores on disk.
-        candidates.append(pages_dir / f"{page_name.replace('/', '___')}.md")
+        candidates.append(pages_dir / page_title_to_filename(page_name))
         candidates.append(pages_dir / f"{page_name.replace('/', '_')}.md")
     # de-duplicate while preserving order
     seen: set[str] = set()

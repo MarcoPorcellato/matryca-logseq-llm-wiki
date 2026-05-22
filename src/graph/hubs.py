@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from ..config import MatrycaWikiConfig
+from .page_path import filename_to_page_title
 
 
 def build_namespace_index_markdown(
@@ -34,7 +35,7 @@ def build_namespace_index_markdown(
     for ns in sorted(groups):
         lines.append(f"- ## {ns}")
         for fn in groups[ns][:200]:
-            title = fn.removesuffix(".md").replace("___", "/")
+            title = filename_to_page_title(fn)
             lines.append(f"  - [[{title}]]")
         if len(groups[ns]) > 200:
             lines.append("  - _(list truncated at 200 files)_")
