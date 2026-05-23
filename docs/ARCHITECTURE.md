@@ -516,6 +516,95 @@ Additional early-exit guards in `src/agent/plumber_modules/_shared.py`:
 
 All graph read/write paths use **`encoding="utf-8"`** explicitly. On Windows, Python's locale-default encoding (`cp1252`) silently mangles Unicode page titles and property values — producing **graph corruption** invisible until Logseq re-index fails. Matryca forces UTF-8 on every `read_text`, `write_text`, and `encode("utf-8")` commit path; decode fallbacks use `errors="replace"` only on **read** paths where corrupted third-party bytes must not crash the daemon.
 
+**Windows CRLF immunity:** fence scanners (`global_fence_scanner.py`), property-line surgery (`property_line_edit.py`), and tag normalization (`tag_unify.py`) normalize line endings via `rstrip("\r\n")` and explicit `\r\n|\n|\r` splitting — mixed or Windows-native files never corrupt protected-line detection or block-span math.
+
+### Multiline block bodies (Shift+Enter continuity)
+
+Logseq allows a single logical bullet to span multiple physical lines (Shift+Enter in the outliner). Continuation lines must be padded to **`parent_bullet_indent + 2 spaces`** so the Datalog indexer keeps them inside the parent block — not as orphan bullets or stray prose.
+
+**Rule:** only the first line carries the `- ` bullet marker; continuation lines are plain text at the deeper indent. Block properties (`id::`, `matryca-plumber::`, …) still sit **immediately after the first bullet line**, at **+2 spaces** relative to the bullet, **before** any continuation body lines or child bullets. Violating this ordering breaks block identity and produces ghost nodes in the graph index.
+
+**Module contract:** `logseq-matryca-parser` (`>=0.3.3`) owns spatial tree reconstruction; Matryca's write path (`append_child_to_node` in `graph_dispatch.py`) preserves indentation invariants on every splice.
+
+### Versioned authorship stamping (`made-by::`)
+
+Every page spawned by Plumber cognitive modules (dangling healer seed pages, auto-split child pages, backlink contexts) is permanently stamped at creation time:
+
+```text
+made-by:: matryca plumber v1.5.0
+```
+
+**Module:** `src/graph/page_properties.py`
+
+| Mechanism | Detail |
+|-----------|--------|
+| **`stamp_plumber_authored_page()`** | Idempotently injects `made-by:: matryca plumber v{version}` as true line-0 frontmatter |
+| **`get_plumber_version()`** | Resolves the installed package version via `@functools.lru_cache(maxsize=1)` + `importlib.metadata` — zero-latency I/O on hot write paths |
+| **`is_plumber_authored_page()`** | Detects versioned stamps (`made-by:: matryca plumber v*`) and legacy `created-by:: plumber` for telemetry |
+| **Bilingual authorship** | Page prose may be Italian, English, or mixed; the stamp key is always ASCII `made-by::` per Logseq property grammar |
+
+This stamp is the **on-disk provenance anchor** for dynamic telemetry: the Sovereign UI counts AI-spawned pages by scanning frontmatter, not by guessing from content tone.
+
+---
+
+## Sovereign UI & dynamic graph telemetry (v1.5 Ironclad)
+
+The **Sovereign UI** (`frontend/` → `frontend/dist/`, served by `src/cli/ui_server.py` on `:8000`) is the operator-facing control room. It polls `/api/state` at **1 Hz** via `usePlumberPolling`, rendering daemon progress, token economics, Trust & Safety toggles, and the **`GraphInsightsCard`** Human-vs-AI split.
+
+### The dynamic subtraction invariant (no history database)
+
+Matryca deliberately avoids Postgres, SQLite, or any auxiliary telemetry store. Instead it maintains a **mathematical invariant** reconciling live graph scans with a portable incremental ledger:
+
+$$\text{Human Metrics} = \max\bigl(0,\; \text{Absolute Scanned Metrics} - \text{AI Impact}\bigr)$$
+
+**Module:** `src/graph/graph_analytics.py` → `compute_graph_analytics()`
+
+| Metric | Absolute scan | AI impact source | Human result |
+|--------|---------------|------------------|--------------|
+| **Pages** | Count scannable `pages/**/*.md` | Pages with `made-by:: matryca plumber v*` (or legacy `created-by:: plumber`) frontmatter | `human_pages = total_pages - ai_pages_on_disk` |
+| **Links** | Regex count of `[[WikiLinks]]` across scannable files | `ai_links_injected` from daemon ledger | `human_links = total_links - ai_links_injected` |
+| **Blocks healed** | — | `ai_blocks_healed` from daemon ledger | surfaced directly as agent metric |
+
+Link subtraction uses the **historical ledger** because individual wikilinks cannot be tagged at rest. Page subtraction uses **live frontmatter stamps** because each AI-spawned page carries an immutable `made-by::` signature. Together they give operators a real-time **Organic Human Mind vs Plumber Agent Cognition** dashboard without forking truth away from Logseq files.
+
+```mermaid
+flowchart LR
+  SCAN["Live graph scan\npages + wikilinks"] --> SUB["Dynamic subtraction"]
+  LEDGER[".matryca_daemon_state.json\nai_links_injected · ai_blocks_healed"] --> SUB
+  STAMP["made-by:: frontmatter\non-disk AI pages"] --> SUB
+  SUB --> UI["GraphInsightsCard\nOrganic vs Agent columns"]
+  API["GET /api/state"] --> UI
+```
+
+A **2-second in-process TTL cache** keyed by `(graph_root, page_count, mtime_ns_revision, ledger_counters)` prevents CPU thrash under 1 Hz polling while still busting when topology changes.
+
+### The local incremental ledger (`.matryca_daemon_state.json`)
+
+The decentralized ledger lives at the **root of each Logseq graph** — it travels with the vault when you copy `pages/` and `journals/`, or when you repoint `LOGSEQ_GRAPH_PATH` to a different graph.
+
+**Module:** `src/agent/maintenance_daemon.py` → `DaemonState`, `save_daemon_state()`, `record_daemon_impact()`
+
+| Field | Role |
+|-------|------|
+| **`ai_pages_created`** | Cumulative count of pages created by cognitive modules (dangling healer, auto-split, …) |
+| **`ai_links_injected`** | Cumulative wikilinks backpropagated or reconnected by Plumber |
+| **`ai_blocks_healed`** | Cumulative structured edits (property hygiene, auto-split extractions, semantic lint applies) |
+| **`files`** | Per-markdown processing checkpoint (`mtime`, `status`, `error`) — idempotent daemon resume |
+| **`session_*_tokens`** | Live token economics mirrored to the UI mid-inference |
+
+Persistence follows the same Ironclad contract as page writes: **`.matryca_daemon_state.json.tmp` → `fsync` → `os.replace`**, with `load_daemon_state()` double-read retry for 1 Hz API readers.
+
+**Zero-config multi-graph:** change `LOGSEQ_GRAPH_PATH` (or open a different graph in `.env`) and restart the daemon — each graph maintains its own ledger file. No migration scripts, no cloud sync of telemetry metadata.
+
+### Related hidden artifacts (graph root)
+
+| File | Role |
+|------|------|
+| **`.matryca_daemon_state.json`** | Daemon checkpoint + AI incremental ledger |
+| **`.matryca_xray_state.json`** | X-Ray alias map (`[n]` → UUID) for MCP/CLI sessions |
+| **`.matryca_semantic_cache/`** | Filesystem-backed semantic routing cache + GraphRAG artifacts |
+| **`.matryca_plumber_daemon.pid`** | Single-instance process lock |
+
 ---
 
 ## Complete phase evolution history
@@ -537,8 +626,8 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, graceful MCP shutdown |
 | **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
 | **13 — Operational hardening (`v1.4.1`)** | Lifespan **`os.chdir`** to sandbox root; **`mcp_telemetry` privacy sanitizer** (`MATRYCA_DEBUG`); **`service_manager.py`** + CLI **`matryca service`**; **162** strict tests | **Daemon-safe cwd**, **production-safe MCP logs**, **LaunchAgent / systemd** background integration |
-| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`semantic_clustering.py`** (Louvain GraphRAG), strict phase separation, **`hierarchical_summarization.py`** (outliner MapReduce), **Context Acceleration Shield** (`llm_context_payload.py`, `prompt_layout.py`), **`ui_server.py`** + React SPA cockpit, intra-turn telemetry sync, POSIX atomic daemon checkpoints, **`json_repair.py`**, **`prompt_constraints`**, **`reload_plumber_dotenv()`** hot-reload, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; monolithic single-server operator UX; fault-tolerant background processing; **349+** strict tests |
-| **15 — Logseq-native parity shield (`v1.5.x`)** | **`page_path.py`** namespace encoding (`___` + percent-encode), **`page_properties.py`** true frontmatter vs block property placement, **`atomic_write_bytes_if_unchanged`** optimistic concurrency (mtime guard), **`alias_index.py`** case-insensitive alias resolution + `logseq/bak/` / `.recycle/` exclusion, **`global_fence_scanner.py`** code-block immunity, UTF-8 I/O on all graph paths, **`SettingsDrawer.tsx`** Trust & Safety UI (Safe / Augmented / Surgeon tiers), **`auto_split.py`** embed stubs | **100% Datalog filesystem parity** with Logseq OG; zero ghost-clone pages; no data loss during concurrent human + daemon edits; operator-visible mutation guardrails |
+| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`semantic_clustering.py`** (Louvain GraphRAG), strict phase separation, **`hierarchical_summarization.py`** (outliner MapReduce), **Context Acceleration Shield** (`llm_context_payload.py`, `prompt_layout.py`), **`ui_server.py`** + **Sovereign UI** React SPA, **`graph_analytics.py`** dynamic Human-vs-AI telemetry, intra-turn telemetry sync, POSIX atomic daemon checkpoints, **`json_repair.py`**, **`prompt_constraints`**, **`reload_plumber_dotenv()`** hot-reload, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; monolithic single-server operator UX; fault-tolerant background processing; **364+** strict tests |
+| **15 — Logseq-native parity shield (`v1.5.x`)** | **`page_path.py`** namespace encoding (`___` + percent-encode), **`page_properties.py`** true frontmatter vs block property placement + **`made-by::`** versioned stamping, **`atomic_write_bytes_if_unchanged`** optimistic concurrency (mtime guard), **`alias_index.py`** case-insensitive alias resolution + `logseq/bak/` / `.recycle/` exclusion, **`global_fence_scanner.py`** code-block immunity, UTF-8 / CRLF I/O on all graph paths, **`SettingsDrawer.tsx`** Trust & Safety UI (Safe / Augmented / Surgeon tiers), **`auto_split.py`** embed stubs, **`GraphInsightsCard.tsx`** Organic vs Agent telemetry | **100% Datalog filesystem parity** with Logseq OG; zero ghost-clone pages; no data loss during concurrent human + daemon edits; operator-visible mutation guardrails |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`docs/PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
@@ -607,7 +696,7 @@ flowchart TB
 | `src/agent/quality_gate.py` | Outline and Advanced Query EDN pre-flight scans |
 | `src/rag/matryca_hooks.py` | Parser adapter for spatial reads |
 | `src/graph/page_path.py` | Logseq semantic title ↔ on-disk filename translation (`/` → `___`, percent-encoding) |
-| `src/graph/page_properties.py` | True page frontmatter injection (line 0, no bullet prefix) |
+| `src/graph/page_properties.py` | True page frontmatter injection (line 0, no bullet prefix); **`stamp_plumber_authored_page()`** versioned `made-by::` |
 | `src/graph/markdown_blocks.py` | `atomic_write_bytes` / `atomic_write_bytes_if_unchanged` (OCC mtime guard), block line helpers, `graph_safe_page_path` |
 | `src/graph/logseq_uuid.py` | UUID v4/v5 shape checks; `assert_valid_block_refs_in_markdown` for atomic writes |
 | `src/graph/block_ref_lint.py` | Vault-wide `((uuid))` ↔ `id::` integrity via `LogseqGraph.get_broken_references()` |
@@ -625,8 +714,9 @@ flowchart TB
 | `src/agent/prompt_constraints.py` | Cross-lingual output constraint for Plumber LLM prompts |
 | `src/agent/prompt_layout.py` | Cache-aligned prompt builder (`build_cache_aligned_prompt`) for KV prefix reuse |
 | `src/agent/llm_context_payload.py` | Phase 1 summary substitution + semantic skeleton for giant-page LLM payloads |
-| `src/cli/ui_server.py` | FastAPI + Uvicorn monolith for `matryca plumber status` — REST API + compiled React SPA on `:8000` |
-| `frontend/` | Dark-themed cyberpunk React cockpit (Vite build → `frontend/dist/`); Tauri-ready layout |
+| `src/cli/ui_server.py` | FastAPI + Uvicorn monolith for `matryca plumber status` — REST API + **Sovereign UI** React SPA on `:8000` |
+| `src/graph/graph_analytics.py` | Live graph telemetry — dynamic Human-vs-AI subtraction for `GraphInsightsCard` |
+| `frontend/` | **Sovereign UI** React cockpit (Vite build → `frontend/dist/`); Light/Dark theme; Tauri-ready layout |
 | `src/graph/hierarchical_summarization.py` | Outliner-native MapReduce chunking for giant pages (Phase 1 bootstrap) |
 | `src/utils/json_repair.py` | Lenient JSON repair for local LLM grammar leakages |
 
@@ -640,18 +730,18 @@ flowchart TB
 
 State checkpoint: **`.matryca_daemon_state.json`** at the graph root (per-file `mtime`, `processed` / `skipped` / `error`). Process lock: **`.matryca_plumber_daemon.pid`**.
 
-### Modern Cockpit — monolithic FastAPI + React SPA
+### Sovereign UI — monolithic FastAPI + React SPA
 
-The legacy Rich terminal canvas is **deprecated**. **`matryca plumber status`** and **`matryca plumber ui`** invoke **`run_ui_server()`** in **`src/cli/ui_server.py`**, which binds **Uvicorn** on **`127.0.0.1:8000`** and serves:
+The legacy Rich terminal canvas is **deprecated**. **`matryca plumber status`** and **`matryca plumber ui`** invoke **`run_ui_server()`** in **`src/cli/ui_server.py`**, which binds **Uvicorn** on **`127.0.0.1:8000`** and serves the **Sovereign UI**:
 
 | Surface | Path | Role |
 |---------|------|------|
-| **Daemon checkpoint** | `GET /api/state` | Reads `.matryca_daemon_state.json` via `load_daemon_state()` |
+| **Daemon checkpoint + telemetry** | `GET /api/state` | Reads `.matryca_daemon_state.json` via `load_daemon_state()`; attaches live `graph_analytics` from `compute_graph_analytics()` |
 | **Ops log tail** | `GET /api/logs` | Last 50 JSONL lines from `TokenLogger` |
 | **Hardening thresholds** | `GET /api/config` | Live `PlumberLintConfig` (thermal delays, MapReduce char buckets) |
-| **React SPA** | `/` | Static assets from `frontend/dist/` when built (`npm run build`) |
+| **React SPA** | `/` | Static assets from `frontend/dist/` when built (`npm run build`); Light/Dark theme via `next-themes` |
 
-The React hook **`usePlumberPolling`** polls `/api/state`, `/api/logs`, and `/api/config` at **1 Hz**. CORS allows local Vite dev (`:5173`) and future **Tauri** packaging (`tauri://localhost`). One process, one port — no split between “API server” and “dashboard server.”
+The React hook **`usePlumberPolling`** polls `/api/state`, `/api/logs`, and `/api/config` at **1 Hz**. **`GraphInsightsCard`** renders the Organic Human Mind vs Plumber Agent Cognition columns. CORS allows local Vite dev (`:5173`) and future **Tauri** packaging (`tauri://localhost`). One process, one port — no split between “API server” and “dashboard server.”
 
 ```mermaid
 flowchart LR
@@ -919,7 +1009,7 @@ Principle 15 makes runtime parameters **dynamic within live background threads**
 | `index_page()` | Auto-invokes `prepare_llm_context_payload()` when `graph_root` is available |
 | `tests/test_llm_context_payload.py` | Six integration tests validating payload selection, skeleton extraction, and prefix order |
 
-**Validation bar:** **349+** pytest targets green (2 skipped); strict Mypy and Ruff clean via `make check`.
+| **364+** pytest targets green (2 skipped); strict Mypy and Ruff clean via `make check`.
 
 ---
 
