@@ -44,7 +44,7 @@ async def test_check_for_updates_reports_available_release() -> None:
     assert result.current_version == current
     assert result.latest_version == "99.0.0"
     assert result.update_available is True
-    assert result.pypi_url == "https://pypi.org/project/matryca-logseq/"
+    assert result.pypi_url == "https://pypi.org/project/matryca-plumber/"
 
 
 @pytest.mark.asyncio
