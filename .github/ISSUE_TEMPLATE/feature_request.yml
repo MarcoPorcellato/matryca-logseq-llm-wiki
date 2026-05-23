@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Matryca Plumber** is a **standalone**, **local-first** background AI **daemon** and **mutation plane** for your Logseq graph — **database-free** and **Logseq OG–native**.
+        **Matryca Plumber** is an **autonomous**, **local-first**, **database-free** background AI **daemon** for **Logseq OG**. It is the graph's **headless mutation plane** on pure Markdown — not a passive editor plugin.
         Features that require auxiliary databases, a hosted system of record, cloud sync as a hard dependency, or unstructured page blobs are usually out of scope.
 
   - type: textarea

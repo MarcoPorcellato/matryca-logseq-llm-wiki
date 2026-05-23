@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "matryca-plumber"
 version = "1.5.1"
-description = "MCP bridge between AI agents and Logseq OG (pure Markdown outliner)."
+description = "Enterprise-grade, local-first autonomous background AI daemon and headless mutation plane for Logseq OG."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }

@@ -1,6 +1,6 @@
 # Security policy
 
-Matryca Logseq LLM Wiki is an MCP server that can **read and write Markdown files** under your Logseq graph path and uses **credentials** (for example `LOGSEQ_API_TOKEN` and any LLM provider keys configured in your MCP host). Treating those surfaces carefully is a top priority for the maintainers.
+**Matryca Plumber** is a **local-first autonomous background AI daemon** (with an optional MCP sidecar for tool hosts) that can **read and write Markdown files** under your Logseq graph path and uses **credentials** (for example `LOGSEQ_API_TOKEN` and any LLM provider keys in your environment or host). Treating those surfaces carefully is a top priority for the maintainers.
 
 ## Please do not file public issues for vulnerabilities
 
@@ -15,8 +15,8 @@ We aim to acknowledge valid reports in a reasonable timeframe and coordinate dis
 
 ## Scope we care about
 
-Examples include unauthorized file access outside the intended graph, credential leakage via logs or error messages, unsafe defaults that enable destructive writes without user intent, and protocol or transport issues in the MCP bridge that could harm the host machine.
+Examples include unauthorized file access outside the intended graph, credential leakage via logs or error messages, unsafe defaults that enable destructive writes without user intent, and protocol or transport issues in the daemon, HTTP surfaces, or optional MCP sidecar that could harm the host machine.
 
 ## Non-goals
 
-Misconfiguration on your machine (for example sharing your `.env` or running untrusted MCP hosts) is outside the scope of this policy, though documentation improvements to reduce that risk are welcome as regular contributions.
+Misconfiguration on your machine (for example sharing your `.env`, running untrusted optional MCP hosts, or exposing the daemon to untrusted networks) is outside the scope of this policy, though documentation improvements to reduce that risk are welcome as regular contributions.
