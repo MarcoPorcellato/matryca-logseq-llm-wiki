@@ -1198,6 +1198,25 @@ def apply_semantic_page_result(
     return lint_outcome
 
 
+class LLMResponseError(RuntimeError):
+    """Raised when the local LLM returns an empty or malformed completion."""
+
+
+def _extract_first_choice_content(response: object) -> str:
+    """Return assistant text from an OpenAI-compatible completion or raise ``LLMResponseError``."""
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or not choices:
+        raise LLMResponseError("LLM response missing choices")
+    first = choices[0]
+    message = getattr(first, "message", None)
+    if message is None:
+        raise LLMResponseError("LLM response choice missing message")
+    content = getattr(message, "content", None)
+    if content is None or not str(content).strip():
+        raise LLMResponseError("LLM response choice has empty content")
+    return str(content).strip()
+
+
 def append_semantic_index(
     graph_root: Path,
     page_path: Path,
@@ -1361,8 +1380,8 @@ class InstructorLLMClient:
             ],
             temperature=0.1,
         )
-        content = response.choices[0].message.content
-        text = content.strip() if content else ""
+        content = _extract_first_choice_content(response)
+        text = content
         self._log_completion_turn(
             completion=response,
             target_file="execution_history",
@@ -1371,7 +1390,6 @@ class InstructorLLMClient:
             response=text,
             latency_seconds=time.perf_counter() - started,
         )
-        apply_thermal_pause_cognitive(self._active_lint_config())
         return text
 
     def _apply_thermal_after_completion(self, profile: ThermalProfile) -> None:
@@ -1388,6 +1406,7 @@ class InstructorLLMClient:
         thermal_profile: ThermalProfile = "cognitive",
     ) -> tuple[str, object]:
         """Request a raw JSON completion when instructor parsing fails."""
+        _ = thermal_profile
         api_messages = cast(Any, messages)
         try:
             response = self._raw_client.chat.completions.create(
@@ -1396,18 +1415,14 @@ class InstructorLLMClient:
                 temperature=0.1,
                 response_format={"type": "json_object"},
             )
-            self._apply_thermal_after_completion(thermal_profile)
         except Exception:  # noqa: BLE001 - local servers may reject response_format
             response = self._raw_client.chat.completions.create(
                 model=self.model,
                 messages=api_messages,
                 temperature=0.1,
             )
-            self._apply_thermal_after_completion(thermal_profile)
-        content = response.choices[0].message.content
-        if content is None or not content.strip():
-            raise RuntimeError("Empty raw JSON completion")
-        return str(content.strip()), response
+        content = _extract_first_choice_content(response)
+        return content, response
 
     def _finalize_structured_completion[T: BaseModel](
         self,
@@ -1507,8 +1522,6 @@ class InstructorLLMClient:
                 return finalized
             except Exception as exc:  # noqa: BLE001 - try next instructor mode
                 errors.append(f"{mode.name}: {exc}")
-                if thermal_profile != "none":
-                    self._apply_thermal_after_completion(thermal_profile)
         try:
             raw_text, completion = self._raw_json_completion(
                 messages,
@@ -1911,6 +1924,16 @@ def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
         else:
             pending += 1
     return ScanMetrics(total=total, processed=processed, pending=pending)
+
+
+def clear_phase1_error_backoff(state: DaemonState) -> int:
+    """Drop Phase 1 error records so unchanged files can retry after daemon restart."""
+    cleared = 0
+    for key, rec in list(state.files.items()):
+        if rec.status == "error":
+            del state.files[key]
+            cleared += 1
+    return cleared
 
 
 def list_pending_files(
@@ -2520,7 +2543,6 @@ class MaintenanceDaemon:
         llm_called = llm_called_from_usage or llm_called_from_logger
         if llm_called and self.bootstrap_complete:
             state.phase2_llm_turns += 1
-            apply_thermal_pause_cognitive(lint_config)
         self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
         return llm_called
 
@@ -2682,6 +2704,13 @@ class MaintenanceDaemon:
             llm_config.lm_base_url,
             llm_config.lm_model,
         )
+        cleared_errors = clear_phase1_error_backoff(state)
+        if cleared_errors:
+            logger.info(
+                "Cleared {} Phase 1 error record(s) for retry on daemon restart",
+                cleared_errors,
+            )
+            save_daemon_state(self.graph_root, state)
         self._hydrate_bootstrap_phase(state)
         self._hydrate_token_logger_from_state(state)
         state.status = "running"
@@ -2886,6 +2915,7 @@ __all__ = [
     "FileState",
     "InstructorLLMClient",
     "LLMClient",
+    "LLMResponseError",
     "LintType",
     "MaintenanceDaemon",
     "PID_FILENAME",
@@ -2899,6 +2929,7 @@ __all__ = [
     "apply_semantic_page_result",
     "append_semantic_index",
     "append_structural_lint_warning",
+    "clear_phase1_error_backoff",
     "compute_scan_metrics",
     "load_daemon_state",
     "normalize_daemon_state_file_keys",

@@ -52,7 +52,7 @@ function TopologyMetric({
 }
 
 function resolveAnalytics(state: DaemonStateResponse | null) {
-  if (!state) return null
+  if (!state?.graph_analytics) return null
   return normalizeGraphAnalytics(state.graph_analytics)
 }
 

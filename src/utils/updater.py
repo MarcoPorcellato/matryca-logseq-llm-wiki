@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,7 @@ _CACHE_TTL_SECONDS = 3600.0
 
 _cache: UpdateCheckResult | None = None
 _cache_expires_at: float = 0.0
+_cache_lock = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +86,9 @@ async def check_for_updates(*, force_refresh: bool = False) -> UpdateCheckResult
     global _cache, _cache_expires_at
 
     now = time.monotonic()
-    if not force_refresh and _cache is not None and now < _cache_expires_at:
-        return _cache
+    with _cache_lock:
+        if not force_refresh and _cache is not None and now < _cache_expires_at:
+            return _cache
 
     current_version = get_plumber_version()
     latest_version = await _fetch_latest_pypi_version()
@@ -94,16 +97,18 @@ async def check_for_updates(*, force_refresh: bool = False) -> UpdateCheckResult
     else:
         result = _build_result(latest_version=latest_version)
 
-    _cache = result
-    _cache_expires_at = now + _CACHE_TTL_SECONDS
+    with _cache_lock:
+        _cache = result
+        _cache_expires_at = now + _CACHE_TTL_SECONDS
     return result
 
 
 def clear_update_check_cache() -> None:
     """Reset the in-memory PyPI cache (used by tests)."""
     global _cache, _cache_expires_at
-    _cache = None
-    _cache_expires_at = 0.0
+    with _cache_lock:
+        _cache = None
+        _cache_expires_at = 0.0
 
 
 def update_check_to_dict(result: UpdateCheckResult) -> dict[str, Any]:

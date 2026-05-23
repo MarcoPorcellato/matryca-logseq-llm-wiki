@@ -23,6 +23,7 @@ from src.agent.maintenance_daemon import (
     append_semantic_index,
     apply_semantic_corrections_to_lines,
     apply_semantic_page_result,
+    clear_phase1_error_backoff,
     compute_scan_metrics,
     list_pending_files,
     load_daemon_state,
@@ -395,6 +396,26 @@ def test_pending_detection_skips_error_with_stable_mtime(graph_root: Path) -> No
         },
     )
     assert list_pending_files(graph_root, state) == []
+
+
+def test_clear_phase1_error_backoff_requeues_stable_error_files(graph_root: Path) -> None:
+    path = _write_page(graph_root, "ErrorRetryOnRestart", "- broken\n")
+    mtime = path.stat().st_mtime
+    key = graph_relative_path_key(path, graph_root)
+    state = DaemonState(
+        files={
+            key: FileState(
+                mtime=mtime,
+                processed_at="2026-01-01T00:00:00+00:00",
+                status="error",
+                error="LLM timeout",
+            ),
+        },
+    )
+    assert list_pending_files(graph_root, state) == []
+    assert clear_phase1_error_backoff(state) == 1
+    pending = list_pending_files(graph_root, state)
+    assert path in pending
 
 
 def test_pending_detection_requeues_error_after_edit(graph_root: Path) -> None:

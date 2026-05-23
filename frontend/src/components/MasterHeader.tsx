@@ -92,7 +92,8 @@ export function MasterHeader({
 }: MasterHeaderProps) {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
-  const updateInfo = useUpdateCheck()
+  const { data: updateInfo, fetchFailed: updateCheckFailed, checking: updateChecking, refetch: refetchUpdateCheck } =
+    useUpdateCheck()
   const link = connectionBadge(connectionStatus)
   const daemonStatus = state?.status ?? 'stopped'
   const engineRunning = isEngineActive(daemonStatus) && !frozen
@@ -169,6 +170,15 @@ export function MasterHeader({
                   className="animate-pulse rounded-xl border border-theme-accent/80 bg-theme-accent px-3 py-2 text-xs font-bold text-theme-accent-foreground shadow-[0_0_18px_rgba(var(--theme-accent-rgb,59,130,246),0.45)] transition hover:bg-theme-accent/90"
                 >
                   Update Available (v{updateInfo.latest_version})
+                </button>
+              ) : updateCheckFailed ? (
+                <button
+                  type="button"
+                  disabled={updateChecking}
+                  onClick={() => void refetchUpdateCheck({ force: true })}
+                  className="rounded-xl border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-600 transition hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+                >
+                  {updateChecking ? 'Checking…' : 'Retry update check'}
                 </button>
               ) : null}
               <ThemeToggleButton />

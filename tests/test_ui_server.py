@@ -137,26 +137,38 @@ def test_get_state_requires_graph_root(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_config_returns_live_lint_settings(
+    tmp_path: Path,
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LOGSEQ_GRAPH_PATH", str(graph_root))
-    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:9999/v1")
-    monkeypatch.setenv("LLM_MODEL_NAME", "gemma-4-e4b-it")
-    monkeypatch.setenv("MATRYCA_PLUMBER_LOW_PRIORITY_MODE", "false")
-    monkeypatch.setenv("MATRYCA_THERMAL_DELAY_BOOTSTRAP", "3.5")
-    monkeypatch.setenv("MATRYCA_THERMAL_DELAY_COGNITIVE", "1.5")
-    monkeypatch.setenv("MATRYCA_PLUMBER_MAPREDUCE_TRIGGER_CHARS", "30000")
-    monkeypatch.setenv("MATRYCA_PLUMBER_MAPREDUCE_CHUNK_CHARS", "12000")
-    monkeypatch.setenv("MATRYCA_PLUMBER_CONTEXT_COMPRESSION", "true")
-    monkeypatch.setenv("MATRYCA_LINT_SEMANTIC_ROUTING", "true")
-    monkeypatch.setenv("MATRYCA_LINT_ENTITY_CONSOLIDATION", "true")
-    monkeypatch.setenv("MATRYCA_LINT_PROPERTY_HYGIENE", "true")
-    monkeypatch.setenv("MATRYCA_LINT_MARPA_FRAMEWORK", "true")
-    monkeypatch.setenv("MATRYCA_LINT_BACKPROPAGATE_LINKS", "true")
-    monkeypatch.setenv("MATRYCA_LINT_HEAL_DANGLING", "true")
-    monkeypatch.setenv("MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS", "false")
-    monkeypatch.setenv("MATRYCA_LINT_AUTO_SPLIT", "true")
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                f'LOGSEQ_GRAPH_PATH="{graph_root}"',
+                'LLM_BASE_URL="http://localhost:9999/v1"',
+                'LLM_MODEL_NAME="gemma-4-e4b-it"',
+                "MATRYCA_PLUMBER_LOW_PRIORITY_MODE=false",
+                "MATRYCA_THERMAL_DELAY_BOOTSTRAP=3.5",
+                "MATRYCA_THERMAL_DELAY_COGNITIVE=1.5",
+                "MATRYCA_PLUMBER_MAPREDUCE_TRIGGER_CHARS=30000",
+                "MATRYCA_PLUMBER_MAPREDUCE_CHUNK_CHARS=12000",
+                "MATRYCA_PLUMBER_CONTEXT_COMPRESSION=true",
+                "MATRYCA_LINT_SEMANTIC_ROUTING=true",
+                "MATRYCA_LINT_ENTITY_CONSOLIDATION=true",
+                "MATRYCA_LINT_PROPERTY_HYGIENE=true",
+                "MATRYCA_LINT_MARPA_FRAMEWORK=true",
+                "MATRYCA_LINT_BACKPROPAGATE_LINKS=true",
+                "MATRYCA_LINT_HEAL_DANGLING=true",
+                "MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS=false",
+                "MATRYCA_LINT_AUTO_SPLIT=true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.agent.plumber_config._REPO_ROOT", tmp_path)
+    monkeypatch.setattr("src.cli.ui_server._REPO_ROOT", tmp_path)
 
     with TestClient(app) as client:
         response = client.get("/api/config")

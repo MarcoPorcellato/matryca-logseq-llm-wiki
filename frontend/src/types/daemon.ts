@@ -25,6 +25,7 @@ export interface GraphAnalytics {
   semantic_links: number
   semantic_cache_mb: number
   context_acceleration: number
+  status?: 'online' | 'offline'
 }
 
 export const DEFAULT_GRAPH_ANALYTICS: GraphAnalytics = {
@@ -74,19 +75,40 @@ function hasExplicitField(source: Record<string, unknown>, snakeKey: string, cam
   return snakeKey in source || camelKey in source
 }
 
-/** True when the API payload includes an explicit graph analytics object (not just UI defaults). */
+function readOptionalStatus(source: Record<string, unknown>): GraphAnalytics['status'] | undefined {
+  const value = source.status
+  if (value === 'online' || value === 'offline') {
+    return value
+  }
+  return undefined
+}
+
+/** True when the API payload includes an explicit graph analytics object (not UI defaults). */
 export function hasGraphAnalyticsPayload(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object') {
     return false
   }
   const source = raw as Record<string, unknown>
+  if (readOptionalStatus(source) !== undefined) {
+    return true
+  }
+  const totalPages = readNumber(source, 'total_pages', 'totalPages')
+  const totalJournals = readNumber(source, 'total_journals', 'totalJournals')
+  const totalLinks = readNumber(source, 'total_links', 'totalLinks')
+  const semanticLinks = readNumber(source, 'semantic_links', 'semanticLinks')
+  const humanLinks = readNumber(source, 'human_links', 'humanLinks')
+  const aiPages = readNumber(source, 'ai_pages', 'aiPages')
+  const aiLinks = readNumber(source, 'ai_links', 'aiLinks')
+  const aliasCount = readNumber(source, 'alias_count', 'aliasCount')
   return (
-    'total_pages' in source ||
-    'totalPages' in source ||
-    'semantic_links' in source ||
-    'semanticLinks' in source ||
-    'human_links' in source ||
-    'humanLinks' in source
+    totalPages > 0
+    || totalJournals > 0
+    || totalLinks > 0
+    || semanticLinks > 0
+    || humanLinks > 0
+    || aiPages > 0
+    || aiLinks > 0
+    || aliasCount > 0
   )
 }
 
@@ -123,6 +145,7 @@ export function normalizeGraphAnalytics(raw: unknown): GraphAnalytics {
     semantic_cache_mb: readNumber(source, 'semantic_cache_mb', 'semanticCacheMb'),
     context_acceleration:
       contextAcceleration > 0 ? contextAcceleration : DEFAULT_GRAPH_ANALYTICS.context_acceleration,
+    status: readOptionalStatus(source),
   }
 }
 
@@ -147,12 +170,15 @@ export function normalizeDaemonState(raw: DaemonStateResponse): DaemonStateRespo
   const files =
     raw.files && typeof raw.files === 'object' && !Array.isArray(raw.files) ? raw.files : {}
   const impact = normalizeImpactCounters(raw)
+  const graphAnalytics = hasGraphAnalyticsPayload(raw.graph_analytics)
+    ? normalizeGraphAnalytics(raw.graph_analytics)
+    : undefined
 
   return {
     ...raw,
     files,
     ...impact,
-    graph_analytics: normalizeGraphAnalytics(raw.graph_analytics),
+    graph_analytics: graphAnalytics,
   }
 }
 

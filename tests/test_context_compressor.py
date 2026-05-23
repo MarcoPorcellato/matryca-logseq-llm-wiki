@@ -133,6 +133,27 @@ def test_estimate_tokens_applies_safety_buffer() -> None:
     assert estimate_tokens(text) >= int(base * TOKEN_ESTIMATE_SAFETY_MULTIPLIER)
 
 
+def test_condense_messages_falls_back_to_truncate_when_split_unavailable() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "System prompt."},
+        {"role": "user", "content": _long_text(200)},
+        {"role": "assistant", "content": '{"turn": 0}'},
+        {"role": "user", "content": "Latest user prompt."},
+    ]
+    assert estimate_messages_tokens(messages) > 100
+    compressed, event = condense_messages(
+        messages,
+        trigger=100,
+        target=500,
+        preserve_tail_turns=2,
+        compress_fn=lambda _prompt: "should-not-run",
+    )
+    assert event is None
+    assert len(compressed) < len(messages)
+    assert compressed[0]["role"] == "system"
+    assert compressed[-1]["content"] == "Latest user prompt."
+
+
 def test_condense_messages_falls_back_when_compress_fn_raises() -> None:
     messages: list[ChatMessage] = [
         {"role": "system", "content": "System prompt."},

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
@@ -206,6 +208,13 @@ class UpdateCheckResponse(BaseModel):
 
 
 _LOCAL_LM_PROXY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_BLOCKED_SSRF_HOSTS = frozenset(
+    {
+        "169.254.169.254",
+        "metadata.google.internal",
+        "metadata.google.internal.",
+    },
+)
 
 
 def _normalize_lm_proxy_host(host: str) -> str:
@@ -217,10 +226,61 @@ def _normalize_lm_proxy_host(host: str) -> str:
 
 def _is_safe_lm_proxy_host(host: str, *, configured_host: str) -> bool:
     normalized = _normalize_lm_proxy_host(host)
+    if normalized in _BLOCKED_SSRF_HOSTS:
+        return False
     if normalized in _LOCAL_LM_PROXY_HOSTS:
         return True
     configured = _normalize_lm_proxy_host(configured_host)
     return bool(configured) and normalized == configured
+
+
+def _host_resolves_to_blocked_ip(hostname: str) -> bool:
+    """Reject link-local, metadata, and other non-routable inference targets."""
+    normalized = _normalize_lm_proxy_host(hostname)
+    if normalized in _BLOCKED_SSRF_HOSTS:
+        return True
+    try:
+        literal = ipaddress.ip_address(normalized)
+    except ValueError:
+        literal = None
+
+    if literal is not None:
+        return _is_blocked_inference_ip(literal, hostname=normalized)
+
+    try:
+        for info in socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM):
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            resolved = ipaddress.ip_address(sockaddr[0])
+            if _is_blocked_inference_ip(resolved, hostname=normalized):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _is_blocked_inference_ip(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    hostname: str,
+) -> bool:
+    if str(address) == "169.254.169.254":
+        return True
+    if address.is_loopback:
+        return _normalize_lm_proxy_host(hostname) not in _LOCAL_LM_PROXY_HOSTS
+    if (
+        address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        return True
+    if isinstance(address, ipaddress.IPv4Address) and address.is_private:
+        return _normalize_lm_proxy_host(hostname) not in _LOCAL_LM_PROXY_HOSTS
+    if isinstance(address, ipaddress.IPv6Address) and address.is_site_local:
+        return _normalize_lm_proxy_host(hostname) not in _LOCAL_LM_PROXY_HOSTS
+    return False
 
 
 def _validate_lm_models_base_url(base_url: str) -> str:
@@ -233,6 +293,8 @@ def _validate_lm_models_base_url(base_url: str) -> str:
         raise HTTPException(status_code=400, detail="base_url must include a host")
     configured_host = urllib.parse.urlparse(load_plumber_lint_config().lm_base_url).hostname or ""
     if not _is_safe_lm_proxy_host(hostname, configured_host=configured_host):
+        raise HTTPException(status_code=400, detail="base_url host is not allowed")
+    if _host_resolves_to_blocked_ip(hostname):
         raise HTTPException(status_code=400, detail="base_url host is not allowed")
     return resolve_llm_base_url(override=base_url)
 
@@ -436,13 +498,16 @@ def get_logs() -> list[str]:
 @app.get("/api/config", response_model=PlumberConfigResponse)
 def get_config() -> PlumberConfigResponse:
     """Return live Plumber hardening thresholds loaded from environment."""
+    reload_plumber_dotenv(override=True)
     return PlumberConfigResponse.from_lint_config(load_plumber_lint_config())
 
 
 @app.get("/api/system/update-check", response_model=UpdateCheckResponse)
-async def get_update_check() -> UpdateCheckResponse:
+async def get_update_check(
+    force_refresh: bool = Query(default=False),
+) -> UpdateCheckResponse:
     """Compare the installed package version against the latest PyPI release."""
-    result = await check_for_updates()
+    result = await check_for_updates(force_refresh=force_refresh)
     return UpdateCheckResponse.from_result(result)
 
 

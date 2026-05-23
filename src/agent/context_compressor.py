@@ -154,7 +154,9 @@ def truncate_messages_to_budget(
     """Drop compressible middle history when LLM compression is unavailable."""
     split = _split_for_compression(messages, preserve_tail_turns=preserve_tail_turns)
     if split is None:
-        return messages
+        if estimate_messages_tokens(messages) <= target:
+            return messages
+        return drop_oldest_messages_fraction(messages, fraction=0.20)
 
     system, _middle, tail, current_user = split
     while True:
@@ -182,6 +184,13 @@ def condense_messages(
 
     split = _split_for_compression(messages, preserve_tail_turns=preserve_tail_turns)
     if split is None:
+        truncated = truncate_messages_to_budget(
+            messages,
+            target=target,
+            preserve_tail_turns=preserve_tail_turns,
+        )
+        if truncated != messages:
+            return truncated, None
         return messages, None
 
     system, middle, tail, current_user = split

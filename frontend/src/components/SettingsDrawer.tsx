@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { LmModelsResponse, PlumberConfig } from '../types/daemon'
 
@@ -192,6 +192,25 @@ const TRUST_SECTIONS: TrustSection[] = [
   },
 ]
 
+const NUMERIC_FIELDS = new Set<keyof PlumberConfig>([
+  'thermal_delay_bootstrap',
+  'thermal_delay_cognitive',
+  'mapreduce_trigger_chars',
+  'mapreduce_chunk_chars',
+])
+
+function parseNumericField(raw: string): number | null {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return null
+  }
+  const parsed = Number(trimmed)
+  if (Number.isNaN(parsed) || !Number.isFinite(parsed)) {
+    return null
+  }
+  return parsed
+}
+
 function emptyDraft(): PlumberConfig {
   return {
     logseq_graph_path: '',
@@ -240,9 +259,14 @@ function LmModelField({
   const [models, setModels] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   const loadModels = useCallback(async () => {
     const trimmedUrl = lmStudioUrl.trim()
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     if (!trimmedUrl) {
       setModels([])
       setError('LM Studio URL is required')
@@ -255,11 +279,18 @@ function LmModelField({
       const params = new URLSearchParams({ base_url: trimmedUrl })
       const response = await fetch(`${API_BASE}/api/lm-models?${params.toString()}`, {
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       })
+      if (controller.signal.aborted) {
+        return
+      }
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
       const payload = (await response.json()) as LmModelsResponse
+      if (controller.signal.aborted) {
+        return
+      }
       if (payload.error) {
         setError(payload.error)
         setModels([])
@@ -267,21 +298,30 @@ function LmModelField({
       }
       setModels(payload.models)
     } catch (fetchError) {
+      if (controller.signal.aborted) {
+        return
+      }
       setError(fetchError instanceof Error ? fetchError.message : 'Failed to load models')
       setModels([])
     } finally {
-      setLoading(false)
+      if (!controller.signal.aborted) {
+        setLoading(false)
+      }
     }
   }, [lmStudioUrl])
 
   useEffect(() => {
     if (!open) {
+      abortRef.current?.abort()
       return
     }
     const timer = window.setTimeout(() => {
       void loadModels()
     }, 300)
-    return () => window.clearTimeout(timer)
+    return () => {
+      window.clearTimeout(timer)
+      abortRef.current?.abort()
+    }
   }, [open, loadModels])
 
   const options = models.includes(value) || !value ? models : [value, ...models]
@@ -342,12 +382,16 @@ function LmModelField({
 function ConfigField({
   field,
   draft,
+  invalidFields,
   onChange,
 }: {
   field: FieldSpec
   draft: PlumberConfig
+  invalidFields: Partial<Record<keyof PlumberConfig, string>>
   onChange: <K extends keyof PlumberConfig>(key: K, raw: PlumberConfig[K]) => void
 }) {
+  const invalidMessage = invalidFields[field.key]
+
   return (
     <label className="block space-y-1.5">
       <div className="flex flex-wrap items-center gap-2">
@@ -367,15 +411,28 @@ function ConfigField({
           className="mt-1 h-4 w-4 rounded border-theme-border bg-theme-base accent-theme-accent"
         />
       ) : field.type === 'number' ? (
-        <input
-          type="number"
-          step={field.step}
-          value={Number(draft[field.key])}
-          onChange={(event) =>
-            onChange(field.key, Number(event.target.value) as PlumberConfig[typeof field.key])
-          }
-          className={INPUT_CLASS}
-        />
+        <>
+          <input
+            type="number"
+            step={field.step}
+            value={Number(draft[field.key])}
+            onChange={(event) => {
+              const parsed = parseNumericField(event.target.value)
+              if (parsed === null) {
+                onChange(field.key, Number.NaN as PlumberConfig[typeof field.key])
+                return
+              }
+              onChange(field.key, parsed as PlumberConfig[typeof field.key])
+            }}
+            aria-invalid={invalidMessage ? true : undefined}
+            className={`${INPUT_CLASS}${invalidMessage ? ' border-red-500/60 focus:border-red-500/60 focus:ring-red-500/30' : ''}`}
+          />
+          {invalidMessage ? (
+            <p className="text-[10px] text-red-500" role="alert">
+              {invalidMessage}
+            </p>
+          ) : null}
+        </>
       ) : (
         <input
           type="text"
@@ -394,12 +451,14 @@ function TrustSectionCard({
   section,
   draft,
   expanded,
+  invalidFields,
   onToggle,
   onChange,
 }: {
   section: TrustSection
   draft: PlumberConfig
   expanded: boolean
+  invalidFields: Partial<Record<keyof PlumberConfig, string>>
   onToggle: () => void
   onChange: <K extends keyof PlumberConfig>(key: K, raw: PlumberConfig[K]) => void
 }) {
@@ -436,7 +495,13 @@ function TrustSectionCard({
       {expanded ? (
         <div className="grid grid-cols-2 gap-x-6 gap-y-5 border-t border-theme-border/50 px-4 py-4">
           {section.fields.map((field) => (
-            <ConfigField key={field.key} field={field} draft={draft} onChange={onChange} />
+            <ConfigField
+              key={field.key}
+              field={field}
+              draft={draft}
+              invalidFields={invalidFields}
+              onChange={onChange}
+            />
           ))}
         </div>
       ) : null}
@@ -449,6 +514,8 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
   const [isDirty, setIsDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [invalidFields, setInvalidFields] = useState<Partial<Record<keyof PlumberConfig, string>>>({})
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     safe: true,
     augmented: true,
@@ -465,6 +532,8 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
     if (!open) {
       setSaved(false)
       setIsDirty(false)
+      setSaveError(null)
+      setInvalidFields({})
     }
   }, [open])
 
@@ -472,16 +541,48 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
     setDraft((prev) => ({ ...prev, [key]: raw }))
     setIsDirty(true)
     setSaved(false)
+    setSaveError(null)
+    if (NUMERIC_FIELDS.has(key)) {
+      setInvalidFields((prev) => {
+        const next = { ...prev }
+        if (typeof raw === 'number' && !Number.isNaN(raw)) {
+          delete next[key]
+        } else {
+          next[key] = 'Enter a valid number'
+        }
+        return next
+      })
+    }
+  }
+
+  const validateDraft = (): boolean => {
+    const nextInvalid: Partial<Record<keyof PlumberConfig, string>> = {}
+    for (const key of NUMERIC_FIELDS) {
+      const value = draft[key]
+      if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
+        nextInvalid[key] = 'Enter a valid number'
+      }
+    }
+    setInvalidFields(nextInvalid)
+    return Object.keys(nextInvalid).length === 0
   }
 
   const handleSave = async () => {
+    if (!validateDraft()) {
+      setSaveError('Fix invalid numeric fields before saving.')
+      return
+    }
     setSaving(true)
+    setSaveError(null)
     const result = await onSave(draft)
     setSaving(false)
     if (result) {
       setSaved(true)
       setIsDirty(false)
+      setSaveError(null)
+      return
     }
+    setSaveError('Could not save settings. Check the API connection and try again.')
   }
 
   const toggleSection = (id: string) => {
@@ -501,6 +602,7 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
         className={`fixed inset-y-0 left-0 z-50 h-full w-full overflow-hidden rounded-r-3xl border-r border-theme-border/60 bg-theme-surface/95 shadow-2xl backdrop-blur-md transition-transform duration-300 ease-out ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
+        inert={!open}
         aria-hidden={!open}
         aria-label="Environment settings"
       >
@@ -561,7 +663,13 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
                         onChange={(model) => updateField('lm_model', model)}
                       />
                     ) : (
-                      <ConfigField key={field.key} field={field} draft={draft} onChange={updateField} />
+                      <ConfigField
+                        key={field.key}
+                        field={field}
+                        draft={draft}
+                        invalidFields={invalidFields}
+                        onChange={updateField}
+                      />
                     ),
                   )}
                 </div>
@@ -578,6 +686,7 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
                       section={section}
                       draft={draft}
                       expanded={expandedSections[section.id] ?? true}
+                      invalidFields={invalidFields}
                       onToggle={() => toggleSection(section.id)}
                       onChange={updateField}
                     />
@@ -587,7 +696,12 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
             </div>
           </form>
 
-          <footer className="border-t border-theme-border/50 px-5 py-4">
+          <footer className="space-y-2 border-t border-theme-border/50 px-5 py-4">
+            {saveError ? (
+              <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-500" role="alert">
+                {saveError}
+              </p>
+            ) : null}
             <button
               type="button"
               disabled={saving}

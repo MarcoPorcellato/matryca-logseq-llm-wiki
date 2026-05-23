@@ -82,19 +82,17 @@ export function UpdateGuideModal({ open, latestVersion, onClose }: UpdateGuideMo
   }
 
   return (
-    <>
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-theme-base/70 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="update-guide-title"
+      onClick={onClose}
+    >
       <div
-        className="fixed inset-0 z-[60] bg-theme-base/70 backdrop-blur-sm"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        className="fixed inset-0 z-[70] flex items-center justify-center p-4"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="update-guide-title"
+        className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-theme-border/60 bg-theme-surface shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
       >
-        <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-theme-border/60 bg-theme-surface shadow-2xl">
           <header className="flex items-start justify-between gap-4 border-b border-theme-border/50 px-5 py-4">
             <div>
               <p className="text-[10px] font-medium uppercase tracking-[0.35em] text-theme-muted">
@@ -140,8 +138,7 @@ export function UpdateGuideModal({ open, latestVersion, onClose }: UpdateGuideMo
               </section>
             ))}
           </div>
-        </div>
       </div>
-    </>
+    </div>
   )
 }
