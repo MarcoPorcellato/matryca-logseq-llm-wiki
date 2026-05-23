@@ -17,6 +17,7 @@ from typing import Any
 
 from loguru import logger
 
+from .json_flock import cross_process_json_flock
 from .markdown_blocks import atomic_write_bytes
 
 CLUSTERS_FILENAME = "semantic_clusters.json"
@@ -528,7 +529,8 @@ def save_semantic_clusters(
     path = semantic_clusters_path(graph_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-    atomic_write_bytes(path, data.encode("utf-8"), graph_root=graph_root)
+    with cross_process_json_flock(path):
+        atomic_write_bytes(path, data.encode("utf-8"), graph_root=graph_root)
     return path
 
 

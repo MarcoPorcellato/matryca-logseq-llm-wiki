@@ -37,6 +37,7 @@ from ..graph.markdown_blocks import (
     strip_line_endings,
 )
 from ..graph.page_write_lock import page_rmw_lock
+from ..graph.path_sandbox import assert_path_within_graph, read_graph_file_text
 from ..graph.property_line_edit import edit_block_property_lines
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
 from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
@@ -194,7 +195,8 @@ def _headless_append_child(
         bullet_indent = " " * (child_level * graph.tab_size)
         body_indent = " " * ((child_level + 1) * graph.tab_size)
         path = Path(target_node.source_path or source_path)
-        raw_text = path.read_text(encoding="utf-8")
+        safe_path = assert_path_within_graph(path, graph_root)
+        raw_text = read_graph_file_text(safe_path, graph_root)
         file_lines = raw_text.splitlines(keepends=True)
         insert_index = insert_after_line
 

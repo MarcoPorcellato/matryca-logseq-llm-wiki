@@ -59,7 +59,7 @@ function resolveAnalytics(state: DaemonStateResponse | null) {
 export function GraphInsightsCard({ state }: GraphInsightsCardProps) {
   const analytics = resolveAnalytics(state)
   const cacheMb = analytics?.semantic_cache_mb ?? 0
-  const acceleration = analytics?.context_acceleration ?? 94.2
+  const acceleration = analytics?.context_acceleration ?? 0
   const telemetryMissing =
     state !== null &&
     !hasGraphAnalyticsPayload(state.graph_analytics) &&

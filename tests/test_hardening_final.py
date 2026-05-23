@@ -92,6 +92,7 @@ def test_flock_oserror_falls_back_to_thread_lock(
         msg = "flock not supported on this filesystem"
         raise OSError(95, msg)
 
+    monkeypatch.setenv("MATRYCA_ALLOW_FLOCK_DEGRADATION", "true")
     monkeypatch.setattr(page_write_lock_mod._fcntl, "flock", _reject_flock)
     with page_rmw_lock(target):
         target.write_text("updated\n", encoding="utf-8")

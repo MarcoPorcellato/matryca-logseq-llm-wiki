@@ -18,6 +18,21 @@ const POLL_INTERVAL_MS = 1000
 const API_BASE =
   import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
 
+let cachedAuthToken: string | null = null
+
+async function resolveAuthToken(): Promise<string | null> {
+  if (cachedAuthToken) {
+    return cachedAuthToken
+  }
+  try {
+    const session = await fetchJson<{ token: string }>(`${API_BASE}/api/auth/session`)
+    cachedAuthToken = session.token
+    return cachedAuthToken
+  } catch {
+    return null
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -30,6 +45,17 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(`HTTP ${response.status}`)
   }
   return (await response.json()) as T
+}
+
+async function fetchJsonWithAuth<T>(url: string, init?: RequestInit): Promise<T> {
+  const token = await resolveAuthToken()
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> | undefined),
+  }
+  if (token) {
+    headers['X-Matryca-Token'] = token
+  }
+  return fetchJson<T>(url, { ...init, headers })
 }
 
 /** Treat daemon start responses that should enable live UI polling. */
@@ -213,7 +239,7 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
     setEngineBusy(true)
     setEngineError(null)
     try {
-      const result = await fetchJson<DaemonControlResponse>(`${API_BASE}/api/daemon/start`, {
+      const result = await fetchJsonWithAuth<DaemonControlResponse>(`${API_BASE}/api/daemon/start`, {
         method: 'POST',
       })
       if (!isStartAccepted(result)) {
@@ -237,7 +263,7 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
     setEngineBusy(true)
     setEngineError(null)
     try {
-      const result = await fetchJson<DaemonControlResponse>(`${API_BASE}/api/daemon/stop`, {
+      const result = await fetchJsonWithAuth<DaemonControlResponse>(`${API_BASE}/api/daemon/stop`, {
         method: 'POST',
       })
       if (!result.ok) {
@@ -259,7 +285,7 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
 
   const saveConfig = useCallback(async (payload: PlumberConfig): Promise<PlumberConfig | null> => {
     try {
-      const updated = await fetchJson<PlumberConfig>(`${API_BASE}/api/config`, {
+      const updated = await fetchJsonWithAuth<PlumberConfig>(`${API_BASE}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -268,7 +294,10 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
         setConfig(updated)
       }
       return updated
-    } catch {
+    } catch (error) {
+      if (mountedRef.current) {
+        setEngineError(error instanceof Error ? error.message : 'Failed to save config')
+      }
       return null
     }
   }, [])

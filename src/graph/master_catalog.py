@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 from .alias_index import build_alias_index, iter_alias_source_paths, page_title_from_path
+from .json_flock import cross_process_json_flock
 from .markdown_blocks import atomic_write_bytes
 
 CATALOG_FILENAME = "master_catalog.json"
@@ -116,12 +117,13 @@ class MasterCatalog:
         path = self.catalog_path(self.graph_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-        atomic_write_bytes(
-            path,
-            data.encode("utf-8"),
-            graph_root=self.graph_root,
-            validate_block_refs=False,
-        )
+        with cross_process_json_flock(path):
+            atomic_write_bytes(
+                path,
+                data.encode("utf-8"),
+                graph_root=self.graph_root,
+                validate_block_refs=False,
+            )
 
     def upsert(self, page_title: str, entry: CatalogEntry) -> None:
         with self._lock:

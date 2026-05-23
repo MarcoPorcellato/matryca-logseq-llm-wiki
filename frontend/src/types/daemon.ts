@@ -40,7 +40,7 @@ export const DEFAULT_GRAPH_ANALYTICS: GraphAnalytics = {
   alias_count: 0,
   semantic_links: 0,
   semantic_cache_mb: 0,
-  context_acceleration: 94.2,
+  context_acceleration: 0,
   status: 'online',
 }
 

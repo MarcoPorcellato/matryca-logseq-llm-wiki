@@ -20,7 +20,7 @@ from .link_tag_hop import _WIKILINK
 from .page_properties import is_plumber_authored_page
 
 _CACHE_DIRNAME = ".matryca_semantic_cache"
-_DEFAULT_CONTEXT_ACCELERATION = 94.2
+_DEFAULT_CONTEXT_ACCELERATION = 0.0
 _ANALYTICS_TTL_SECONDS = 2.0
 GraphAnalyticsStatus = Literal["online", "offline"]
 
@@ -149,10 +149,7 @@ def _context_acceleration_rate(graph_root: Path, total_pages: int) -> float:
     if valid_entries == 0:
         return _DEFAULT_CONTEXT_ACCELERATION
 
-    rate = min(99.9, (valid_entries / total_pages) * 100.0)
-    if rate < 70.0:
-        return _DEFAULT_CONTEXT_ACCELERATION
-    return round(rate, 1)
+    return round(min(99.9, (valid_entries / total_pages) * 100.0), 1)
 
 
 def _count_blocks_scanned(graph_root: Path) -> int:

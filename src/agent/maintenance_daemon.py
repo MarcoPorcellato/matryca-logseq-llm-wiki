@@ -7,10 +7,11 @@ import json
 import math
 import os
 import re
-import select
 import shutil
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ from ..graph.insights_engine import (
     INSIGHTS_SYSTEM_PROMPT,
     run_graph_insights_engine,
 )
+from ..graph.json_flock import cross_process_json_flock
 from ..graph.logseq_uuid import find_malformed_block_refs, is_malformed_block_ref_error
 from ..graph.markdown_blocks import (
     atomic_write_bytes,
@@ -83,7 +85,7 @@ from ..graph.semantic_clustering import (
 )
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.json_repair import parse_llm_json
-from ..utils.logging_config import configure_loguru, reset_loguru_configuration
+from ..utils.logging_config import configure_loguru
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -106,7 +108,6 @@ from .plumber_config import (
     resolve_llm_api_key,
     resolve_llm_base_url,
     resolve_llm_model_name,
-    resolve_repo_dotenv_path,
 )
 from .plumber_llm import (
     BootstrapSummaryResult,
@@ -138,6 +139,13 @@ STATE_TMP_FILENAME = f"{STATE_FILENAME}.tmp"
 STATE_BAK_FILENAME = f"{STATE_FILENAME}.bak"
 PID_FILENAME = ".matryca_plumber_daemon.pid"
 DAEMON_LOCK_FILENAME = ".matryca_plumber_daemon.lock"
+PLUMBER_PID_MARKER = "matryca-plumber-daemon"
+_PLUMBER_CMD_MARKERS = ("src.cli", "maintenance_daemon", "matryca", "plumber")
+DEFAULT_STOP_GRACE_SECONDS = 130.0
+DEFAULT_STOP_SIGKILL_AFTER_SECONDS = 125.0
+SHUTDOWN_INFLIGHT_TIMEOUT_SECONDS = 120.0
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FILE_STATUS_PRIORITY = {"processed": 4, "error": 3, "skipped": 2, "pending": 1}
 STRUCTURAL_LINT_HEADING = "### Matryca Structural Lint"
 STRUCTURAL_LINT_HEADER = f"- {STRUCTURAL_LINT_HEADING}"
 DEFAULT_MODEL = DEFAULT_LLM_MODEL_NAME  # backward-compatible alias for CLI/TUI
@@ -384,6 +392,21 @@ def record_daemon_impact(
         state.ai_links_injected += links_backpropagated
 
 
+def _merge_file_state(existing: FileState, incoming: FileState) -> FileState:
+    """Merge duplicate ledger keys preferring higher-status, newer records."""
+    existing_prio = _FILE_STATUS_PRIORITY.get(existing.status, 0)
+    incoming_prio = _FILE_STATUS_PRIORITY.get(incoming.status, 0)
+    if incoming_prio > existing_prio:
+        return incoming
+    if incoming_prio < existing_prio:
+        return existing
+    if incoming.mtime > existing.mtime:
+        return incoming
+    if incoming.mtime < existing.mtime:
+        return existing
+    return incoming if incoming.processed_at >= existing.processed_at else existing
+
+
 def normalize_daemon_state_file_keys(graph_root: Path, state: DaemonState) -> bool:
     """Rewrite legacy absolute file keys to graph-relative POSIX paths."""
     if not state.files:
@@ -392,9 +415,16 @@ def normalize_daemon_state_file_keys(graph_root: Path, state: DaemonState) -> bo
     changed = False
     for key, rec in state.files.items():
         new_key = normalize_daemon_file_key(graph_root, key)
+        if not new_key:
+            changed = True
+            continue
         if new_key != key:
             changed = True
-        migrated[new_key] = rec
+        if new_key in migrated:
+            migrated[new_key] = _merge_file_state(migrated[new_key], rec)
+            changed = True
+        else:
+            migrated[new_key] = rec
     if changed:
         state.files = migrated
     return changed
@@ -463,17 +493,26 @@ def _try_acquire_daemon_process_lock_windows(graph_root: Path) -> int | None:
     """Acquire an exclusive daemon lock on platforms without ``fcntl`` (Windows)."""
     path = daemon_lock_path(graph_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    for _attempt in range(2):
+    for _attempt in range(3):
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
         except FileExistsError:
-            pid = read_pid_file(graph_root)
-            if pid is None or not is_process_alive(pid):
+            holder = _read_lock_holder_pid(path)
+            if holder is not None and is_plumber_process(holder):
+                return None
+            if holder is None or not is_process_alive(holder):
                 with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
                 continue
             return None
         except OSError:
+            return None
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        except OSError:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
             return None
         if _msvcrt is not None:
             try:
@@ -579,36 +618,84 @@ def load_daemon_state(graph_root: Path) -> DaemonState:
 
 
 def save_daemon_state(graph_root: Path, state: DaemonState) -> None:
-    """Persist daemon state via POSIX atomic write-and-replace.
-
-    Writes to ``.matryca_daemon_state.json.tmp`` in the same directory, fsyncs,
-    then ``os.replace`` swaps the inode instantly. FastAPI pollers always observe
-    either the previous complete checkpoint or the next one — never a truncated file.
-    """
+    """Persist daemon state via POSIX atomic write-and-replace under a cross-process flock."""
     path = state_path(graph_root)
-    tmp_path = path.parent / STATE_TMP_FILENAME
     normalize_daemon_state_file_keys(graph_root, state)
     payload = json.dumps(state.to_json(), indent=2, ensure_ascii=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    committed = False
+    with cross_process_json_flock(path):
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        tmp_path = Path(tmp_name)
+        committed = False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(str(tmp_path), str(path))
+            committed = True
+            bak_path = state_bak_path(graph_root)
+            with contextlib.suppress(OSError):
+                shutil.copy2(path, bak_path)
+        finally:
+            if not committed:
+                tmp_path.unlink(missing_ok=True)
+
+
+def _read_lock_holder_pid(lock_path: Path) -> int | None:
+    """Best-effort PID stored in a daemon lock sidecar."""
+    if not lock_path.is_file():
+        return None
     try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(str(tmp_path), str(path))
-        committed = True
-        bak_path = state_bak_path(graph_root)
-        with contextlib.suppress(OSError):
-            shutil.copy2(path, bak_path)
-    finally:
-        if not committed:
-            tmp_path.unlink(missing_ok=True)
+        first_line = lock_path.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
+        return int(first_line)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _process_command_line(pid: int) -> str:
+    """Return a best-effort command line for ``pid`` (platform-specific)."""
+    if sys.platform == "win32":
+        result = subprocess.run(  # noqa: S603
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        return result.stdout or ""
+    if sys.platform == "darwin":
+        result = subprocess.run(  # noqa: S603
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        return (result.stdout or "").strip()
+    proc_path = Path(f"/proc/{pid}/cmdline")
+    if proc_path.is_file():
+        return proc_path.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace")
+    return ""
+
+
+def is_plumber_process(pid: int) -> bool:
+    """Return whether ``pid`` appears to be a Matryca Plumber daemon worker."""
+    if pid <= 0 or not is_process_alive(pid):
+        return False
+    cmd = _process_command_line(pid).lower()
+    if not cmd:
+        return False
+    return any(marker in cmd for marker in _PLUMBER_CMD_MARKERS)
 
 
 def write_pid_file(graph_root: Path) -> None:
     path = pid_path(graph_root)
-    payload = f"{os.getpid()}\n"
+    payload = json.dumps({"pid": os.getpid(), "marker": PLUMBER_PID_MARKER}) + "\n"
     atomic_write_bytes(
         path,
         payload.encode("utf-8"),
@@ -622,8 +709,26 @@ def read_pid_file(graph_root: Path) -> int | None:
     if not path.is_file():
         return None
     try:
-        return int(path.read_text(encoding="utf-8", errors="replace").strip())
-    except (OSError, ValueError):
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(payload, dict):
+            pid = payload.get("pid")
+            if isinstance(pid, int):
+                return pid
+            if isinstance(pid, str) and pid.strip().isdigit():
+                return int(pid.strip())
+        return None
+    try:
+        return int(raw)
+    except ValueError:
         return None
 
 
@@ -643,7 +748,12 @@ def is_process_alive(pid: int) -> bool:
     return True
 
 
-def stop_daemon(graph_root: Path) -> dict[str, Any]:
+def stop_daemon(
+    graph_root: Path,
+    *,
+    grace_seconds: float = DEFAULT_STOP_GRACE_SECONDS,
+    sigkill_after: float = DEFAULT_STOP_SIGKILL_AFTER_SECONDS,
+) -> dict[str, Any]:
     """Gracefully stop a running daemon via SIGTERM, escalating to SIGKILL when needed."""
     pid = read_pid_file(graph_root)
     if pid is None:
@@ -654,15 +764,23 @@ def stop_daemon(graph_root: Path) -> dict[str, Any]:
         state.status = "stopped"
         save_daemon_state(graph_root, state)
         return {"ok": True, "code": "stale_pid_removed", "pid": pid}
+    if not is_plumber_process(pid):
+        remove_pid_file(graph_root)
+        return {
+            "ok": False,
+            "code": "foreign_pid",
+            "pid": pid,
+            "message": f"PID {pid} is not a Matryca Plumber daemon process",
+        }
 
     os.kill(pid, signal.SIGTERM)
     sigkill_sent = False
-    deadline = time.monotonic() + 5.0
-    sigkill_after = time.monotonic() + 3.0
+    deadline = time.monotonic() + max(1.0, grace_seconds)
+    sigkill_at = time.monotonic() + max(1.0, sigkill_after)
     while time.monotonic() < deadline:
         if not is_process_alive(pid):
             break
-        if not sigkill_sent and time.monotonic() >= sigkill_after:
+        if not sigkill_sent and time.monotonic() >= sigkill_at:
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
             sigkill_sent = True
@@ -2018,6 +2136,7 @@ class MaintenanceDaemon:
         self._shutdown_event = threading.Event()
         self._inflight_writes = threading.Condition()
         self._active_write_count = 0
+        self._state_persist_failed = False
         self.bootstrap_complete = False
 
     def _ensure_shared_token_logger(self) -> None:
@@ -2108,7 +2227,11 @@ class MaintenanceDaemon:
             self._active_write_count -= 1
             self._inflight_writes.notify_all()
 
-    def _wait_for_inflight_writes(self, *, timeout_s: float = 120.0) -> None:
+    def _wait_for_inflight_writes(
+        self,
+        *,
+        timeout_s: float = SHUTDOWN_INFLIGHT_TIMEOUT_SECONDS,
+    ) -> None:
         """Block until active Phase-2 writes finish or ``timeout_s`` elapses."""
         deadline = time.monotonic() + timeout_s
         with self._inflight_writes:
@@ -2351,7 +2474,9 @@ class MaintenanceDaemon:
         self._sync_live_telemetry(state)
         try:
             save_daemon_state(self.graph_root, state)
+            self._state_persist_failed = False
         except Exception as save_exc:  # noqa: BLE001 - log and continue cycle
+            self._state_persist_failed = True
             target = path if path is not None else self.graph_root
             self.token_logger.log_structural_lint_warning(
                 target_file=target,
@@ -2428,6 +2553,7 @@ class MaintenanceDaemon:
         prompt_before = self.token_logger.session_prompt_tokens
         completion_before = self.token_logger.session_completion_tokens
         llm_called_from_usage = False
+        write_aborted = False
         self._begin_phase2_write()
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
@@ -2487,6 +2613,7 @@ class MaintenanceDaemon:
                 links_backpropagated=lint_outcome.links_backpropagated,
             )
             if lint_outcome.write_aborted:
+                write_aborted = True
                 llm_called_from_logger = (
                     self.token_logger.session_prompt_tokens > prompt_before
                     or self.token_logger.session_completion_tokens > completion_before
@@ -2504,12 +2631,7 @@ class MaintenanceDaemon:
                 message=f"Page lock unavailable after retries: {exc}",
                 malformed_refs=[],
             )
-            state.files[key] = FileState(
-                mtime=mtime,
-                processed_at=datetime.now(tz=UTC).isoformat(),
-                status="skipped",
-                error=str(exc),
-            )
+            # Leave ledger unchanged so the file stays pending for the next cycle.
         except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
             if is_malformed_block_ref_error(exc):
                 protected_lines = compute_page_protected_line_indices(content)
@@ -2541,7 +2663,7 @@ class MaintenanceDaemon:
             or self.token_logger.session_completion_tokens > completion_before
         )
         llm_called = llm_called_from_usage or llm_called_from_logger
-        if llm_called and self.bootstrap_complete:
+        if llm_called and self.bootstrap_complete and not write_aborted:
             state.phase2_llm_turns += 1
         self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
         return llm_called
@@ -2724,7 +2846,13 @@ class MaintenanceDaemon:
             self.run_bootstrap_pipeline(state)
             while not self._stop_requested:
                 self.run_cycle(state)
-                state = load_daemon_state(self.graph_root)
+                if not self._state_persist_failed:
+                    state = load_daemon_state(self.graph_root)
+                else:
+                    logger.warning(
+                        "Skipping checkpoint reload after persist failure; "
+                        "retaining in-memory daemon state",
+                    )
                 if self._stop_requested:
                     break
                 if self._shutdown_event.wait(timeout=self.poll_seconds):
@@ -2787,6 +2915,10 @@ def start_daemon_foreground(graph_root: Path | None = None) -> None:
     reload_plumber_dotenv()
     configure_loguru()
     root = graph_root or resolve_graph_root()
+    config = load_plumber_lint_config()
+    if config.low_priority_mode and hasattr(os, "nice"):
+        with contextlib.suppress(OSError):
+            os.nice(19)
     lock_fd = _try_acquire_daemon_process_lock(root)
     if lock_fd is None:
         logger.error(
@@ -2800,115 +2932,52 @@ def start_daemon_foreground(graph_root: Path | None = None) -> None:
     daemon.run_forever()
 
 
-def _notify_daemon_parent(write_fd: int, *, ok: bool, payload: str) -> None:
-    prefix = "OK:" if ok else "ERR:"
-    os.write(write_fd, f"{prefix}{payload}\n".encode())
-    os.close(write_fd)
-
-
-def _read_daemon_parent_notification(read_fd: int, *, timeout_s: float = 10.0) -> str:
-    deadline = time.monotonic() + timeout_s
-    chunks: list[bytes] = []
-    while time.monotonic() < deadline:
-        try:
-            ready, _, _ = select.select([read_fd], [], [], 0.1)
-        except (ValueError, OSError):
-            break
-        if read_fd not in ready:
-            continue
-        piece = os.read(read_fd, 256)
-        if not piece:
-            break
-        chunks.append(piece)
-        if b"\n" in piece:
-            break
-    return b"".join(chunks).decode("utf-8", errors="replace").strip()
-
-
 def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
-    """Fork a background daemon process and return the grandchild PID."""
+    """Launch a background daemon worker via subprocess (cross-platform)."""
     root = graph_root or resolve_graph_root()
     existing = read_pid_file(root)
-    if existing is not None and is_process_alive(existing):
+    if existing is not None and is_plumber_process(existing):
         return {
             "ok": False,
             "code": "already_running",
             "pid": existing,
             "message": f"Matryca Plumber daemon already running (pid {existing})",
         }
+    if existing is not None and is_process_alive(existing):
+        remove_pid_file(root)
 
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid > 0:
-        os.close(write_fd)
-        line = _read_daemon_parent_notification(read_fd)
-        os.close(read_fd)
-        if line.startswith("OK:"):
-            child_pid = int(line[3:])
-            return {"ok": True, "code": "started", "pid": child_pid, "graph_root": str(root)}
-        if line.startswith("ERR:"):
-            code = line[4:]
-            message = (
-                "Matryca Plumber daemon already running (lock held)"
-                if code == "lock_held"
-                else f"Daemon startup failed ({code})"
-            )
-            return {"ok": False, "code": code, "message": message}
-        return {
-            "ok": False,
-            "code": "startup_timeout",
-            "message": "Daemon did not report PID in time",
-        }
+    env = os.environ.copy()
+    env["LOGSEQ_GRAPH_PATH"] = str(root)
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-m", "src.cli", "plumber", "start", "--foreground"],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
 
-    os.close(read_fd)
-    os.setsid()
-    fork_pid = os.fork()
-    if fork_pid > 0:
-        os._exit(0)
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            return {
+                "ok": False,
+                "code": "startup_failed",
+                "message": f"Daemon worker exited immediately with code {exit_code}",
+            }
+        pid = read_pid_file(root)
+        if pid is not None and is_plumber_process(pid):
+            return {"ok": True, "code": "started", "pid": pid, "graph_root": str(root)}
+        time.sleep(0.15)
 
-    global _daemon_process_lock_fd
-    try:
-        lock_fd = _try_acquire_daemon_process_lock(root)
-        if lock_fd is None:
-            _notify_daemon_parent(write_fd, ok=False, payload="lock_held")
-            os._exit(1)
-        _daemon_process_lock_fd = lock_fd
-
-        sys.stdin = open(os.devnull)  # noqa: SIM115
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-
-        from loguru import logger
-
-        env_path = resolve_repo_dotenv_path()
-        if env_path is not None:
-            from dotenv import load_dotenv
-
-            load_dotenv(env_path, override=True)
-        reload_plumber_dotenv()
-        os.environ["LOGSEQ_GRAPH_PATH"] = str(root)
-        config = load_plumber_lint_config()
-        if config.low_priority_mode and hasattr(os, "nice"):
-            try:
-                os.nice(19)
-                logger.info(
-                    "[OS SCHEDULER] Low-Impact Antivirus Mode engaged. Process niceness set to 19."
-                )
-            except OSError as e:
-                logger.warning(f"[OS SCHEDULER] Could not adjust process niceness: {e}")
-
-        reset_loguru_configuration()
-        configure_loguru(stderr=False)
-
-        write_pid_file(root)
-        _notify_daemon_parent(write_fd, ok=True, payload=str(os.getpid()))
-        MaintenanceDaemon(root).run_forever()
-    except Exception as exc:  # noqa: BLE001 - detached child must never bubble to shell
-        with contextlib.suppress(OSError):
-            _notify_daemon_parent(write_fd, ok=False, payload=f"startup_error:{exc}")
-        _release_daemon_process_lock(root)
-        os._exit(1)
-    os._exit(0)
+    return {
+        "ok": False,
+        "code": "startup_timeout",
+        "message": "Daemon did not publish a live PID in time",
+    }
 
 
 __all__ = [
@@ -2937,6 +3006,7 @@ __all__ = [
     "compute_scan_metrics",
     "load_daemon_state",
     "normalize_daemon_state_file_keys",
+    "is_plumber_process",
     "prune_stale_daemon_file_entries",
     "read_pid_file",
     "resolve_graph_root",

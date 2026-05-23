@@ -28,6 +28,12 @@ except ImportError:  # pragma: no cover - Windows and other non-Unix platforms
 
 _registry_guard = threading.Lock()
 _page_locks: dict[str, threading.Lock] = {}
+_MAX_PAGE_LOCK_REGISTRY = 4096
+
+
+def _flock_degradation_allowed() -> bool:
+    raw = os.environ.get("MATRYCA_ALLOW_FLOCK_DEGRADATION", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def normalize_page_lock_key(page_path: str | Path) -> str:
@@ -45,6 +51,8 @@ def _lock_for_key(key: str) -> threading.Lock:
     with _registry_guard:
         lock = _page_locks.get(key)
         if lock is None:
+            if len(_page_locks) >= _MAX_PAGE_LOCK_REGISTRY:
+                _page_locks.clear()
             lock = threading.Lock()
             _page_locks[key] = lock
         return lock
@@ -70,6 +78,10 @@ def _acquire_cross_process_flock(fd: int, lock_path: Path) -> bool:
             time.sleep(min(IO_RETRY_MAX_DELAY_S, delay))
             delay = min(IO_RETRY_MAX_DELAY_S, delay * 2)
         except OSError as exc:
+            if not _flock_degradation_allowed():
+                raise PageLockUnavailableError(
+                    f"Cross-process page lock unavailable for {lock_path}: {exc}",
+                ) from exc
             logger.info(
                 "[LOCK FILE SYSTEM DEGRADATION] Shared process lock not supported by "
                 "filesystem ({}), falling back to pure in-process thread locking.",
@@ -91,6 +103,10 @@ def _cross_process_file_lock(page_path: str | Path) -> Iterator[None]:
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         acquired = _acquire_cross_process_flock(fd, lock_path)
+        if not acquired and _fcntl is not None and not _flock_degradation_allowed():
+            raise PageLockUnavailableError(
+                f"Could not acquire cross-process page lock for {lock_path}",
+            )
         if not acquired:
             yield
             return

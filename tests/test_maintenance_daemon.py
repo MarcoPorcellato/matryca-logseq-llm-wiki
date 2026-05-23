@@ -184,10 +184,11 @@ def test_load_daemon_state_self_heals_corrupt_json(graph_root: Path) -> None:
 
 
 def test_daemon_state_roundtrip(graph_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MATRYCA_LM_MODEL", "qwen-test")
+    monkeypatch.setenv("LLM_MODEL_NAME", "qwen-test")
+    page_key = graph_relative_path_key(graph_root / "pages" / "Demo.md", graph_root)
     state = DaemonState(
         files={
-            "/tmp/demo.md": FileState(
+            page_key: FileState(
                 mtime=123.0,
                 processed_at="2026-01-01T00:00:00+00:00",
                 status="processed",
@@ -200,8 +201,8 @@ def test_daemon_state_roundtrip(graph_root: Path, monkeypatch: pytest.MonkeyPatc
     loaded = load_daemon_state(graph_root)
     assert loaded.model == "qwen-test"
     assert loaded.status == "idle"
-    assert "/tmp/demo.md" in loaded.files
-    assert loaded.files["/tmp/demo.md"].mtime == 123.0
+    assert page_key in loaded.files
+    assert loaded.files[page_key].mtime == 123.0
 
 
 def test_save_daemon_state_persists_block_ref_error_text(graph_root: Path) -> None:

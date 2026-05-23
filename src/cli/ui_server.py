@@ -16,19 +16,20 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..agent.maintenance_daemon import (
+    DEFAULT_STOP_GRACE_SECONDS,
     DaemonState,
     heal_daemon_state_ledger,
-    is_process_alive,
+    is_plumber_process,
     load_daemon_state,
     read_pid_file,
     resolve_graph_root,
@@ -41,9 +42,11 @@ from ..agent.plumber_config import (
     resolve_llm_base_url,
 )
 from ..graph.graph_analytics import compute_graph_analytics
+from ..graph.graph_path_validate import validate_logseq_graph_path
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
 from ..utils.updater import UpdateCheckResult, check_for_updates, update_check_to_dict
+from .ui_auth import resolve_ui_token, verify_ui_token
 
 FileStatus = Literal["processed", "skipped", "error", "pending"]
 DaemonStatusValue = Literal["running", "idle", "stopped", "error"]
@@ -85,7 +88,7 @@ class GraphAnalyticsResponse(BaseModel):
     alias_count: int = 0
     semantic_links: int = 0
     semantic_cache_mb: float = 0.0
-    context_acceleration: float = 94.2
+    context_acceleration: float = 0.0
     status: Literal["online", "offline"] = "online"
 
 
@@ -262,11 +265,26 @@ def _host_resolves_to_blocked_ip(hostname: str) -> bool:
     return False
 
 
+class AuthSessionResponse(BaseModel):
+    """Bootstrap token for the local Sovereign UI (loopback-only)."""
+
+    token: str
+
+
+def _normalize_inference_ip(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
 def _is_blocked_inference_ip(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
     *,
     hostname: str,
 ) -> bool:
+    address = _normalize_inference_ip(address)
     if str(address) == "169.254.169.254":
         return True
     if address.is_loopback:
@@ -304,9 +322,15 @@ def _validate_lm_models_base_url(base_url: str) -> str:
 def _fetch_lm_studio_models(base_url: str) -> LmModelsResponse:
     """Query ``GET /v1/models`` on an OpenAI-compatible local inference server."""
     models_url = f"{resolve_llm_base_url(override=base_url).rstrip('/')}/models"
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl) -> None:  # noqa: ANN001, ARG002
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
         request = urllib.request.Request(models_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=5.0) as response:
+        with opener.open(request, timeout=5.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         return LmModelsResponse(models=[], error=str(exc))
@@ -361,28 +385,74 @@ def _serialize_config_value(field: str, value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if field in {"mapreduce_trigger_chars", "mapreduce_chunk_chars"}:
-        if isinstance(value, int):
-            return str(value)
-        if isinstance(value, float):
-            return str(int(value))
-        if isinstance(value, str):
-            return str(int(value))
-        return str(value)
+        try:
+            if isinstance(value, int):
+                parsed = value
+            elif isinstance(value, float):
+                parsed = int(value)
+            elif isinstance(value, str):
+                parsed = int(value.strip())
+            else:
+                parsed = int(str(value))
+            if parsed < 0:
+                raise ValueError(f"{field} must be non-negative")
+            return str(parsed)
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid integer for {field}: {value!r}"
+            raise ValueError(msg) from exc
     if field in {"compression_trigger", "compression_target"}:
-        if isinstance(value, int):
-            return str(value)
-        if isinstance(value, float):
-            return str(int(value))
-        if isinstance(value, str):
-            return str(int(value))
-        return str(value)
+        try:
+            if isinstance(value, int):
+                parsed = value
+            elif isinstance(value, float):
+                parsed = int(value)
+            elif isinstance(value, str):
+                parsed = int(value.strip())
+            else:
+                parsed = int(str(value))
+            if parsed < 0:
+                raise ValueError(f"{field} must be non-negative")
+            return str(parsed)
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid integer for {field}: {value!r}"
+            raise ValueError(msg) from exc
     if field in {"thermal_delay_bootstrap", "thermal_delay_cognitive"}:
-        if isinstance(value, (int, float)):
-            return str(float(value))
-        if isinstance(value, str):
-            return str(float(value))
-        return str(value)
+        try:
+            if isinstance(value, (int, float)):
+                parsed = float(value)
+            elif isinstance(value, str):
+                parsed = float(value.strip())
+            else:
+                parsed = float(str(value))
+            if parsed < 0:
+                raise ValueError(f"{field} must be non-negative")
+            return str(parsed)
+        except (TypeError, ValueError) as exc:
+            msg = f"Invalid float for {field}: {value!r}"
+            raise ValueError(msg) from exc
+    if field == "logseq_graph_path":
+        return str(validate_logseq_graph_path(str(value)))
     return str(value).strip()
+
+
+def _require_ui_token(
+    x_matryca_token: Annotated[str | None, Header(alias="X-Matryca-Token")] = None,
+) -> None:
+    if not verify_ui_token(x_matryca_token):
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Matryca-Token")
+
+
+def _redact_log_line(line: str) -> str:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return sanitize_for_console(line)
+    if isinstance(payload, dict):
+        for key in ("prompt", "response"):
+            if key in payload:
+                payload[key] = "[redacted]"
+        return sanitize_for_console(json.dumps(payload, ensure_ascii=False))
+    return sanitize_for_console(line)
 
 
 def _update_dotenv(payload: PlumberConfigResponse) -> None:
@@ -491,6 +561,12 @@ def _safe_graph_analytics(
         return GraphAnalyticsResponse(status="offline")
 
 
+@app.get("/api/auth/session", response_model=AuthSessionResponse)
+def get_auth_session() -> AuthSessionResponse:
+    """Return the local UI bearer token for loopback clients."""
+    return AuthSessionResponse(token=resolve_ui_token())
+
+
 @app.get("/api/graph-analytics", response_model=GraphAnalyticsResponse)
 def get_graph_analytics() -> GraphAnalyticsResponse:
     """Return live graph topology telemetry for the configured ``LOGSEQ_GRAPH_PATH``."""
@@ -513,16 +589,23 @@ def get_state() -> DaemonStateResponse:
 
 @app.get("/api/logs", response_model=list[str])
 def get_logs() -> list[str]:
-    """Return the latest 50 non-empty operational log lines."""
+    """Return the latest 50 non-empty operational log lines (prompt/response redacted)."""
     token_logger = TokenLogger(log_path=resolve_plumber_log_path())
-    return [sanitize_for_console(line) for line in token_logger.tail_lines(50)]
+    return [_redact_log_line(line) for line in token_logger.tail_lines(50)]
 
 
 @app.get("/api/config", response_model=PlumberConfigResponse)
 def get_config() -> PlumberConfigResponse:
-    """Return live Plumber hardening thresholds loaded from environment."""
-    reload_plumber_dotenv(override=True)
-    return PlumberConfigResponse.from_lint_config(load_plumber_lint_config())
+    """Return Plumber settings as persisted in the repo ``.env`` file."""
+    env_path = _resolve_dotenv_path()
+    saved = dict(os.environ)
+    try:
+        if env_path.is_file():
+            load_dotenv(env_path, override=True)
+        return PlumberConfigResponse.from_lint_config(load_plumber_lint_config())
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 @app.get("/api/system/update-check", response_model=UpdateCheckResponse)
@@ -545,10 +628,15 @@ def get_lm_models(base_url: str | None = None) -> LmModelsResponse:
 
 
 @app.post("/api/config", response_model=PlumberConfigResponse)
-def post_config(payload: PlumberConfigResponse) -> PlumberConfigResponse:
+def post_config(
+    payload: PlumberConfigResponse,
+    _: None = Depends(_require_ui_token),
+) -> PlumberConfigResponse:
     """Update ``.env`` and in-process settings from the control-room form."""
     try:
         _update_dotenv(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write .env: {exc}") from exc
     return PlumberConfigResponse.from_lint_config(load_plumber_lint_config())
@@ -583,7 +671,7 @@ def _verify_daemon_launch(
     proc: subprocess.Popen[bytes],
     *,
     settle_s: float = 0.35,
-    verify_timeout_s: float = 2.0,
+    verify_timeout_s: float = 5.0,
 ) -> tuple[bool, str | None]:
     """Wait briefly and confirm the daemon child did not exit immediately (lock TOCTOU)."""
     time.sleep(settle_s)
@@ -596,18 +684,18 @@ def _verify_daemon_launch(
     deadline = time.monotonic() + verify_timeout_s
     while time.monotonic() < deadline:
         pid = read_pid_file(graph_root)
-        if pid is not None and is_process_alive(pid):
+        if pid is not None and is_plumber_process(pid):
             return True, None
         time.sleep(0.15)
     return False, "Daemon did not publish a live PID after launch"
 
 
 @app.post("/api/daemon/start", response_model=DaemonControlResponse)
-def start_daemon_endpoint() -> DaemonControlResponse:
+def start_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
     """Launch the maintenance daemon without blocking the FastAPI event loop."""
     graph_root = _resolve_graph_root_or_raise()
     existing = read_pid_file(graph_root)
-    if existing is not None and is_process_alive(existing):
+    if existing is not None and is_plumber_process(existing):
         return DaemonControlResponse(
             ok=False,
             code="already_running",
@@ -633,17 +721,19 @@ def start_daemon_endpoint() -> DaemonControlResponse:
 
 
 @app.post("/api/daemon/stop", response_model=DaemonControlResponse)
-def stop_daemon_endpoint() -> DaemonControlResponse:
+def stop_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
     """Signal the maintenance daemon to shut down gracefully."""
     graph_root = _resolve_graph_root_or_raise()
     result: dict[str, Any] = {}
 
     def _shutdown() -> None:
-        result.update(stop_daemon(graph_root))
+        result.update(
+            stop_daemon(graph_root, grace_seconds=DEFAULT_STOP_GRACE_SECONDS + 5.0),
+        )
 
     thread = threading.Thread(target=_shutdown, daemon=True, name="plumber-daemon-stop")
     thread.start()
-    thread.join(timeout=5.0)
+    thread.join(timeout=DEFAULT_STOP_GRACE_SECONDS + 10.0)
     if not result:
         return DaemonControlResponse(
             ok=False,

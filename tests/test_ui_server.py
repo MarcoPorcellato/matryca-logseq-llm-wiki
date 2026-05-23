@@ -10,7 +10,19 @@ import pytest
 from fastapi.testclient import TestClient
 from src.agent.maintenance_daemon import DaemonState, FileState, save_daemon_state
 from src.agent.plumber_config import reload_plumber_dotenv
-from src.cli.ui_server import app
+from src.cli.ui_auth import reset_ui_token_for_tests
+from src.cli.ui_server import LmModelsResponse, app
+
+
+@pytest.fixture(autouse=True)
+def ui_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MATRYCA_UI_TOKEN", "test-ui-token")
+    reset_ui_token_for_tests()
+
+
+@pytest.fixture
+def auth_headers() -> dict[str, str]:
+    return {"X-Matryca-Token": "test-ui-token"}
 
 
 @pytest.fixture
@@ -65,7 +77,7 @@ def test_get_state_returns_daemon_checkpoint(graph_root: Path) -> None:
     assert analytics["alias_count"] == 1
     assert analytics["semantic_links"] == 1
     assert analytics["semantic_cache_mb"] == 0.0
-    assert analytics["context_acceleration"] == 94.2
+    assert analytics["context_acceleration"] == 0.0
 
 
 def test_get_graph_analytics_returns_topology(graph_root: Path) -> None:
@@ -101,7 +113,7 @@ def test_get_state_survives_analytics_failure(
     assert response.status_code == 200
     analytics = response.json()["graph_analytics"]
     assert analytics["total_pages"] == 0
-    assert analytics["context_acceleration"] == 94.2
+    assert analytics["context_acceleration"] == 0.0
     assert analytics["status"] == "offline"
 
 
@@ -201,13 +213,16 @@ def test_get_config_returns_live_lint_settings(
 def test_post_config_updates_dotenv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text('LOGSEQ_GRAPH_PATH="/old/path"\n', encoding="utf-8")
+    graph = tmp_path / "graph"
+    (graph / "pages").mkdir(parents=True)
     monkeypatch.setattr("src.cli.ui_server._REPO_ROOT", tmp_path)
 
     body = {
-        "logseq_graph_path": "/new/graph",
+        "logseq_graph_path": str(graph),
         "lm_studio_url": "http://localhost:1234/v1",
         "lm_model": "qwen3-8b",
         "low_priority_mode": True,
@@ -229,18 +244,19 @@ def test_post_config_updates_dotenv(
     }
 
     with TestClient(app) as client:
-        response = client.post("/api/config", json=body)
+        response = client.post("/api/config", json=body, headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["logseq_graph_path"] == "/new/graph"
+    assert payload["logseq_graph_path"] == str(graph)
     assert payload["lm_model"] == "qwen3-8b"
     assert payload["backpropagate_links"] is True
     assert payload["compression_trigger"] == 90_000
     assert payload["compression_target"] == 25_000
     assert payload["enable_inline_semantic_corrections"] is True
     written = env_path.read_text(encoding="utf-8")
-    assert "LOGSEQ_GRAPH_PATH=/new/graph" in written
+    assert "LOGSEQ_GRAPH_PATH=" in written
+    assert str(graph) in written
     assert "MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS=90000" in written
     assert "MATRYCA_PLUMBER_COMPRESSION_TARGET_TOKENS=25000" in written
     assert "LLM_MODEL_NAME=qwen3-8b" in written
@@ -270,8 +286,8 @@ def test_get_lm_models_returns_openai_compatible_ids(monkeypatch: pytest.MonkeyP
             return payload
 
     monkeypatch.setattr(
-        "src.cli.ui_server.urllib.request.urlopen",
-        lambda *_args, **_kwargs: FakeResponse(),
+        "src.cli.ui_server._fetch_lm_studio_models",
+        lambda _base_url: LmModelsResponse(models=["gemma-4-e4b-it", "qwen3-8b"], error=None),
     )
 
     with TestClient(app) as client:
@@ -290,7 +306,10 @@ def test_get_lm_models_surfaces_connection_errors(monkeypatch: pytest.MonkeyPatc
     def _fail(*_args: object, **_kwargs: object) -> None:
         raise OSError("connection refused")
 
-    monkeypatch.setattr("src.cli.ui_server.urllib.request.urlopen", _fail)
+    monkeypatch.setattr(
+        "src.cli.ui_server._fetch_lm_studio_models",
+        lambda _base_url: LmModelsResponse(models=[], error="connection refused"),
+    )
 
     with TestClient(app) as client:
         response = client.get(
@@ -374,6 +393,7 @@ def test_get_update_check_returns_pypi_comparison(monkeypatch: pytest.MonkeyPatc
 def test_daemon_start_schedules_background_launch(
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
     launched: list[Path] = []
 
@@ -393,7 +413,7 @@ def test_daemon_start_schedules_background_launch(
     monkeypatch.setattr("src.cli.ui_server.read_pid_file", lambda _root: None)
 
     with TestClient(app) as client:
-        response = client.post("/api/daemon/start")
+        response = client.post("/api/daemon/start", headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()
@@ -402,15 +422,22 @@ def test_daemon_start_schedules_background_launch(
     assert launched == [graph_root]
 
 
+def test_daemon_start_requires_auth(graph_root: Path) -> None:
+    with TestClient(app) as client:
+        response = client.post("/api/daemon/start")
+    assert response.status_code == 401
+
+
 def test_daemon_start_reports_already_running(
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
     monkeypatch.setattr("src.cli.ui_server.read_pid_file", lambda _root: 9001)
-    monkeypatch.setattr("src.cli.ui_server.is_process_alive", lambda _pid: True)
+    monkeypatch.setattr("src.cli.ui_server.is_plumber_process", lambda _pid: True)
 
     with TestClient(app) as client:
-        response = client.post("/api/daemon/start")
+        response = client.post("/api/daemon/start", headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()
@@ -422,6 +449,7 @@ def test_daemon_start_reports_already_running(
 def test_daemon_start_reports_launch_failure(
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
     class FakeProc:
         def poll(self) -> int:
@@ -438,7 +466,7 @@ def test_daemon_start_reports_launch_failure(
     monkeypatch.setattr("src.cli.ui_server.read_pid_file", lambda _root: None)
 
     with TestClient(app) as client:
-        response = client.post("/api/daemon/start")
+        response = client.post("/api/daemon/start", headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()
@@ -449,17 +477,18 @@ def test_daemon_start_reports_launch_failure(
 def test_daemon_stop_invokes_shutdown(
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
     stopped: list[Path] = []
 
-    def fake_stop(root: Path) -> dict[str, object]:
+    def fake_stop(root: Path, **kwargs: object) -> dict[str, object]:
         stopped.append(root)
         return {"ok": True, "code": "signaled", "pid": 9001}
 
     monkeypatch.setattr("src.cli.ui_server.stop_daemon", fake_stop)
 
     with TestClient(app) as client:
-        response = client.post("/api/daemon/stop")
+        response = client.post("/api/daemon/stop", headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()

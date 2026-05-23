@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -10,6 +11,13 @@ from typing import Any, Literal, cast
 
 from ..graph.markdown_blocks import locate_block_by_uuid
 from ..graph.path_sandbox import graph_safe_page_path
+
+MAX_REGEX_PATTERN_LEN = 256
+MAX_REGEX_SCAN_BYTES = 5_000_000
+_REGEX_SCAN_TIMEOUT_SECONDS = 5.0
+_CATASTROPHIC_REGEX = re.compile(
+    r"(\(\?\:|\(\+\)|\(\*\)|\{,\}|\(\.\+\)\+|\(\.\*\)\+|\(\[[^\]]+\]\)\+)",
+)
 
 ReadGraphTarget = Literal[
     "page",
@@ -180,22 +188,35 @@ def read_block_ast_markdown(graph_path: str, query: str) -> str:
     )
 
 
-def format_regex_search_markdown(graph_path: str, pattern: str, *, limit: int = 50) -> str:
-    """Vault-wide ``pages/**/*.md`` line scan (orchestration; not the spatial parser)."""
+def _validate_regex_pattern(pattern: str) -> re.Pattern[str]:
+    if len(pattern) > MAX_REGEX_PATTERN_LEN:
+        msg = f"regex pattern exceeds max length ({MAX_REGEX_PATTERN_LEN})"
+        raise ValueError(msg)
+    if _CATASTROPHIC_REGEX.search(pattern):
+        msg = "regex pattern rejected (catastrophic backtracking risk)"
+        raise ValueError(msg)
     try:
-        compiled = re.compile(pattern)
+        return re.compile(pattern)
     except re.error as exc:
         msg = f"Invalid regex in `query`: {exc}"
         raise ValueError(msg) from exc
 
+
+def _scan_pages_for_regex(
+    graph_path: str,
+    compiled: re.Pattern[str],
+    *,
+    limit: int,
+) -> list[tuple[str, int, str]]:
     from ..graph.alias_index import is_scannable_graph_markdown
 
     root = Path(graph_path).expanduser().resolve(strict=False)
     pages = root / "pages"
     if not pages.is_dir():
-        return f"{graph_missing_text()}\n\n`pages/` directory is missing."
+        return []
 
     hits: list[tuple[str, int, str]] = []
+    scanned_bytes = 0
     for path in sorted(pages.rglob("*.md")):
         if not path.is_file() or not is_scannable_graph_markdown(path, root):
             continue
@@ -203,14 +224,36 @@ def format_regex_search_markdown(graph_path: str, pattern: str, *, limit: int = 
             body = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        scanned_bytes += len(body.encode("utf-8", errors="replace"))
+        if scanned_bytes > MAX_REGEX_SCAN_BYTES:
+            break
         rel = path.relative_to(root).as_posix()
         for line_no, line in enumerate(body.splitlines(), start=1):
             if compiled.search(line):
                 hits.append((rel, line_no, line.strip()[:240]))
                 if len(hits) >= limit:
-                    break
+                    return hits
         if len(hits) >= limit:
             break
+    return hits
+
+
+def format_regex_search_markdown(graph_path: str, pattern: str, *, limit: int = 50) -> str:
+    """Vault-wide ``pages/**/*.md`` line scan (orchestration; not the spatial parser)."""
+    compiled = _validate_regex_pattern(pattern)
+
+    root = Path(graph_path).expanduser().resolve(strict=False)
+    pages = root / "pages"
+    if not pages.is_dir():
+        return f"{graph_missing_text()}\n\n`pages/` directory is missing."
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_scan_pages_for_regex, graph_path, compiled, limit=limit)
+        try:
+            hits = future.result(timeout=_REGEX_SCAN_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError as exc:
+            msg = f"regex scan timed out after {_REGEX_SCAN_TIMEOUT_SECONDS}s"
+            raise ValueError(msg) from exc
 
     lines = [
         "# Regex search (pages/)",

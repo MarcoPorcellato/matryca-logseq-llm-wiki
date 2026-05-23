@@ -45,7 +45,7 @@ def test_compute_graph_analytics_counts_topology(tmp_path: Path) -> None:
     assert metrics.alias_count == 2
     assert metrics.semantic_links == 1
     assert metrics.semantic_cache_mb > 0.0
-    assert metrics.context_acceleration == 94.2
+    assert metrics.context_acceleration == round(100 / 3, 1)
     assert metrics.status == "online"
 
 

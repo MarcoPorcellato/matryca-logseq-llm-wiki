@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from pathlib import Path
 
 from ..config import MatrycaWikiConfig
@@ -17,6 +18,18 @@ _MAX_BYTES_TOTAL = 256 * 1024
 
 def _expand(path: str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
+
+
+def _is_allowed_l1_path(path: Path) -> bool:
+    """Restrict L1 memory reads to paths under the user home or system temp directory."""
+    resolved = path.resolve()
+    for root in (Path.home().resolve(), Path(tempfile.gettempdir()).resolve()):
+        try:
+            resolved.relative_to(root)
+            return path.exists()
+        except ValueError:
+            continue
+    return False
 
 
 def collect_l1_markdown_paths(
@@ -50,6 +63,8 @@ def collect_l1_markdown_paths(
         l1_raw = memory_path_from_yaml.strip()
     if l1_raw:
         p = _expand(l1_raw)
+        if not _is_allowed_l1_path(p):
+            return []
         if p.is_file():
             return [p] if p.suffix.lower() == ".md" else []
         if p.is_dir():
@@ -62,7 +77,7 @@ def collect_l1_markdown_paths(
     ).strip()
     if graph_raw:
         fallback = _expand(graph_raw).parent / "matryca-l1"
-        if fallback.is_dir():
+        if _is_allowed_l1_path(fallback) and fallback.is_dir():
             return sorted(fallback.glob("*.md"))[:_MAX_FILES]
 
     return []

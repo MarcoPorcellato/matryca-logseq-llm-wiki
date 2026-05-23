@@ -287,6 +287,14 @@ def atomic_write_bytes(
                 os.fsync(fh.fileno())
             os.replace(tmp_path, path)
             committed = True
+            try:
+                dir_fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         finally:
             if not committed:
                 tmp_path.unlink(missing_ok=True)

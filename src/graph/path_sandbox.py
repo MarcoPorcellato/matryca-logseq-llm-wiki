@@ -81,7 +81,7 @@ def normalize_daemon_file_key(graph_root: str | Path, key: str) -> str:
         try:
             return candidate.expanduser().resolve(strict=False).relative_to(root).as_posix()
         except ValueError:
-            return cleaned
+            return ""
     rel = Path(cleaned)
     if ".." in rel.parts:
         return cleaned
