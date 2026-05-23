@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import functools
+import importlib.metadata
+
 from .mldoc_properties import (
     normalize_logseq_property_key,
     parse_logseq_property_line,
@@ -10,6 +13,33 @@ from .mldoc_properties import (
 
 _MERGE_LIST_KEYS = frozenset({"alias", "aliases", "tags"})
 _RAW_FRONTMATTER_LIST_KEYS = frozenset({"alias", "aliases", "tags"})
+PLUMBER_CREATED_BY_KEY = "created-by"
+PLUMBER_CREATED_BY_VALUE = "plumber"
+PLUMBER_MADE_BY_KEY = "made-by"
+PLUMBER_MADE_BY_PREFIX = "matryca plumber"
+_PACKAGE_NAME = "matryca-logseq"
+
+
+@functools.lru_cache(maxsize=1)
+def get_plumber_version() -> str:
+    """Return the installed Matryca Plumber package version from ``pyproject.toml`` metadata."""
+    try:
+        return importlib.metadata.version(_PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _plumber_made_by_value() -> str:
+    return f"{PLUMBER_MADE_BY_PREFIX} v{get_plumber_version()}"
+
+
+def _is_legacy_plumber_authored(properties: dict[str, str]) -> bool:
+    return properties.get(PLUMBER_CREATED_BY_KEY, "").casefold() == PLUMBER_CREATED_BY_VALUE
+
+
+def _is_versioned_plumber_authored(properties: dict[str, str]) -> bool:
+    made_by = properties.get(PLUMBER_MADE_BY_KEY, "").casefold()
+    return made_by.startswith(PLUMBER_MADE_BY_PREFIX.casefold())
 
 
 def _strip_frontmatter_list_token(raw: str) -> str:
@@ -155,6 +185,19 @@ def inject_page_properties(markdown_text: str, properties: dict[str, str]) -> st
     return text
 
 
+def is_plumber_authored_page(markdown_text: str) -> bool:
+    """True when frontmatter marks the page as spawned by the Plumber agent."""
+    properties = page_property_keys(markdown_text)
+    return _is_versioned_plumber_authored(properties) or _is_legacy_plumber_authored(properties)
+
+
+def stamp_plumber_authored_page(markdown_text: str) -> str:
+    """Inject ``made-by:: matryca plumber v{version}`` at the top of a newly created page."""
+    if is_plumber_authored_page(markdown_text):
+        return markdown_text
+    return inject_page_property(markdown_text, PLUMBER_MADE_BY_KEY, _plumber_made_by_value())
+
+
 def page_property_keys(markdown_text: str) -> dict[str, str]:
     """Return ``key -> value`` for page-level frontmatter properties."""
     stripped = [ln.rstrip("\n") for ln in markdown_text.splitlines()]
@@ -162,7 +205,14 @@ def page_property_keys(markdown_text: str) -> dict[str, str]:
 
 
 __all__ = [
+    "PLUMBER_CREATED_BY_KEY",
+    "PLUMBER_CREATED_BY_VALUE",
+    "PLUMBER_MADE_BY_KEY",
+    "PLUMBER_MADE_BY_PREFIX",
+    "get_plumber_version",
     "inject_page_properties",
     "inject_page_property",
+    "is_plumber_authored_page",
     "page_property_keys",
+    "stamp_plumber_authored_page",
 ]

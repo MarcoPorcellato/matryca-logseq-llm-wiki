@@ -4,8 +4,14 @@ import type {
   ConnectionStatus,
   DaemonControlResponse,
   DaemonStateResponse,
+  GraphAnalytics,
   PlumberConfig,
   PlumberPollSnapshot,
+} from '../types/daemon'
+import {
+  hasGraphAnalyticsPayload,
+  normalizeDaemonState,
+  normalizeGraphAnalytics,
 } from '../types/daemon'
 
 const POLL_INTERVAL_MS = 1000
@@ -70,19 +76,58 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
   const poll = useCallback(async () => {
     let stateOk = false
     let logsOk = false
+    let configOk = false
 
     try {
-      const nextState = await fetchJson<DaemonStateResponse>(`${API_BASE}/api/state`)
+      const refreshedConfig = await fetchJson<PlumberConfig>(`${API_BASE}/api/config`)
+      if (mountedRef.current) {
+        setConfig(refreshedConfig)
+        configOk = true
+      }
+    } catch {
+      if (!mountedRef.current) return
+    }
+
+    try {
+      const rawState = await fetchJson<DaemonStateResponse & { graph_analytics?: unknown }>(
+        `${API_BASE}/api/state`,
+      )
+      let graphAnalytics: GraphAnalytics | undefined = hasGraphAnalyticsPayload(rawState.graph_analytics)
+        ? normalizeGraphAnalytics(rawState.graph_analytics)
+        : undefined
+
+      if (!graphAnalytics) {
+        try {
+          graphAnalytics = normalizeGraphAnalytics(
+            await fetchJson<GraphAnalytics>(`${API_BASE}/api/graph-analytics`),
+          )
+        } catch {
+          graphAnalytics = undefined
+        }
+      }
+
+      const nextState = normalizeDaemonState({
+        ...rawState,
+        graph_analytics: graphAnalytics,
+      })
       if (!mountedRef.current) return
       stateRef.current = nextState
       setState(nextState)
       stateOk = true
     } catch {
       if (!mountedRef.current) return
-      setConnectionStatus(stateRef.current ? 'connecting' : 'offline')
     }
 
     if (frozenRef.current) {
+      if (!mountedRef.current) return
+      if (stateOk || configOk) {
+        setConnectionStatus('live')
+        setLastUpdatedAt(new Date())
+      } else if (!stateRef.current) {
+        setConnectionStatus('offline')
+      } else {
+        setConnectionStatus('connecting')
+      }
       return
     }
 
@@ -95,17 +140,16 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
       logsOk = true
     } catch {
       if (!mountedRef.current) return
-      if (!stateOk) {
-        setConnectionStatus(stateRef.current ? 'connecting' : 'offline')
-      }
     }
 
     if (!mountedRef.current) return
-    if (stateOk || logsOk) {
+    if (stateOk || logsOk || configOk) {
       setConnectionStatus('live')
       setLastUpdatedAt(new Date())
     } else if (!stateRef.current) {
       setConnectionStatus('offline')
+    } else {
+      setConnectionStatus('connecting')
     }
   }, [])
 

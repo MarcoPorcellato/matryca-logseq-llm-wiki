@@ -38,7 +38,17 @@ export function computeProgressMetrics(state: DaemonStateResponse): ProgressMetr
 }
 
 export function formatTokenCount(value: number): string {
-  return value.toLocaleString('en-US')
+  if (value >= 1_000_000) {
+    return (value / 1_000_000).toFixed(1).replace('.', ',') + 'M';
+  }
+  if (value >= 1_000) {
+    return (value / 1_000).toFixed(1).replace('.', ',') + 'K';
+  }
+  return value.toString();
+}
+
+export function formatDecimalIt(value: number, digits = 1): string {
+  return value.toFixed(digits).replace('.', ',')
 }
 
 export function basenameFromPath(path: string | null): string | null {

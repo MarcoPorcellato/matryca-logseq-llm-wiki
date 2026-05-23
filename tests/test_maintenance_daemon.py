@@ -845,6 +845,10 @@ def test_maintenance_daemon_applies_semantic_lint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS", "false")
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.reload_plumber_dotenv",
+        lambda **_: None,
+    )
     log_path = tmp_path / "brain.log"
     logger = TokenLogger(log_path=log_path)
     path = _write_page(

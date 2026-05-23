@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..agent.maintenance_daemon import (
@@ -29,7 +30,12 @@ from ..agent.maintenance_daemon import (
     start_daemon_detached,
     stop_daemon,
 )
-from ..agent.plumber_config import PlumberLintConfig, load_plumber_lint_config
+from ..agent.plumber_config import (
+    PlumberLintConfig,
+    load_plumber_lint_config,
+    reload_plumber_dotenv,
+)
+from ..graph.graph_analytics import compute_graph_analytics
 from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
 
 FileStatus = Literal["processed", "skipped", "error", "pending"]
@@ -58,6 +64,23 @@ class FileStateResponse(BaseModel):
     error: str | None = None
 
 
+class GraphAnalyticsResponse(BaseModel):
+    """Live graph topology and GraphRAG telemetry for the control room."""
+
+    total_pages: int = 0
+    total_journals: int = 0
+    total_links: int = 0
+    human_pages: int = 0
+    human_links: int = 0
+    ai_pages: int = 0
+    ai_links: int = 0
+    ai_blocks_healed: int = 0
+    alias_count: int = 0
+    semantic_links: int = 0
+    semantic_cache_mb: float = 0.0
+    context_acceleration: float = 94.2
+
+
 class DaemonStateResponse(BaseModel):
     """Canonical Plumber checkpoint exposed to the React UI."""
 
@@ -74,10 +97,27 @@ class DaemonStateResponse(BaseModel):
     phase2_llm_turns: int = 0
     last_scan_at: str | None = None
     last_file: str | None = None
+    ai_pages_created: int = 0
+    ai_links_injected: int = 0
+    ai_blocks_healed: int = 0
+    hygiene_corrections: int = 0
+    graph_analytics: GraphAnalyticsResponse = Field(default_factory=GraphAnalyticsResponse)
 
     @classmethod
-    def from_daemon_state(cls, state: DaemonState) -> DaemonStateResponse:
-        return cls.model_validate(state.to_json())
+    def from_daemon_state(
+        cls,
+        state: DaemonState,
+        *,
+        graph_root: Path | None = None,
+    ) -> DaemonStateResponse:
+        payload = state.to_json()
+        if graph_root is not None:
+            payload["graph_analytics"] = _safe_graph_analytics(
+                graph_root,
+                ai_links_injected=state.ai_links_injected,
+                ai_blocks_healed=state.ai_blocks_healed,
+            ).model_dump()
+        return cls.model_validate(payload)
 
 
 class PlumberConfigResponse(BaseModel):
@@ -226,6 +266,13 @@ def _update_dotenv(payload: PlumberConfigResponse) -> None:
     load_dotenv(env_path, override=True)
 
 
+def _ensure_graph_root_env_loaded() -> None:
+    """Load repo ``.env`` when ``LOGSEQ_GRAPH_PATH`` is missing from the process env."""
+    if os.environ.get("LOGSEQ_GRAPH_PATH", "").strip():
+        return
+    reload_plumber_dotenv()
+
+
 app = FastAPI(title="Matryca Plumber API")
 
 app.add_middleware(
@@ -238,10 +285,47 @@ app.add_middleware(
 
 
 def _resolve_graph_root_or_raise() -> Path:
+    _ensure_graph_root_env_loaded()
     try:
         return resolve_graph_root()
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _safe_graph_analytics(
+    graph_root: Path,
+    *,
+    ai_links_injected: int = 0,
+    ai_blocks_healed: int = 0,
+) -> GraphAnalyticsResponse:
+    """Compute graph telemetry without failing the daemon state endpoint."""
+    try:
+        return GraphAnalyticsResponse.model_validate(
+            compute_graph_analytics(
+                graph_root,
+                ai_links_injected=ai_links_injected,
+                ai_blocks_healed=ai_blocks_healed,
+            ).to_dict()
+        )
+    except Exception as exc:
+        logger.warning(
+            "Graph analytics failed for graph_root={!r}: {}",
+            graph_root,
+            exc,
+        )
+        return GraphAnalyticsResponse()
+
+
+@app.get("/api/graph-analytics", response_model=GraphAnalyticsResponse)
+def get_graph_analytics() -> GraphAnalyticsResponse:
+    """Return live graph topology telemetry for the configured ``LOGSEQ_GRAPH_PATH``."""
+    graph_root = _resolve_graph_root_or_raise()
+    state = load_daemon_state(graph_root)
+    return _safe_graph_analytics(
+        graph_root,
+        ai_links_injected=state.ai_links_injected,
+        ai_blocks_healed=state.ai_blocks_healed,
+    )
 
 
 @app.get("/api/state", response_model=DaemonStateResponse)
@@ -249,7 +333,7 @@ def get_state() -> DaemonStateResponse:
     """Return the current daemon checkpoint from ``.matryca_daemon_state.json``."""
     graph_root = _resolve_graph_root_or_raise()
     state = load_daemon_state(graph_root)
-    return DaemonStateResponse.from_daemon_state(state)
+    return DaemonStateResponse.from_daemon_state(state, graph_root=graph_root)
 
 
 @app.get("/api/logs", response_model=list[str])
@@ -385,6 +469,9 @@ def _mount_frontend_assets() -> None:
     )
 
 
+_mount_frontend_assets()
+
+
 def _schedule_browser_open(
     url: str,
     *,
@@ -414,6 +501,7 @@ def run_ui_server(*, host: str = "127.0.0.1", port: int = 8000) -> None:
     """Start Uvicorn and open the Plumber control-room dashboard in the default browser."""
     import uvicorn
 
+    reload_plumber_dotenv()
     _ensure_frontend_built()
     _mount_frontend_assets()
 
@@ -431,9 +519,11 @@ __all__ = [
     "DaemonControlResponse",
     "DaemonStateResponse",
     "FileStateResponse",
+    "GraphAnalyticsResponse",
     "PlumberConfigResponse",
     "app",
     "get_config",
+    "get_graph_analytics",
     "get_logs",
     "get_state",
     "post_config",

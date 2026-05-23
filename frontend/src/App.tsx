@@ -1,6 +1,6 @@
 import { CognitiveProgressCard } from './components/CognitiveProgressCard'
 import { FeatureStatusBar } from './components/FeatureStatusBar'
-import { HardeningShieldCard } from './components/HardeningShieldCard'
+import { GraphInsightsCard } from './components/GraphInsightsCard'
 import { LiveConsole } from './components/LiveConsole'
 import { MasterHeader } from './components/MasterHeader'
 import { TokenCounterCard } from './components/TokenCounterCard'
@@ -34,23 +34,21 @@ export default function App() {
         onSaveConfig={saveConfig}
       />
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto rounded-2xl bg-theme-surface/35 p-4 dark:bg-theme-surface/15 lg:grid-cols-2">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto md:grid-cols-3">
         <FeatureStatusBar
           daemonStatus={state?.status}
           config={config}
           frozen={frozen}
         />
 
-        <div className="lg:col-span-2">
-          <CognitiveProgressCard state={state} />
-        </div>
-
         <TokenCounterCard
           promptTokens={state?.session_prompt_tokens ?? 0}
           completionTokens={state?.session_completion_tokens ?? 0}
         />
 
-        <HardeningShieldCard config={config} />
+        <CognitiveProgressCard state={state} />
+
+        <GraphInsightsCard state={state} />
 
         <LiveConsole logs={logs} />
       </div>

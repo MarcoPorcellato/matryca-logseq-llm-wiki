@@ -93,7 +93,7 @@ from .plumber_llm import (
     InferredPropertiesResult,
     MarpaClassificationResult,
 )
-from .plumber_modules import run_cognitive_lint_pipeline
+from .plumber_modules import CognitiveLintOutcome, run_cognitive_lint_pipeline
 from .plumber_modules.backlink_backpropagator import BacklinkCorrection, run_backlink_backpropagator
 from .plumber_modules.marpa_framework import (
     build_marpa_classify_system_prompt,
@@ -244,6 +244,10 @@ class DaemonState:
     phase2_llm_turns: int = 0
     last_scan_at: str | None = None
     last_file: str | None = None
+    ai_pages_created: int = 0
+    ai_links_injected: int = 0
+    ai_blocks_healed: int = 0
+    hygiene_corrections: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -259,6 +263,10 @@ class DaemonState:
             "phase2_llm_turns": self.phase2_llm_turns,
             "last_scan_at": self.last_scan_at,
             "last_file": self.last_file,
+            "ai_pages_created": self.ai_pages_created,
+            "ai_links_injected": self.ai_links_injected,
+            "ai_blocks_healed": self.ai_blocks_healed,
+            "hygiene_corrections": self.hygiene_corrections,
             "files": {
                 path: {
                     "mtime": rec.mtime,
@@ -302,7 +310,38 @@ class DaemonState:
             phase2_llm_turns=int(payload.get("phase2_llm_turns", 0)),
             last_scan_at=payload.get("last_scan_at"),
             last_file=payload.get("last_file"),
+            ai_pages_created=int(payload.get("ai_pages_created", 0)),
+            ai_links_injected=int(
+                payload.get("ai_links_injected", payload.get("links_backpropagated", 0))
+            ),
+            ai_blocks_healed=int(payload.get("ai_blocks_healed", payload.get("blocks_healed", 0))),
+            hygiene_corrections=int(payload.get("hygiene_corrections", 0)),
         )
+
+
+def record_daemon_impact(
+    state: DaemonState,
+    *,
+    cognitive: CognitiveLintOutcome | None = None,
+    lint: CorrectionOutcome | None = None,
+    links_backpropagated: int = 0,
+) -> None:
+    """Accumulate provenance counters from one Plumber cycle turn."""
+    if cognitive is not None:
+        state.ai_pages_created += len(cognitive.pages_created)
+        for detail in cognitive.details:
+            if (
+                detail.startswith("properties:")
+                or detail.startswith("alias:")
+                or detail.startswith("marpa:")
+            ):
+                state.hygiene_corrections += 1
+            elif detail.startswith("split:"):
+                state.ai_blocks_healed += 1
+    if lint is not None:
+        state.ai_blocks_healed += lint.applied
+    if links_backpropagated > 0:
+        state.ai_links_injected += links_backpropagated
 
 
 def resolve_graph_root() -> Path:
@@ -692,6 +731,7 @@ class CorrectionOutcome:
     skip_reasons: list[str] = field(default_factory=list)
     applied_details: list[str] = field(default_factory=list)
     write_aborted: bool = False
+    links_backpropagated: int = 0
 
 
 def _direct_block_property_lines(
@@ -923,6 +963,7 @@ def apply_semantic_page_result(
             atomic_write_bytes(page_path, body.encode("utf-8"), graph_root=graph_root)
     patch_generational_caches_for_paths(graph_root, [page_path])
 
+    links_backpropagated = 0
     if backpropagate and lint_outcome.applied > 0:
         backlink_corrections = [
             BacklinkCorrection(
@@ -934,7 +975,7 @@ def apply_semantic_page_result(
             )
             for item in result.semantic_corrections
         ]
-        run_backlink_backpropagator(
+        backprop_outcome = run_backlink_backpropagator(
             graph_root,
             page_path,
             page_title,
@@ -942,6 +983,10 @@ def apply_semantic_page_result(
             lint_outcome.applied_details,
             alias_index=alias_index,
         )
+        links_backpropagated = sum(
+            1 for detail in backprop_outcome.details if detail.startswith("backprop:")
+        )
+    lint_outcome.links_backpropagated = links_backpropagated
     return lint_outcome
 
 
@@ -1839,7 +1884,7 @@ class MaintenanceDaemon:
 
     def _sync_runtime_config(self, state: DaemonState) -> DaemonState:
         """Align LLM client and persisted state with the active environment block."""
-        reload_plumber_dotenv()
+        reload_plumber_dotenv(override=True)
         self._ensure_shared_token_logger()
         if isinstance(self.llm_client, InstructorLLMClient):
             self.llm_client.refresh_config()
@@ -2100,8 +2145,9 @@ class MaintenanceDaemon:
         llm_called_from_usage = False
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
+            cognitive_outcome: CognitiveLintOutcome | None = None
             if self.bootstrap_complete and lint_config.any_enabled:
-                run_cognitive_lint_pipeline(
+                cognitive_outcome = run_cognitive_lint_pipeline(
                     self.graph_root,
                     path,
                     title,
@@ -2109,6 +2155,7 @@ class MaintenanceDaemon:
                     llm=self.llm_client,
                     config=lint_config,
                 )
+                record_daemon_impact(state, cognitive=cognitive_outcome)
                 if isinstance(self.llm_client, InstructorLLMClient):
                     self._absorb_token_logger_delta(
                         self.llm_client.token_logger,
@@ -2145,6 +2192,11 @@ class MaintenanceDaemon:
                 backpropagate=enable_backprop,
                 alias_index=alias_index,
                 disable_semantic_corrections=lint_config.disable_semantic_corrections,
+            )
+            record_daemon_impact(
+                state,
+                lint=lint_outcome,
+                links_backpropagated=lint_outcome.links_backpropagated,
             )
             if lint_outcome.write_aborted:
                 llm_called_from_logger = (

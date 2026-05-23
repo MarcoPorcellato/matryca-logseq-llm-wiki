@@ -14,7 +14,7 @@ from ...graph.markdown_blocks import (
     locate_block_by_uuid,
     read_file_mtime,
 )
-from ...graph.page_properties import inject_page_property
+from ...graph.page_properties import inject_page_property, stamp_plumber_authored_page
 from ...graph.page_write_lock import page_rmw_lock
 from ._shared import ModuleOutcome, is_blank_page_content, sanitize_page_title
 
@@ -113,6 +113,7 @@ def run_auto_split(
                     "matryca-split",
                     "auto",
                 )
+                header = stamp_plumber_authored_page(header)
                 atomic_write_bytes(
                     new_page_path,
                     (header + "\n" + subtree).encode("utf-8"),

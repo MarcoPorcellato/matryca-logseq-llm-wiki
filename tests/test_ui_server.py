@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from src.agent.maintenance_daemon import DaemonState, FileState, save_daemon_state
+from src.agent.plumber_config import reload_plumber_dotenv
 from src.cli.ui_server import app
 
 
@@ -22,7 +23,12 @@ def graph_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_get_state_returns_daemon_checkpoint(graph_root: Path) -> None:
     page = graph_root / "pages" / "Alpha.md"
-    page.write_text("- alpha\n", encoding="utf-8")
+    page.write_text("- alpha\n- link [[Beta]]\n", encoding="utf-8")
+    beta = graph_root / "pages" / "Beta.md"
+    beta.write_text("- beta\nalias:: B\n", encoding="utf-8")
+    journal = graph_root / "journals" / "2026_05_23.md"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("- journal entry\n", encoding="utf-8")
     state = DaemonState(
         status="running",
         session_prompt_tokens=100,
@@ -46,10 +52,83 @@ def test_get_state_returns_daemon_checkpoint(graph_root: Path) -> None:
     assert payload["session_prompt_tokens"] == 100
     assert payload["session_completion_tokens"] == 25
     assert len(payload["files"]) == 1
+    analytics = payload["graph_analytics"]
+    assert analytics["total_pages"] == 2
+    assert analytics["human_pages"] == 2
+    assert analytics["human_links"] == 1
+    assert analytics["ai_pages"] == 0
+    assert analytics["ai_links"] == 0
+    assert analytics["ai_blocks_healed"] == 0
+    assert analytics["total_journals"] == 1
+    assert payload["ai_pages_created"] == 0
+    assert payload["ai_links_injected"] == 0
+    assert payload["ai_blocks_healed"] == 0
+    assert analytics["alias_count"] == 1
+    assert analytics["semantic_links"] == 1
+    assert analytics["semantic_cache_mb"] == 0.0
+    assert analytics["context_acceleration"] == 94.2
+
+
+def test_get_graph_analytics_returns_topology(graph_root: Path) -> None:
+    page = graph_root / "pages" / "Alpha.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("- alpha\n- link [[Beta]]\n", encoding="utf-8")
+    (graph_root / "pages" / "Beta.md").write_text("- beta\nalias:: B\n", encoding="utf-8")
+
+    with TestClient(app) as client:
+        response = client.get("/api/graph-analytics")
+
+    assert response.status_code == 200
+    analytics = response.json()
+    assert analytics["total_pages"] == 2
+    assert analytics["alias_count"] == 1
+    assert analytics["semantic_links"] == 1
+
+
+def test_get_state_survives_analytics_failure(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_daemon_state(graph_root, DaemonState(status="idle"))
+
+    def _boom(_root: Path) -> None:
+        raise RuntimeError("graph scan failed")
+
+    monkeypatch.setattr("src.cli.ui_server.compute_graph_analytics", _boom)
+
+    with TestClient(app) as client:
+        response = client.get("/api/state")
+
+    assert response.status_code == 200
+    analytics = response.json()["graph_analytics"]
+    assert analytics["total_pages"] == 0
+    assert analytics["context_acceleration"] == 94.2
+
+
+def test_get_state_loads_graph_root_from_repo_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph_root = tmp_path / "graph"
+    (graph_root / "pages").mkdir(parents=True)
+    (graph_root / "pages" / "Alpha.md").write_text("- alpha\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text(f'LOGSEQ_GRAPH_PATH="{graph_root}"\n', encoding="utf-8")
+    monkeypatch.setattr("src.agent.plumber_config._REPO_ROOT", tmp_path)
+    monkeypatch.delenv("LOGSEQ_GRAPH_PATH", raising=False)
+    reload_plumber_dotenv()
+
+    with TestClient(app) as client:
+        response = client.get("/api/state")
+
+    assert response.status_code == 200
+    analytics = response.json()["graph_analytics"]
+    assert analytics["total_pages"] == 1
 
 
 def test_get_state_requires_graph_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOGSEQ_GRAPH_PATH", raising=False)
+    monkeypatch.setattr("src.cli.ui_server.reload_plumber_dotenv", lambda: None)
 
     with TestClient(app) as client:
         response = client.get("/api/state")

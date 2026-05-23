@@ -18,14 +18,19 @@ def resolve_repo_dotenv_path() -> Path | None:
     return env_path if env_path.is_file() else None
 
 
-def reload_plumber_dotenv() -> None:
-    """Refresh ``os.environ`` from the repo ``.env`` (Settings Drawer writes here)."""
+def reload_plumber_dotenv(*, override: bool = False) -> None:
+    """Refresh ``os.environ`` from the repo ``.env`` (Settings Drawer writes here).
+
+    Defaults to ``override=False`` so explicit process env (shell, tests, subprocess
+    ``LOGSEQ_GRAPH_PATH=…``) wins over the file. Long-running daemon cycles pass
+    ``override=True`` to hot-reload UI and manual ``.env`` edits.
+    """
     env_path = resolve_repo_dotenv_path()
     if env_path is None:
         return
     from dotenv import load_dotenv
 
-    load_dotenv(env_path, override=True)
+    load_dotenv(env_path, override=override)
 
 
 def _env_bool(key: str, default: bool = False) -> bool:

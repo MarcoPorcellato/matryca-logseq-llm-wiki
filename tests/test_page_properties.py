@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from src.graph.page_properties import inject_page_properties, inject_page_property
+from src.graph.page_properties import (
+    get_plumber_version,
+    inject_page_properties,
+    inject_page_property,
+    is_plumber_authored_page,
+    stamp_plumber_authored_page,
+)
 
 
 def test_inject_page_property_places_frontmatter_before_first_bullet() -> None:
@@ -92,3 +98,38 @@ def test_inject_page_property_strips_markdown_from_tags_and_alias() -> None:
 
     merged = inject_page_property("tags:: learning\n", "tags", "#AI, [[Machine Learning]]")
     assert "tags:: learning, AI, Machine Learning" in merged
+
+
+def test_get_plumber_version_reads_package_metadata() -> None:
+    version = get_plumber_version()
+    assert version
+    assert version != "unknown"
+
+
+def test_stamp_plumber_authored_page_injects_versioned_made_by() -> None:
+    stamped = stamp_plumber_authored_page("- seeded concept\n")
+    version = get_plumber_version()
+    assert stamped.startswith(f"made-by:: matryca plumber v{version}")
+    assert is_plumber_authored_page(stamped)
+
+
+def test_stamp_plumber_authored_page_is_idempotent() -> None:
+    once = stamp_plumber_authored_page("- note\n")
+    twice = stamp_plumber_authored_page(once)
+    assert twice == once
+    assert once.count("made-by::") == 1
+
+
+def test_is_plumber_authored_page_recognizes_legacy_created_by() -> None:
+    legacy = "created-by:: plumber\n- legacy concept\n"
+    assert is_plumber_authored_page(legacy)
+
+
+def test_is_plumber_authored_page_recognizes_versioned_made_by() -> None:
+    versioned = "made-by:: matryca plumber v1.5.0\n- new concept\n"
+    assert is_plumber_authored_page(versioned)
+
+
+def test_is_plumber_authored_page_rejects_unrelated_frontmatter() -> None:
+    human = "author:: marco\n- human note\n"
+    assert not is_plumber_authored_page(human)
