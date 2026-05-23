@@ -4,8 +4,10 @@ import { useEffect, useState } from 'react'
 
 import type { ConnectionStatus, DaemonStateResponse, PlumberConfig } from '../types/daemon'
 import { isEngineActive } from '../types/daemon'
+import { useUpdateCheck } from '../hooks/useUpdateCheck'
 import { basenameFromPath } from '../utils/metrics'
 import { SettingsDrawer } from './SettingsDrawer'
+import { UpdateGuideModal } from './UpdateGuideModal'
 
 interface MasterHeaderProps {
   state: DaemonStateResponse | null
@@ -14,6 +16,7 @@ interface MasterHeaderProps {
   config: PlumberConfig | null
   frozen: boolean
   engineBusy: boolean
+  engineError: string | null
   onStartEngine: () => Promise<void>
   onStopEngine: () => Promise<void>
   onSaveConfig: (payload: PlumberConfig) => Promise<PlumberConfig | null>
@@ -82,11 +85,14 @@ export function MasterHeader({
   config,
   frozen,
   engineBusy,
+  engineError,
   onStartEngine,
   onStopEngine,
   onSaveConfig,
 }: MasterHeaderProps) {
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [updateModalOpen, setUpdateModalOpen] = useState(false)
+  const updateInfo = useUpdateCheck()
   const link = connectionBadge(connectionStatus)
   const daemonStatus = state?.status ?? 'stopped'
   const engineRunning = isEngineActive(daemonStatus) && !frozen
@@ -131,7 +137,16 @@ export function MasterHeader({
                 aria-label="Open settings"
               >
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.75">
-                  <path d="M4 6h16M4 12h16M4 18h16" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
+                  />
                 </svg>
               </button>
               <img
@@ -147,6 +162,15 @@ export function MasterHeader({
             </div>
 
             <div className="flex shrink-0 items-center gap-2">
+              {updateInfo?.update_available ? (
+                <button
+                  type="button"
+                  onClick={() => setUpdateModalOpen(true)}
+                  className="animate-pulse rounded-xl border border-theme-accent/80 bg-theme-accent px-3 py-2 text-xs font-bold text-theme-accent-foreground shadow-[0_0_18px_rgba(var(--theme-accent-rgb,59,130,246),0.45)] transition hover:bg-theme-accent/90"
+                >
+                  Update Available (v{updateInfo.latest_version})
+                </button>
+              ) : null}
               <ThemeToggleButton />
               <button
                 type="button"
@@ -158,13 +182,18 @@ export function MasterHeader({
               </button>
               <button
                 type="button"
-                disabled={engineBusy || frozen}
+                disabled={engineBusy || !isRunning}
                 onClick={() => void onStopEngine()}
                 className="inline-flex h-9 items-center justify-center rounded-md border border-red-500/60 bg-red-500/10 px-4 text-xs font-medium text-red-500 transition-all hover:border-red-500 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Stop Engine
               </button>
             </div>
+            {engineError ? (
+              <p className="text-right text-[11px] text-red-500" role="alert">
+                {engineError}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pl-[44px]">
@@ -213,6 +242,14 @@ export function MasterHeader({
         onClose={() => setDrawerOpen(false)}
         onSave={onSaveConfig}
       />
+
+      {updateInfo?.update_available ? (
+        <UpdateGuideModal
+          open={updateModalOpen}
+          latestVersion={updateInfo.latest_version}
+          onClose={() => setUpdateModalOpen(false)}
+        />
+      ) : null}
     </>
   )
 }

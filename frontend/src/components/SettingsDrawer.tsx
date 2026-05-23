@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
-import type { PlumberConfig } from '../types/daemon'
+import type { LmModelsResponse, PlumberConfig } from '../types/daemon'
+
+const API_BASE =
+  import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
 
 interface SettingsDrawerProps {
   open: boolean
@@ -13,7 +16,7 @@ interface FieldSpec {
   key: keyof PlumberConfig
   label: string
   description: string
-  type: 'text' | 'number' | 'boolean'
+  type: 'text' | 'number' | 'boolean' | 'lm-model'
   step?: string
   badge?: string
   badgeClass?: string
@@ -40,9 +43,15 @@ const INFRA_FIELDS: FieldSpec[] = [
   },
   {
     key: 'lm_studio_url',
-    label: 'LM Studio URL',
-    description: 'OpenAI-compatible endpoint for local inference.',
+    label: 'LLM Base URL',
+    description: 'OpenAI-compatible endpoint (LM Studio: :1234/v1, Ollama: :11434/v1).',
     type: 'text',
+  },
+  {
+    key: 'lm_model',
+    label: 'LLM Model',
+    description: 'Exact model id from your provider (Ollama requires the precise tag, e.g. llama3:8b).',
+    type: 'lm-model',
   },
   {
     key: 'thermal_delay_bootstrap',
@@ -187,6 +196,7 @@ function emptyDraft(): PlumberConfig {
   return {
     logseq_graph_path: '',
     lm_studio_url: 'http://localhost:1234/v1',
+    lm_model: 'local-model',
     low_priority_mode: true,
     thermal_delay_bootstrap: 2,
     thermal_delay_cognitive: 2,
@@ -211,6 +221,121 @@ function RiskBadge({ label, className }: { label: string; className: string }) {
     >
       {label}
     </span>
+  )
+}
+
+function LmModelField({
+  open,
+  field,
+  lmStudioUrl,
+  value,
+  onChange,
+}: {
+  open: boolean
+  field: FieldSpec
+  lmStudioUrl: string
+  value: string
+  onChange: (model: string) => void
+}) {
+  const [models, setModels] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadModels = useCallback(async () => {
+    const trimmedUrl = lmStudioUrl.trim()
+    if (!trimmedUrl) {
+      setModels([])
+      setError('LM Studio URL is required')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    try {
+      const params = new URLSearchParams({ base_url: trimmedUrl })
+      const response = await fetch(`${API_BASE}/api/lm-models?${params.toString()}`, {
+        headers: { Accept: 'application/json' },
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const payload = (await response.json()) as LmModelsResponse
+      if (payload.error) {
+        setError(payload.error)
+        setModels([])
+        return
+      }
+      setModels(payload.models)
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : 'Failed to load models')
+      setModels([])
+    } finally {
+      setLoading(false)
+    }
+  }, [lmStudioUrl])
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void loadModels()
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [open, loadModels])
+
+  const options = models.includes(value) || !value ? models : [value, ...models]
+  const useSelect = !error && options.length > 0
+
+  return (
+    <label className="block space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-theme-text">{field.label}</span>
+      </div>
+      <p className="text-[11px] leading-relaxed text-theme-muted">{field.description}</p>
+      <div className="flex items-center gap-2">
+        {useSelect ? (
+          <select
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            className={`${INPUT_CLASS} flex-1`}
+          >
+            {options.map((modelId) => (
+              <option key={modelId} value={modelId}>
+                {modelId}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={loading ? 'Loading models…' : 'Model id'}
+            className={`${INPUT_CLASS} flex-1`}
+          />
+        )}
+        <button
+          type="button"
+          onClick={() => void loadModels()}
+          disabled={loading}
+          aria-label="Refresh model list"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-theme-border/50 bg-theme-base text-xs text-theme-muted transition hover:text-theme-text disabled:opacity-50"
+        >
+          {loading ? '…' : '↻'}
+        </button>
+      </div>
+      {error ? (
+        <p className="text-[10px] text-amber-500">
+          Could not reach LM Studio ({error}). Enter the model id manually.
+        </p>
+      ) : null}
+      {!error && !loading && open && models.length === 0 ? (
+        <p className="text-[10px] text-theme-muted">
+          No loaded models found — load one in LM Studio, then refresh.
+        </p>
+      ) : null}
+    </label>
   )
 }
 
@@ -293,10 +418,23 @@ function TrustSectionCard({
           </p>
           <p className="mt-1 text-[11px] leading-relaxed text-theme-muted">{section.subtitle}</p>
         </div>
-        <span className="text-[10px] text-theme-muted">{expanded ? '−' : '+'}</span>
+        <span className="shrink-0 text-theme-muted">
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            className="h-[30px] w-[30px]"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            {expanded ? <path d="M18 15 12 9 6 15" /> : <path d="M6 9 12 15 18 9" />}
+          </svg>
+        </span>
       </button>
       {expanded ? (
-        <div className="space-y-5 border-t border-theme-border/50 px-4 py-4">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-5 border-t border-theme-border/50 px-4 py-4">
           {section.fields.map((field) => (
             <ConfigField key={field.key} field={field} draft={draft} onChange={onChange} />
           ))}
@@ -308,6 +446,7 @@ function TrustSectionCard({
 
 export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawerProps) {
   const [draft, setDraft] = useState<PlumberConfig>(emptyDraft())
+  const [isDirty, setIsDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -317,19 +456,21 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
   })
 
   useEffect(() => {
-    if (config) {
+    if (config && !isDirty) {
       setDraft(config)
     }
-  }, [config])
+  }, [config, isDirty])
 
   useEffect(() => {
     if (!open) {
       setSaved(false)
+      setIsDirty(false)
     }
   }, [open])
 
   const updateField = <K extends keyof PlumberConfig>(key: K, raw: PlumberConfig[K]) => {
     setDraft((prev) => ({ ...prev, [key]: raw }))
+    setIsDirty(true)
     setSaved(false)
   }
 
@@ -339,6 +480,7 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
     setSaving(false)
     if (result) {
       setSaved(true)
+      setIsDirty(false)
     }
   }
 
@@ -356,21 +498,43 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
         aria-hidden={!open}
       />
       <aside
-        className={`fixed top-0 left-0 z-50 h-full w-[28rem] max-w-[92vw] transform border-r border-theme-border bg-theme-surface shadow-2xl transition-transform duration-300 ease-out ${
+        className={`fixed inset-y-0 left-0 z-50 h-full w-full overflow-hidden rounded-r-3xl border-r border-theme-border/60 bg-theme-surface/95 shadow-2xl backdrop-blur-md transition-transform duration-300 ease-out ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
         aria-hidden={!open}
         aria-label="Environment settings"
       >
         <div className="flex h-full flex-col">
-          <header className="border-b border-theme-border/50 px-5 py-4">
-            <p className="text-[10px] font-medium uppercase tracking-[0.35em] text-theme-muted">
-              Configuration
-            </p>
-            <h2 className="mt-1 text-sm font-semibold text-theme-text">Trust &amp; Safety</h2>
-            <p className="mt-1 text-xs text-theme-muted">
-              Changes persist to <code className="text-theme-accent">.env</code> and hot-reload the daemon.
-            </p>
+          <header className="flex items-start justify-between gap-4 border-b border-theme-border/50 px-5 py-4">
+            <div className="min-w-0">
+              <p className="text-[10px] font-medium uppercase tracking-[0.35em] text-theme-muted">
+                Configuration
+              </p>
+              <h2 className="mt-1 text-sm font-semibold text-theme-text">Trust &amp; Safety</h2>
+              <p className="mt-1 text-xs text-theme-muted">
+                Changes persist to <code className="text-theme-accent">.env</code> and hot-reload the daemon.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close settings"
+              className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full bg-theme-text px-4 text-white shadow-sm transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-theme-accent/50 dark:text-theme-accent-foreground"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.2em]">CLOSE</span>
+            </button>
           </header>
 
           <form
@@ -385,10 +549,21 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
                 <p className="mb-3 text-[10px] font-medium uppercase tracking-[0.3em] text-theme-muted">
                   Infrastructure
                 </p>
-                <div className="space-y-5">
-                  {INFRA_FIELDS.map((field) => (
-                    <ConfigField key={field.key} field={field} draft={draft} onChange={updateField} />
-                  ))}
+                <div className="grid grid-cols-2 gap-x-6 gap-y-5">
+                  {INFRA_FIELDS.map((field) =>
+                    field.type === 'lm-model' ? (
+                      <LmModelField
+                        key={field.key}
+                        open={open}
+                        field={field}
+                        lmStudioUrl={draft.lm_studio_url}
+                        value={draft.lm_model}
+                        onChange={(model) => updateField('lm_model', model)}
+                      />
+                    ) : (
+                      <ConfigField key={field.key} field={field} draft={draft} onChange={updateField} />
+                    ),
+                  )}
                 </div>
               </div>
 

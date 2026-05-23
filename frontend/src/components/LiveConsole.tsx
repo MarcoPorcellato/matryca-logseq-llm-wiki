@@ -1,12 +1,14 @@
+import type { ReactNode } from 'react'
 import { useEffect, useRef } from 'react'
 
 interface LiveConsoleProps {
   logs: string[]
+  telemetry?: ReactNode
 }
 
 const STICK_TO_BOTTOM_THRESHOLD_PX = 48
 
-export function LiveConsole({ logs }: LiveConsoleProps) {
+export function LiveConsole({ logs, telemetry }: LiveConsoleProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
 
@@ -24,15 +26,8 @@ export function LiveConsole({ logs }: LiveConsoleProps) {
   }
 
   return (
-    <section className="col-span-full flex h-[min(480px,60vh)] flex-col overflow-hidden rounded-2xl bg-theme-surface/45 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20">
-      <div className="flex items-center gap-2 border-b border-theme-border/50 px-4 py-3">
-        <span className="h-2.5 w-2.5 rounded-full bg-red-500/80" />
-        <span className="h-2.5 w-2.5 rounded-full bg-theme-accent/80" />
-        <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/80" />
-        <p className="ml-2 text-xs font-medium uppercase tracking-[0.2em] text-theme-muted">
-          Live Console
-        </p>
-      </div>
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-theme-surface/45 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20">
+      {telemetry}
 
       <div
         ref={scrollRef}

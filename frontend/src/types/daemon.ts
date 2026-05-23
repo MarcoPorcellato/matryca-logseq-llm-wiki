@@ -182,6 +182,7 @@ export interface DaemonStateResponse {
 export interface PlumberConfig {
   logseq_graph_path: string
   lm_studio_url: string
+  lm_model: string
   low_priority_mode: boolean
   thermal_delay_bootstrap: number
   thermal_delay_cognitive: number
@@ -196,6 +197,20 @@ export interface PlumberConfig {
   backpropagate_links: boolean
   enable_inline_semantic_corrections: boolean
   auto_split: boolean
+}
+
+/** Mirrors ``LmModelsResponse`` from ``src/cli/ui_server.py``. */
+export interface LmModelsResponse {
+  models: string[]
+  error: string | null
+}
+
+/** Mirrors ``UpdateCheckResponse`` from ``src/cli/ui_server.py``. */
+export interface UpdateCheckResponse {
+  current_version: string
+  latest_version: string
+  update_available: boolean
+  pypi_url: string
 }
 
 export type ConnectionStatus = 'live' | 'connecting' | 'offline'
@@ -215,6 +230,7 @@ export interface PlumberPollSnapshot {
   lastUpdatedAt: Date | null
   frozen: boolean
   engineBusy: boolean
+  engineError: string | null
   startEngine: () => Promise<void>
   stopEngine: () => Promise<void>
   saveConfig: (payload: PlumberConfig) => Promise<PlumberConfig | null>

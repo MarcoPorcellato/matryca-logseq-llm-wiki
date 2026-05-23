@@ -14,13 +14,13 @@ export function FeatureStatusBar({ daemonStatus, config, frozen }: FeatureStatus
 
   return (
     <section
-      className="col-span-full rounded-2xl bg-theme-surface/45 px-4 py-3 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20"
+      className="shrink-0 rounded-2xl bg-theme-surface/45 px-4 py-3 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20"
       aria-label="Pipeline capability status"
     >
+      <span className="mb-2 block text-xs font-medium uppercase tracking-[0.25em] text-theme-muted">
+        Modules
+      </span>
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        <span className="mr-1 text-[10px] font-medium uppercase tracking-[0.3em] text-theme-muted">
-          Modules
-        </span>
         {PLUMBER_MODULE_SPECS.map((module) => {
           const configured = isPlumberModuleEnabled(config, module.configKey)
           const running = configured && engineLive

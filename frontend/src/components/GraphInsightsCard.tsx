@@ -100,7 +100,7 @@ export function GraphInsightsCard({ state }: GraphInsightsCardProps) {
               <p className="text-[10px] leading-relaxed text-theme-muted">
                 AI enhancements stamped on disk and accumulated in the incremental ledger.
               </p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="flex flex-col gap-3">
                 <AgentMetric value={analytics.ai_pages} label="AI Concepts Spawned" />
                 <AgentMetric value={analytics.ai_links} label="Links Reconnected" />
                 <AgentMetric value={analytics.ai_blocks_healed} label="Structured Bullets" />

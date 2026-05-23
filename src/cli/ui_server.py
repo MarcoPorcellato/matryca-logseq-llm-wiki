@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -28,18 +30,18 @@ from ..agent.maintenance_daemon import (
     load_daemon_state,
     read_pid_file,
     resolve_graph_root,
-    save_daemon_state,
-    start_daemon_detached,
     stop_daemon,
 )
 from ..agent.plumber_config import (
     PlumberLintConfig,
     load_plumber_lint_config,
     reload_plumber_dotenv,
+    resolve_llm_base_url,
 )
 from ..graph.graph_analytics import compute_graph_analytics
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
+from ..utils.updater import UpdateCheckResult, check_for_updates, update_check_to_dict
 
 FileStatus = Literal["processed", "skipped", "error", "pending"]
 DaemonStatusValue = Literal["running", "idle", "stopped", "error"]
@@ -114,8 +116,8 @@ class DaemonStateResponse(BaseModel):
         *,
         graph_root: Path | None = None,
     ) -> DaemonStateResponse:
-        if graph_root is not None and heal_daemon_state_ledger(graph_root, state):
-            save_daemon_state(graph_root, state)
+        if graph_root is not None:
+            heal_daemon_state_ledger(graph_root, state)
         payload = state.to_json()
         if graph_root is not None:
             payload["graph_analytics"] = _safe_graph_analytics(
@@ -133,6 +135,7 @@ class PlumberConfigResponse(BaseModel):
 
     logseq_graph_path: str
     lm_studio_url: str
+    lm_model: str
     low_priority_mode: bool
     thermal_delay_bootstrap: float
     thermal_delay_cognitive: float
@@ -154,6 +157,7 @@ class PlumberConfigResponse(BaseModel):
         return cls(
             logseq_graph_path=graph_path,
             lm_studio_url=config.lm_base_url,
+            lm_model=config.lm_model,
             low_priority_mode=config.low_priority_mode,
             thermal_delay_bootstrap=config.thermal_delay_bootstrap,
             thermal_delay_cognitive=config.thermal_delay_cognitive,
@@ -180,9 +184,86 @@ class DaemonControlResponse(BaseModel):
     pid: int | None = None
 
 
+class LmModelsResponse(BaseModel):
+    """OpenAI-compatible model ids exposed by the local inference server."""
+
+    models: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class UpdateCheckResponse(BaseModel):
+    """PyPI release comparison for guided in-place updates."""
+
+    current_version: str
+    latest_version: str
+    update_available: bool
+    pypi_url: str
+
+    @classmethod
+    def from_result(cls, result: UpdateCheckResult) -> UpdateCheckResponse:
+        payload = update_check_to_dict(result)
+        return cls.model_validate(payload)
+
+
+_LOCAL_LM_PROXY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _normalize_lm_proxy_host(host: str) -> str:
+    normalized = host.strip().lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        return normalized[1:-1]
+    return normalized
+
+
+def _is_safe_lm_proxy_host(host: str, *, configured_host: str) -> bool:
+    normalized = _normalize_lm_proxy_host(host)
+    if normalized in _LOCAL_LM_PROXY_HOSTS:
+        return True
+    configured = _normalize_lm_proxy_host(configured_host)
+    return bool(configured) and normalized == configured
+
+
+def _validate_lm_models_base_url(base_url: str) -> str:
+    """Restrict model discovery to local inference endpoints (SSRF guard)."""
+    parsed = urllib.parse.urlparse(base_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="base_url must use http or https")
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="base_url must include a host")
+    configured_host = urllib.parse.urlparse(load_plumber_lint_config().lm_base_url).hostname or ""
+    if not _is_safe_lm_proxy_host(hostname, configured_host=configured_host):
+        raise HTTPException(status_code=400, detail="base_url host is not allowed")
+    return resolve_llm_base_url(override=base_url)
+
+
+def _fetch_lm_studio_models(base_url: str) -> LmModelsResponse:
+    """Query ``GET /v1/models`` on an OpenAI-compatible local inference server."""
+    models_url = f"{resolve_llm_base_url(override=base_url).rstrip('/')}/models"
+    try:
+        request = urllib.request.Request(models_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return LmModelsResponse(models=[], error=str(exc))
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return LmModelsResponse(models=[], error="Unexpected response from inference server")
+
+    models: list[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip():
+                models.append(model_id.strip())
+    return LmModelsResponse(models=sorted(set(models)))
+
+
 _ENV_KEY_MAP: dict[str, str] = {
     "logseq_graph_path": "LOGSEQ_GRAPH_PATH",
-    "lm_studio_url": "MATRYCA_LM_BASE_URL",
+    "lm_studio_url": "LLM_BASE_URL",
+    "lm_model": "LLM_MODEL_NAME",
     "low_priority_mode": "MATRYCA_PLUMBER_LOW_PRIORITY_MODE",
     "thermal_delay_bootstrap": "MATRYCA_THERMAL_DELAY_BOOTSTRAP",
     "thermal_delay_cognitive": "MATRYCA_THERMAL_DELAY_COGNITIVE",
@@ -329,8 +410,7 @@ def get_graph_analytics() -> GraphAnalyticsResponse:
     """Return live graph topology telemetry for the configured ``LOGSEQ_GRAPH_PATH``."""
     graph_root = _resolve_graph_root_or_raise()
     state = load_daemon_state(graph_root)
-    if heal_daemon_state_ledger(graph_root, state):
-        save_daemon_state(graph_root, state)
+    heal_daemon_state_ledger(graph_root, state)
     return _safe_graph_analytics(
         graph_root,
         ai_links_injected=state.ai_links_injected,
@@ -359,6 +439,23 @@ def get_config() -> PlumberConfigResponse:
     return PlumberConfigResponse.from_lint_config(load_plumber_lint_config())
 
 
+@app.get("/api/system/update-check", response_model=UpdateCheckResponse)
+async def get_update_check() -> UpdateCheckResponse:
+    """Compare the installed package version against the latest PyPI release."""
+    result = await check_for_updates()
+    return UpdateCheckResponse.from_result(result)
+
+
+@app.get("/api/lm-models", response_model=LmModelsResponse)
+def get_lm_models(base_url: str | None = None) -> LmModelsResponse:
+    """Proxy local model discovery for the settings drawer (avoids browser CORS)."""
+    resolved = base_url.strip() if isinstance(base_url, str) and base_url.strip() else None
+    if resolved is None:
+        resolved = load_plumber_lint_config().lm_base_url
+    safe_base_url = _validate_lm_models_base_url(resolved)
+    return _fetch_lm_studio_models(safe_base_url)
+
+
 @app.post("/api/config", response_model=PlumberConfigResponse)
 def post_config(payload: PlumberConfigResponse) -> PlumberConfigResponse:
     """Update ``.env`` and in-process settings from the control-room form."""
@@ -378,6 +475,21 @@ def _daemon_control_response(result: dict[str, Any]) -> DaemonControlResponse:
     )
 
 
+def _spawn_plumber_daemon_cli(graph_root: Path) -> None:
+    """Launch ``plumber start`` in a fresh interpreter (never fork from Uvicorn threads)."""
+    env = os.environ.copy()
+    env["LOGSEQ_GRAPH_PATH"] = str(graph_root)
+    subprocess.Popen(
+        [sys.executable, "-m", "src.cli", "plumber", "start"],
+        cwd=str(_REPO_ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
 @app.post("/api/daemon/start", response_model=DaemonControlResponse)
 def start_daemon_endpoint() -> DaemonControlResponse:
     """Launch the maintenance daemon without blocking the FastAPI event loop."""
@@ -391,10 +503,7 @@ def start_daemon_endpoint() -> DaemonControlResponse:
             pid=existing,
         )
 
-    def _launch() -> None:
-        start_daemon_detached(graph_root)
-
-    threading.Thread(target=_launch, daemon=True, name="plumber-daemon-start").start()
+    _spawn_plumber_daemon_cli(graph_root)
     return DaemonControlResponse(
         ok=True,
         code="starting",
@@ -530,7 +639,9 @@ __all__ = [
     "DaemonStateResponse",
     "FileStateResponse",
     "GraphAnalyticsResponse",
+    "LmModelsResponse",
     "PlumberConfigResponse",
+    "UpdateCheckResponse",
     "app",
     "get_config",
     "get_graph_analytics",

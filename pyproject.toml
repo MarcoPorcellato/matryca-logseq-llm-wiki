@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.9.0,<14.0.0",
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn>=0.32.0,<1.0.0",
+    "httpx>=0.28.0,<1.0.0",
 ]
 
 [project.scripts]
@@ -99,6 +100,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "starlette.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "httpx.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

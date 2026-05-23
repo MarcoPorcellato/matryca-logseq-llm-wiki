@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -142,7 +141,8 @@ def test_get_config_returns_live_lint_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LOGSEQ_GRAPH_PATH", str(graph_root))
-    monkeypatch.setenv("MATRYCA_LM_BASE_URL", "http://localhost:9999/v1")
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:9999/v1")
+    monkeypatch.setenv("LLM_MODEL_NAME", "gemma-4-e4b-it")
     monkeypatch.setenv("MATRYCA_PLUMBER_LOW_PRIORITY_MODE", "false")
     monkeypatch.setenv("MATRYCA_THERMAL_DELAY_BOOTSTRAP", "3.5")
     monkeypatch.setenv("MATRYCA_THERMAL_DELAY_COGNITIVE", "1.5")
@@ -165,6 +165,7 @@ def test_get_config_returns_live_lint_settings(
     payload = response.json()
     assert payload["logseq_graph_path"] == str(graph_root)
     assert payload["lm_studio_url"] == "http://localhost:9999/v1"
+    assert payload["lm_model"] == "gemma-4-e4b-it"
     assert payload["low_priority_mode"] is False
     assert payload["thermal_delay_bootstrap"] == 3.5
     assert payload["thermal_delay_cognitive"] == 1.5
@@ -192,6 +193,7 @@ def test_post_config_updates_dotenv(
     body = {
         "logseq_graph_path": "/new/graph",
         "lm_studio_url": "http://localhost:1234/v1",
+        "lm_model": "qwen3-8b",
         "low_priority_mode": True,
         "thermal_delay_bootstrap": 2.5,
         "thermal_delay_cognitive": 1.25,
@@ -214,13 +216,137 @@ def test_post_config_updates_dotenv(
     assert response.status_code == 200
     payload = response.json()
     assert payload["logseq_graph_path"] == "/new/graph"
+    assert payload["lm_model"] == "qwen3-8b"
     assert payload["backpropagate_links"] is True
     assert payload["enable_inline_semantic_corrections"] is True
     written = env_path.read_text(encoding="utf-8")
     assert "LOGSEQ_GRAPH_PATH=/new/graph" in written
+    assert "LLM_MODEL_NAME=qwen3-8b" in written
     assert "MATRYCA_LINT_BACKPROPAGATE_LINKS=true" in written
     assert "MATRYCA_LINT_DISABLE_SEMANTIC_CORRECTIONS=false" in written
     assert "MATRYCA_LINT_PROPERTY_HYGIENE=true" in written
+
+
+def test_get_lm_models_returns_openai_compatible_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = json.dumps(
+        {
+            "data": [
+                {"id": "qwen3-8b", "object": "model"},
+                {"id": "gemma-4-e4b-it", "object": "model"},
+            ]
+        }
+    ).encode("utf-8")
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return payload
+
+    monkeypatch.setattr(
+        "src.cli.ui_server.urllib.request.urlopen",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/lm-models",
+            params={"base_url": "http://localhost:1234/v1"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"] is None
+    assert body["models"] == ["gemma-4-e4b-it", "qwen3-8b"]
+
+
+def test_get_lm_models_surfaces_connection_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("src.cli.ui_server.urllib.request.urlopen", _fail)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/lm-models",
+            params={"base_url": "http://localhost:1234/v1"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["models"] == []
+    assert "connection refused" in body["error"]
+
+
+def test_get_lm_models_rejects_unsafe_base_url(graph_root: Path) -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/lm-models",
+            params={"base_url": "http://169.254.169.254/latest/meta-data/"},
+        )
+
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+def test_get_lm_models_rejects_non_http_scheme() -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/lm-models",
+            params={"base_url": "file:///etc/passwd"},
+        )
+
+    assert response.status_code == 400
+    assert "http or https" in response.json()["detail"]
+
+
+def test_get_state_does_not_persist_healed_ledger(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DaemonState(status="running", ai_links_injected=999)
+    save_daemon_state(graph_root, state)
+    saved: list[tuple[Path, DaemonState]] = []
+
+    def _forbidden_save(root: Path, payload: DaemonState) -> None:
+        saved.append((root, payload))
+
+    monkeypatch.setattr("src.agent.maintenance_daemon.save_daemon_state", _forbidden_save)
+
+    with TestClient(app) as client:
+        response = client.get("/api/state")
+        client.get("/api/graph-analytics")
+
+    assert response.status_code == 200
+    assert saved == []
+
+
+def test_get_update_check_returns_pypi_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.utils.updater import UpdateCheckResult
+
+    async def fake_check(*, force_refresh: bool = False) -> UpdateCheckResult:
+        return UpdateCheckResult(
+            current_version="1.5.0",
+            latest_version="1.6.0",
+            update_available=True,
+            pypi_url="https://pypi.org/project/matryca-logseq/",
+        )
+
+    monkeypatch.setattr("src.cli.ui_server.check_for_updates", fake_check)
+
+    with TestClient(app) as client:
+        response = client.get("/api/system/update-check")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_version"] == "1.5.0"
+    assert payload["latest_version"] == "1.6.0"
+    assert payload["update_available"] is True
+    assert payload["pypi_url"] == "https://pypi.org/project/matryca-logseq/"
 
 
 def test_daemon_start_schedules_background_launch(
@@ -229,11 +355,10 @@ def test_daemon_start_schedules_background_launch(
 ) -> None:
     launched: list[Path] = []
 
-    def fake_start(root: Path) -> dict[str, object]:
+    def fake_spawn(root: Path) -> None:
         launched.append(root)
-        return {"ok": True, "code": "started", "pid": 4242}
 
-    monkeypatch.setattr("src.cli.ui_server.start_daemon_detached", fake_start)
+    monkeypatch.setattr("src.cli.ui_server._spawn_plumber_daemon_cli", fake_spawn)
     monkeypatch.setattr("src.cli.ui_server.read_pid_file", lambda _root: None)
 
     with TestClient(app) as client:
@@ -243,7 +368,6 @@ def test_daemon_start_schedules_background_launch(
     payload = response.json()
     assert payload["ok"] is True
     assert payload["code"] == "starting"
-    time.sleep(0.15)
     assert launched == [graph_root]
 
 

@@ -210,9 +210,10 @@ def test_token_logger_writes_compression_warning(tmp_path: Path) -> None:
 
 def test_load_plumber_config_compression_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MATRYCA_PLUMBER_CONTEXT_COMPRESSION", raising=False)
+    monkeypatch.delenv("LLM_MODEL_NAME", raising=False)
     monkeypatch.delenv("MATRYCA_LM_MODEL", raising=False)
     monkeypatch.delenv("MATRYCA_PLUMBER_MAPREDUCE_TRIGGER_CHARS", raising=False)
-    from src.agent.plumber_config import DEFAULT_LM_MODEL, load_plumber_lint_config
+    from src.agent.plumber_config import DEFAULT_LLM_MODEL_NAME, load_plumber_lint_config
 
     cfg = load_plumber_lint_config()
     assert cfg.context_compression is False
@@ -220,13 +221,17 @@ def test_load_plumber_config_compression_defaults(monkeypatch: pytest.MonkeyPatc
     assert cfg.compression_target == 30_000
     assert cfg.mapreduce_trigger_chars == 25_000
     assert cfg.mapreduce_chunk_chars == 15_000
-    assert cfg.lm_model == DEFAULT_LM_MODEL
+    assert cfg.lm_model == DEFAULT_LLM_MODEL_NAME
 
 
 def test_resolve_lm_model_respects_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.agent.plumber_config import DEFAULT_LM_MODEL, resolve_lm_model
+    from src.agent.plumber_config import DEFAULT_LLM_MODEL_NAME, resolve_llm_model_name
 
-    monkeypatch.setenv("MATRYCA_LM_MODEL", "gemma-4-e4b-it")
-    assert resolve_lm_model() == "gemma-4-e4b-it"
+    monkeypatch.setenv("LLM_MODEL_NAME", "gemma-4-e4b-it")
+    assert resolve_llm_model_name() == "gemma-4-e4b-it"
+    monkeypatch.delenv("LLM_MODEL_NAME", raising=False)
     monkeypatch.delenv("MATRYCA_LM_MODEL", raising=False)
-    assert resolve_lm_model() == DEFAULT_LM_MODEL
+    assert resolve_llm_model_name() == DEFAULT_LLM_MODEL_NAME
+
+    monkeypatch.setenv("MATRYCA_LM_MODEL", "legacy-model")
+    assert resolve_llm_model_name() == "legacy-model"

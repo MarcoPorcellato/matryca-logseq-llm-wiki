@@ -45,6 +45,7 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
   const [frozen, setFrozen] = useState(true)
   const [engineBusy, setEngineBusy] = useState(false)
+  const [engineError, setEngineError] = useState<string | null>(null)
 
   const stateRef = useRef<DaemonStateResponse | null>(null)
   const logsRef = useRef<string[]>([])
@@ -200,18 +201,20 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
 
   const startEngine = useCallback(async () => {
     setEngineBusy(true)
+    setEngineError(null)
     try {
       const result = await fetchJson<DaemonControlResponse>(`${API_BASE}/api/daemon/start`, {
         method: 'POST',
       })
       if (!isStartAccepted(result)) {
+        setEngineError(result.message ?? 'Failed to start engine')
         return
       }
       setTelemetryLive(true)
       await poll()
-    } catch {
+    } catch (error) {
       if (mountedRef.current) {
-        setTelemetryLive(false)
+        setEngineError(error instanceof Error ? error.message : 'Failed to start engine')
       }
     } finally {
       if (mountedRef.current) {
@@ -222,12 +225,21 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
 
   const stopEngine = useCallback(async () => {
     setEngineBusy(true)
-    setTelemetryLive(false)
+    setEngineError(null)
     try {
-      await fetchJson<DaemonControlResponse>(`${API_BASE}/api/daemon/stop`, {
+      const result = await fetchJson<DaemonControlResponse>(`${API_BASE}/api/daemon/stop`, {
         method: 'POST',
       })
+      if (!result.ok) {
+        setEngineError(result.message ?? 'Failed to stop engine')
+        return
+      }
+      setTelemetryLive(false)
       await poll()
+    } catch (error) {
+      if (mountedRef.current) {
+        setEngineError(error instanceof Error ? error.message : 'Failed to stop engine')
+      }
     } finally {
       if (mountedRef.current) {
         setEngineBusy(false)
@@ -259,6 +271,7 @@ export function usePlumberPolling(intervalMs = POLL_INTERVAL_MS): PlumberPollSna
     lastUpdatedAt,
     frozen,
     engineBusy,
+    engineError,
     startEngine,
     stopEngine,
     saveConfig,

@@ -7,8 +7,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_LM_BASE_URL = "http://localhost:1234/v1"
-DEFAULT_LM_MODEL = "qwen2.5-coder-7b"
+DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"
+DEFAULT_LLM_MODEL_NAME = "local-model"
+DEFAULT_LLM_API_KEY = "dummy-key"
+
+# Backward-compatible aliases for legacy imports and persisted state.
+DEFAULT_LM_BASE_URL = DEFAULT_LLM_BASE_URL
+DEFAULT_LM_MODEL = DEFAULT_LLM_MODEL_NAME
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -68,35 +73,53 @@ def _env_str(key: str, default: str) -> str:
     return default
 
 
-def resolve_lm_model(*, override: str | None = None) -> str:
-    """Resolve the active LM Studio model id from env or explicit override."""
+def resolve_llm_model_name(*, override: str | None = None) -> str:
+    """Resolve the active OpenAI-compatible model id from env or explicit override."""
     if override is not None and override.strip():
         return override.strip()
-    return _env_str("MATRYCA_LM_MODEL", DEFAULT_LM_MODEL)
+    canonical = os.environ.get("LLM_MODEL_NAME", "").strip()
+    if canonical:
+        return canonical
+    return _env_str("MATRYCA_LM_MODEL", DEFAULT_LLM_MODEL_NAME)
 
 
-def resolve_lm_base_url(*, override: str | None = None) -> str:
-    """Resolve LM Studio OpenAI-compatible base URL (always ends with ``/v1``)."""
-    raw = (
-        override.strip()
-        if override is not None and override.strip()
-        else _env_str(
-            "MATRYCA_LM_BASE_URL",
-            DEFAULT_LM_BASE_URL,
-        )
-    )
+def resolve_lm_model(*, override: str | None = None) -> str:
+    """Backward-compatible alias for :func:`resolve_llm_model_name`."""
+    return resolve_llm_model_name(override=override)
+
+
+def resolve_llm_base_url(*, override: str | None = None) -> str:
+    """Resolve OpenAI-compatible base URL (always ends with ``/v1``)."""
+    if override is not None and override.strip():
+        raw = override.strip()
+    else:
+        canonical = os.environ.get("LLM_BASE_URL", "").strip()
+        raw = canonical if canonical else _env_str("MATRYCA_LM_BASE_URL", DEFAULT_LLM_BASE_URL)
     base = raw.rstrip("/")
     if not base.endswith("/v1"):
         base = f"{base}/v1"
     return base
 
 
+def resolve_lm_base_url(*, override: str | None = None) -> str:
+    """Backward-compatible alias for :func:`resolve_llm_base_url`."""
+    return resolve_llm_base_url(override=override)
+
+
+def resolve_llm_api_key(*, override: str | None = None) -> str:
+    """Resolve API key for OpenAI-compatible local providers (often ignored server-side)."""
+    if override is not None and override.strip():
+        return override.strip()
+    return _env_str("LLM_API_KEY", DEFAULT_LLM_API_KEY)
+
+
 @dataclass(frozen=True, slots=True)
 class PlumberLintConfig:
     """Feature flags and thresholds for advanced Plumber lint modules."""
 
-    lm_model: str = DEFAULT_LM_MODEL
-    lm_base_url: str = DEFAULT_LM_BASE_URL
+    lm_model: str = DEFAULT_LLM_MODEL_NAME
+    lm_base_url: str = DEFAULT_LLM_BASE_URL
+    llm_api_key: str = DEFAULT_LLM_API_KEY
     marpa_framework: bool = False
     heal_dangling: bool = False
     dangling_max_words: int = 50
@@ -176,8 +199,9 @@ def load_plumber_lint_config(*, reload_env: bool = False) -> PlumberLintConfig:
                 rules_path = candidate
 
     return PlumberLintConfig(
-        lm_model=resolve_lm_model(),
-        lm_base_url=resolve_lm_base_url(),
+        lm_model=resolve_llm_model_name(),
+        lm_base_url=resolve_llm_base_url(),
+        llm_api_key=resolve_llm_api_key(),
         marpa_framework=_env_bool("MATRYCA_LINT_MARPA_FRAMEWORK"),
         heal_dangling=_env_bool("MATRYCA_LINT_HEAL_DANGLING"),
         dangling_max_words=_env_int("MATRYCA_LINT_DANGLING_MAX_WORDS", 50),
@@ -206,6 +230,9 @@ def load_plumber_lint_config(*, reload_env: bool = False) -> PlumberLintConfig:
 
 
 __all__ = [
+    "DEFAULT_LLM_API_KEY",
+    "DEFAULT_LLM_BASE_URL",
+    "DEFAULT_LLM_MODEL_NAME",
     "DEFAULT_LM_BASE_URL",
     "DEFAULT_LM_MODEL",
     "PlumberLintConfig",
@@ -214,6 +241,9 @@ __all__ = [
     "bootstrap_phase_lint_config",
     "load_plumber_lint_config",
     "reload_plumber_dotenv",
+    "resolve_llm_api_key",
+    "resolve_llm_base_url",
+    "resolve_llm_model_name",
     "resolve_lm_base_url",
     "resolve_lm_model",
     "resolve_repo_dotenv_path",

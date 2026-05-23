@@ -19,16 +19,16 @@ function TokenReadout({
   flash: boolean
 }) {
   return (
-    <div className="rounded-xl border border-theme-border/50 bg-theme-base p-4">
-      <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-theme-muted">{label}</p>
-      <p
-        className={`mt-2 font-mono text-3xl font-bold tabular-nums ${
+    <span className="inline-flex items-baseline gap-2 tabular-nums">
+      <span className="text-[10px] uppercase tracking-wider text-theme-muted">{label}</span>
+      <span
+        className={`font-semibold text-theme-text ${
           flash ? 'animate-token-flash text-emerald-500' : 'text-emerald-500'
         }`}
       >
         {formatTokenCount(value)}
-      </p>
-    </div>
+      </span>
+    </span>
   )
 }
 
@@ -62,19 +62,21 @@ export function TokenCounterCard({ promptTokens, completionTokens }: TokenCounte
   }, [promptTokens, completionTokens, sessionTotal])
 
   return (
-    <section className="rounded-2xl bg-theme-surface/45 p-5 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20">
-      <h2 className="text-xs font-medium uppercase tracking-[0.25em] text-theme-muted">
-        Token Counter — Fuel Gauge
-      </h2>
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <TokenReadout label="Prompt Tokens" value={promptTokens} flash={flashing.prompt} />
-        <TokenReadout
-          label="Completion Tokens"
-          value={completionTokens}
-          flash={flashing.completion}
-        />
-        <TokenReadout label="Session Total" value={sessionTotal} flash={flashing.total} />
-      </div>
-    </section>
+    <div
+      role="status"
+      aria-label="Session token telemetry"
+      className="flex flex-row flex-wrap items-center gap-x-6 gap-y-1 rounded-t-md border-b border-theme-border/40 bg-theme-surface/50 px-4 py-2 font-mono text-xs text-theme-muted"
+    >
+      <span className="text-[10px] uppercase tracking-[0.2em] text-theme-muted/80">Telemetry</span>
+      <TokenReadout label="Tokens In" value={promptTokens} flash={flashing.prompt} />
+      <span className="hidden text-theme-border/60 sm:inline" aria-hidden>
+        |
+      </span>
+      <TokenReadout label="Tokens Out" value={completionTokens} flash={flashing.completion} />
+      <span className="hidden text-theme-border/60 sm:inline" aria-hidden>
+        |
+      </span>
+      <TokenReadout label="Session Σ" value={sessionTotal} flash={flashing.total} />
+    </div>
   )
 }

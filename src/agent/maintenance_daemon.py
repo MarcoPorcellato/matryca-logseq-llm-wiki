@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import select
 import signal
 import sys
 import threading
@@ -81,7 +82,7 @@ from ..graph.semantic_clustering import (
 )
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.json_repair import parse_llm_json
-from ..utils.logging_config import configure_loguru
+from ..utils.logging_config import configure_loguru, reset_loguru_configuration
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -92,6 +93,7 @@ from .context_compressor import (
 )
 from .llm_context_payload import prepare_llm_context_payload
 from .plumber_config import (
+    DEFAULT_LLM_MODEL_NAME,
     DEFAULT_LM_BASE_URL,
     DEFAULT_LM_MODEL,
     PlumberLintConfig,
@@ -100,8 +102,9 @@ from .plumber_config import (
     bootstrap_phase_lint_config,
     load_plumber_lint_config,
     reload_plumber_dotenv,
-    resolve_lm_base_url,
-    resolve_lm_model,
+    resolve_llm_api_key,
+    resolve_llm_base_url,
+    resolve_llm_model_name,
     resolve_repo_dotenv_path,
 )
 from .plumber_llm import (
@@ -132,13 +135,22 @@ ThermalProfile = Literal["none", "bootstrap", "cognitive"]
 STATE_FILENAME = ".matryca_daemon_state.json"
 STATE_TMP_FILENAME = f"{STATE_FILENAME}.tmp"
 PID_FILENAME = ".matryca_plumber_daemon.pid"
+DAEMON_LOCK_FILENAME = ".matryca_plumber_daemon.lock"
 STRUCTURAL_LINT_HEADING = "### Matryca Structural Lint"
 STRUCTURAL_LINT_HEADER = f"- {STRUCTURAL_LINT_HEADING}"
-DEFAULT_MODEL = DEFAULT_LM_MODEL  # backward-compatible alias for CLI/TUI
+DEFAULT_MODEL = DEFAULT_LLM_MODEL_NAME  # backward-compatible alias for CLI/TUI
 DEFAULT_POLL_SECONDS = 30.0
 MATRYCA_GENERATED_PAGE_TITLES = frozenset(
     {"Matryca Master Index", "Matryca Graph Insights"},
 )
+
+_fcntl: Any
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows and other non-Unix platforms
+    _fcntl = None
+
+_daemon_process_lock_fd: int | None = None
 
 
 def _semantic_index_section_present(content: str) -> bool:
@@ -431,9 +443,42 @@ def pid_path(graph_root: Path) -> Path:
     return graph_root / PID_FILENAME
 
 
+def daemon_lock_path(graph_root: Path) -> Path:
+    return graph_root / DAEMON_LOCK_FILENAME
+
+
+def _try_acquire_daemon_process_lock(graph_root: Path) -> int | None:
+    """Acquire an exclusive daemon lock; return ``None`` when another process holds it."""
+    if _fcntl is None:
+        return -1
+    path = daemon_lock_path(graph_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _release_daemon_process_lock(graph_root: Path) -> None:
+    """Drop the cross-process daemon lock held by this process."""
+    global _daemon_process_lock_fd
+    if _daemon_process_lock_fd is not None and _daemon_process_lock_fd >= 0:
+        with contextlib.suppress(OSError):
+            if _fcntl is not None:
+                _fcntl.flock(_daemon_process_lock_fd, _fcntl.LOCK_UN)
+            os.close(_daemon_process_lock_fd)
+        _daemon_process_lock_fd = None
+    lock_path = daemon_lock_path(graph_root)
+    with contextlib.suppress(OSError):
+        lock_path.unlink(missing_ok=True)
+
+
 def sync_daemon_state_from_env(state: DaemonState) -> DaemonState:
-    """Ensure persisted daemon state reflects the current ``MATRYCA_LM_MODEL`` env value."""
-    state.model = resolve_lm_model()
+    """Ensure persisted daemon state reflects the current ``LLM_MODEL_NAME`` env value."""
+    state.model = resolve_llm_model_name()
     return state
 
 
@@ -1094,21 +1139,24 @@ def append_semantic_index(
 
 
 class InstructorLLMClient:
-    """Local LM Studio client using instructor + OpenAI SDK."""
+    """OpenAI-compatible local LLM client (LM Studio, Ollama, …) via instructor + OpenAI SDK."""
 
     def __init__(
         self,
         *,
         base_url: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
         token_logger: TokenLogger | None = None,
     ) -> None:
         self.token_logger = token_logger or TokenLogger()
         self._explicit_model = model
         self._explicit_base_url = base_url
-        self.base_url = resolve_lm_base_url(override=base_url)
-        self.model = resolve_lm_model(override=model)
-        self._raw_client: OpenAI = OpenAI(base_url=self.base_url, api_key="lm-studio")
+        self._explicit_api_key = api_key
+        self.base_url = resolve_llm_base_url(override=base_url)
+        self.model = resolve_llm_model_name(override=model)
+        self.api_key = resolve_llm_api_key(override=api_key)
+        self._raw_client: OpenAI = OpenAI(base_url=self.base_url, api_key=self.api_key)
         self._execution_history: list[ChatMessage] = []
         self._runtime_lint_config: PlumberLintConfig | None = None
 
@@ -1124,13 +1172,16 @@ class InstructorLLMClient:
         *,
         model: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
     ) -> None:
-        """Reload LM Studio settings from env (explicit ctor overrides win over env)."""
+        """Reload LLM settings from env (explicit ctor overrides win over env)."""
         resolved_model = model if model is not None else self._explicit_model
         resolved_base = base_url if base_url is not None else self._explicit_base_url
-        self.base_url = resolve_lm_base_url(override=resolved_base)
-        self.model = resolve_lm_model(override=resolved_model)
-        self._raw_client = OpenAI(base_url=self.base_url, api_key="lm-studio")
+        resolved_api_key = api_key if api_key is not None else self._explicit_api_key
+        self.base_url = resolve_llm_base_url(override=resolved_base)
+        self.model = resolve_llm_model_name(override=resolved_model)
+        self.api_key = resolve_llm_api_key(override=resolved_api_key)
+        self._raw_client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
     def reset_execution_history(self) -> None:
         """Drop per-page session history (constant memory footprint across daemon uptime)."""
@@ -1224,7 +1275,7 @@ class InstructorLLMClient:
         return usage
 
     def _compress_history_via_llm(self, compression_prompt: str) -> str:
-        """Send isolated history to LM Studio for epistemic condensation."""
+        """Send isolated history to the local LLM for epistemic condensation."""
         started = time.perf_counter()
         response = self._raw_client.chat.completions.create(
             model=self.model,
@@ -1316,7 +1367,10 @@ class InstructorLLMClient:
         log_tokens: bool = True,
         thermal_profile: ThermalProfile = "cognitive",
     ) -> tuple[T, object]:
-        """Call LM Studio with JSON schema mode, falling back when parsing fails."""
+        """Call the local OpenAI-compatible server with JSON schema mode.
+
+        Falls back to raw JSON completion when instructor parsing fails.
+        """
         started = time.perf_counter()
         self.refresh_config()
         config = load_plumber_lint_config()
@@ -1982,6 +2036,7 @@ class MaintenanceDaemon:
             save_daemon_state(self.graph_root, checkpoint)
 
         remove_pid_file(self.graph_root)
+        _release_daemon_process_lock(self.graph_root)
         clear_page_write_locks()
         sweep_matryca_lock_sidecars(self.graph_root)
 
@@ -2525,6 +2580,12 @@ class MaintenanceDaemon:
         self._register_daemon_signal_handlers()
         write_pid_file(self.graph_root)
         state = self._sync_runtime_config(load_daemon_state(self.graph_root))
+        llm_config = load_plumber_lint_config()
+        logger.info(
+            "LLM Engine starting... Provider URL: {} | Target Model: {}",
+            llm_config.lm_base_url,
+            llm_config.lm_model,
+        )
         self._hydrate_bootstrap_phase(state)
         self._hydrate_token_logger_from_state(state)
         state.status = "running"
@@ -2601,8 +2662,33 @@ def start_daemon_foreground(graph_root: Path | None = None) -> None:
     daemon.run_forever()
 
 
+def _notify_daemon_parent(write_fd: int, *, ok: bool, payload: str) -> None:
+    prefix = "OK:" if ok else "ERR:"
+    os.write(write_fd, f"{prefix}{payload}\n".encode())
+    os.close(write_fd)
+
+
+def _read_daemon_parent_notification(read_fd: int, *, timeout_s: float = 10.0) -> str:
+    deadline = time.monotonic() + timeout_s
+    chunks: list[bytes] = []
+    while time.monotonic() < deadline:
+        try:
+            ready, _, _ = select.select([read_fd], [], [], 0.1)
+        except (ValueError, OSError):
+            break
+        if read_fd not in ready:
+            continue
+        piece = os.read(read_fd, 256)
+        if not piece:
+            break
+        chunks.append(piece)
+        if b"\n" in piece:
+            break
+    return b"".join(chunks).decode("utf-8", errors="replace").strip()
+
+
 def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
-    """Fork a background daemon process and return its PID."""
+    """Fork a background daemon process and return the grandchild PID."""
     root = graph_root or resolve_graph_root()
     existing = read_pid_file(root)
     if existing is not None and is_process_alive(existing):
@@ -2613,41 +2699,77 @@ def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
             "message": f"Matryca Plumber daemon already running (pid {existing})",
         }
 
+    read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid > 0:
-        return {"ok": True, "code": "started", "pid": pid, "graph_root": str(root)}
+        os.close(write_fd)
+        line = _read_daemon_parent_notification(read_fd)
+        os.close(read_fd)
+        if line.startswith("OK:"):
+            child_pid = int(line[3:])
+            return {"ok": True, "code": "started", "pid": child_pid, "graph_root": str(root)}
+        if line.startswith("ERR:"):
+            code = line[4:]
+            message = (
+                "Matryca Plumber daemon already running (lock held)"
+                if code == "lock_held"
+                else f"Daemon startup failed ({code})"
+            )
+            return {"ok": False, "code": code, "message": message}
+        return {
+            "ok": False,
+            "code": "startup_timeout",
+            "message": "Daemon did not report PID in time",
+        }
 
+    os.close(read_fd)
     os.setsid()
     fork_pid = os.fork()
     if fork_pid > 0:
         os._exit(0)
 
-    sys.stdin = open(os.devnull)  # noqa: SIM115
-    sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-    sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    global _daemon_process_lock_fd
+    try:
+        lock_fd = _try_acquire_daemon_process_lock(root)
+        if lock_fd is None:
+            _notify_daemon_parent(write_fd, ok=False, payload="lock_held")
+            os._exit(1)
+        _daemon_process_lock_fd = lock_fd
 
-    from loguru import logger
+        sys.stdin = open(os.devnull)  # noqa: SIM115
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
 
-    env_path = resolve_repo_dotenv_path()
-    if env_path is not None:
-        from dotenv import load_dotenv
+        from loguru import logger
 
-        load_dotenv(env_path, override=True)
-    reload_plumber_dotenv()
-    os.environ["LOGSEQ_GRAPH_PATH"] = str(root)
-    config = load_plumber_lint_config()
-    if config.low_priority_mode and hasattr(os, "nice"):
-        try:
-            os.nice(19)
-            logger.info(
-                "[OS SCHEDULER] Low-Impact Antivirus Mode engaged. Process niceness set to 19."
-            )
-        except OSError as e:
-            logger.warning(f"[OS SCHEDULER] Could not adjust process niceness: {e}")
+        env_path = resolve_repo_dotenv_path()
+        if env_path is not None:
+            from dotenv import load_dotenv
 
-    configure_loguru(stderr=False)
+            load_dotenv(env_path, override=True)
+        reload_plumber_dotenv()
+        os.environ["LOGSEQ_GRAPH_PATH"] = str(root)
+        config = load_plumber_lint_config()
+        if config.low_priority_mode and hasattr(os, "nice"):
+            try:
+                os.nice(19)
+                logger.info(
+                    "[OS SCHEDULER] Low-Impact Antivirus Mode engaged. Process niceness set to 19."
+                )
+            except OSError as e:
+                logger.warning(f"[OS SCHEDULER] Could not adjust process niceness: {e}")
 
-    MaintenanceDaemon(root).run_forever()
+        reset_loguru_configuration()
+        configure_loguru(stderr=False)
+
+        write_pid_file(root)
+        _notify_daemon_parent(write_fd, ok=True, payload=str(os.getpid()))
+        MaintenanceDaemon(root).run_forever()
+    except Exception as exc:  # noqa: BLE001 - detached child must never bubble to shell
+        with contextlib.suppress(OSError):
+            _notify_daemon_parent(write_fd, ok=False, payload=f"startup_error:{exc}")
+        _release_daemon_process_lock(root)
+        os._exit(1)
     os._exit(0)
 
 
@@ -2662,6 +2784,7 @@ __all__ = [
     "LintType",
     "MaintenanceDaemon",
     "PID_FILENAME",
+    "DAEMON_LOCK_FILENAME",
     "SEMANTIC_INDEX_HEADER",
     "STRUCTURAL_LINT_HEADER",
     "ScanMetrics",

@@ -43,7 +43,7 @@ def configure_loguru(*, level: str = "INFO", stderr: bool = True) -> None:
         str(log_path),
         level=level,
         rotation="10 MB",
-        retention="5",
+        retention=5,
         compression="zip",
         encoding="utf-8",
         backtrace=False,
@@ -52,4 +52,11 @@ def configure_loguru(*, level: str = "INFO", stderr: bool = True) -> None:
     _CONFIGURED = True
 
 
-__all__ = ["configure_loguru", "resolve_loguru_log_path"]
+def reset_loguru_configuration() -> None:
+    """Drop all Loguru sinks so a forked/subprocess daemon can reconfigure logging."""
+    global _CONFIGURED
+    logger.remove()
+    _CONFIGURED = False
+
+
+__all__ = ["configure_loguru", "reset_loguru_configuration", "resolve_loguru_log_path"]

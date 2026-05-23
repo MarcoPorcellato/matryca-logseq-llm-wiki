@@ -72,7 +72,7 @@ export function CognitiveProgressCard({ state }: CognitiveProgressCardProps) {
       <p className="mt-3 text-xs text-theme-muted">{metrics.subtitle}</p>
 
       {state && (
-        <div className="mt-4 flex flex-wrap gap-2">
+        <div className="mt-4 flex min-h-[4.5rem] flex-wrap content-start gap-2">
           {buildFilePills(state).map(([path, file]) => (
             <FileStatusPill key={path} path={path} file={file} />
           ))}
