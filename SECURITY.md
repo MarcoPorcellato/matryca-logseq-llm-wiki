@@ -8,7 +8,7 @@ Matryca Logseq LLM Wiki is an MCP server that can **read and write Markdown file
 
 ## How to report a vulnerability privately
 
-1. **Preferred:** Use [GitHub Security Advisories](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/security/advisories/new) for this repository and submit a **private** security advisory with reproduction steps, impact, and versions affected.  
+1. **Preferred:** Use [GitHub Security Advisories](https://github.com/MarcoPorcellato/matryca-plumber/security/advisories/new) for this repository and submit a **private** security advisory with reproduction steps, impact, and versions affected.  
 2. If you cannot use GitHub advisories, contact the repository maintainers through a **private** channel (for example email) and include the same detail you would put in an advisory. Do not paste secrets or real tokens in the report; use redacted examples.
 
 We aim to acknowledge valid reports in a reasonable timeframe and coordinate disclosure after a fix or mitigation is available.

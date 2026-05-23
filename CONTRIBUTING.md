@@ -2,7 +2,22 @@
 
 Thank you for investing your time in **Matryca Plumber** (`matryca-plumber`).
 
-This project exists so AI agents can collaborate on **Logseq OG** graphs the right way: **blocks**, **`id::`**, and **local Markdown** — not flattened blobs in someone else's database. Whether you fix a typo, tighten a test, or add an MCP tool, you are helping keep that bar high.
+This project exists so humans and **autonomous local systems** can collaborate on **Logseq OG** graphs the right way: **blocks**, **`id::`**, and **local Markdown** — not flattened blobs in someone else's database. Whether you fix a typo, tighten a test, extend a **`MaintenanceDaemon`** cognitive module, or harden the **`graph_dispatch`** + **`logseq-matryca-parser`** headless CRUD plane, you are helping keep the **Ironclad** bar high.
+
+**Surfaces, one contract:** the **Sovereign UI** (FastAPI + React on `:8000`), the **`matryca` / `matryca plumber` CLI**, and the **optional FastMCP stdio sidecar** are different doors into the **same** sandboxed graph semantics. New work should default **daemon-first** — autonomous duty cycles and direct file I/O — not “stdio MCP as the product.”
+
+---
+
+## Architecture context (where your patch lands)
+
+| Layer | Primary paths | Contributor focus |
+|--------|----------------|-------------------|
+| **Autonomous runtime** | `src/agent/maintenance_daemon.py`, `src/agent/plumber_modules/`, `src/agent/plumber_config.py` | Duty-cycle scans, cognitive lints, thermal pacing, ledger / telemetry sync |
+| **Headless CRUD & graph plane** | `src/agent/graph_dispatch.py`, `src/graph/**`, **`logseq-matryca-parser`** | OCC, `page_rmw_lock`, atomic writes, fence dead zones, namespace / property parity |
+| **Operator control plane** | `src/cli/**` (incl. `ui_server.py`, `ui_auth.py`), `frontend/` | **Zero-Trust** local API (`X-Matryca-Token`), cockpit UX |
+| **Optional MCP ingress** | `src/agent/mcp_server.py` (`register_mcp_tools`, `@mcp.tool()`) | Thin registration over the same dispatch graph — not a second datastore or write path |
+
+Deep reference: [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -15,8 +30,6 @@ Matryca Plumber is built on three pillars. Every contribution must respect them:
 | **Local-first** | The Logseq graph on disk (`LOGSEQ_GRAPH_PATH`) is the system of record. Reads and writes go through UTF-8 Markdown I/O, `fcntl.flock` RMW locks, and atomic swaps — not a hosted sync service. |
 | **Zero external databases** | No SQLite, Postgres, Redis, or cloud DB as a dependency for core behavior. Ephemeral in-memory indexes and JSON ledgers at the graph root are allowed; the vault itself stays pure Markdown. |
 | **Absolute Logseq AST parity** | Spatial structure comes from **`logseq_matryca_parser`** and bounded helpers in `src/graph/`. Mutations must preserve outliner semantics: nested bullets, property planes, multiline continuations, and fence-protected dead zones. |
-
-Deep reference: [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -63,7 +76,7 @@ Logseq OG's on-disk contract is strict. Violations cause silent index corruption
 | **Windows `\r\n` stripping** | All scanners normalize with `strip_line_endings()` / `rstrip("\r\n")` before regex matching. Writes emit `\n` via `canonical_line_suffix()` — never reintroduce `\r\n` on output. Mixed line endings must not break fence detection or block-span math. |
 | **Dead zones** | Never mutate lines inside fenced code blocks, HTML comments, or `#+BEGIN_QUERY` … `#+END_QUERY` regions (`global_fence_scanner.py`). |
 
-When in doubt: `read_graph_data` with `dry_run: true` on mutators first.
+When in doubt: exercise mutators with **`dry_run=true`** first (from **pytest** fixtures, the **CLI**, or the **optional MCP** path); ground truth lives in **`read_logseq_page`** / the parser adapter — not in guessed line offsets.
 
 ### Phase 4 — No central DB (JSON ledger only)
 
@@ -106,6 +119,34 @@ Optional git snapshots on the graph repo are fine; they remain files on disk.
 
    Set **`LOGSEQ_GRAPH_PATH`** to your Logseq graph root (folder containing `pages/`). Matryca is headless — no Logseq desktop app required for most tests.
 
+### Daemon-first dev loop (recommended)
+
+After `make install`, validate changes the way operators run the **Agentic OS** (use the `.env` from step **5** — same `LOGSEQ_GRAPH_PATH` and LM settings you use for tests):
+
+- **Build the Sovereign UI** (once, or when `frontend/` changes):
+
+   ```bash
+   cd frontend && npm ci && npm run build && cd ..
+   ```
+
+- **Run the Plumber daemon** — foreground is best while iterating:
+
+   ```bash
+   uv run matryca plumber start --foreground
+   ```
+
+   Or detach with `uv run matryca plumber start` and tail **`logs/matryca_plumber_ops.log`**.
+
+- **Open the cockpit** — in another terminal:
+
+   ```bash
+   uv run matryca plumber status
+   ```
+
+   Browse to **`http://127.0.0.1:8000`**, complete the **Zero-Trust** token bootstrap (`GET /api/auth/session`), and watch **1 Hz** telemetry while the daemon works.
+
+**Optional MCP stdio** — reach for a live MCP host only when you touch `mcp_server.py`, tool schemas, or host-specific serialization. Most graph and daemon behavior is proven faster with **`make test` / `make check`** plus the loop above — without wiring Claude Desktop.
+
 6. List Make targets:
 
    ```bash
@@ -124,15 +165,15 @@ Optional git snapshots on the graph repo are fine; they remain files on disk.
 | **`make check`** | **`format` → `lint` → `typecheck` → `test`** (full local gate) |
 | `make clean` | Remove `.venv`, caches |
 
-### Frontend (React cockpit)
+### Frontend (Sovereign UI)
+
+Same build as in **Daemon-first dev loop**; CI runs `npm ci` + `npm run build` before `make check`.
 
 ```bash
 cd frontend
 npm ci
 npm run build
 ```
-
-CI builds the SPA before running `make check`.
 
 ---
 
@@ -144,38 +185,46 @@ That means, in order:
 
 1. **Ruff** — auto-fix and format the tree, then lint clean
 2. **Mypy** — strict type-check on `src/` and `tests/`
-3. **Pytest** — full suite (**392+** tests; currently **394** collected)
+3. **Pytest** — full suite (**417** targets on `main`; a small number may be skipped per `pyproject.toml`)
 
 GitHub Actions on pushes and pull requests to **`main`** runs the same gate (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `uv sync`, frontend `npm ci` + `npm run build`, then `make check`. **Any failing test blocks merge.**
 
 Never commit secrets (no `.env`, tokens, or private graph paths in git).
 
-**Background service:** `matryca service install` must target a **stable** binary (for example after `uv tool install matryca-plumber`). Do not install the daemon from ephemeral `uvx` — see [README.md](README.md#background-service-matryca-service--persistent-install-only).
+**Background OS service:** `matryca service install` must target a **stable** binary (for example after `uv tool install matryca-plumber`). Do not install the daemon from ephemeral `uvx` — see [README.md](README.md) (section **Background OS service (`matryca service`)**).
 
 ---
 
-## Writing tests for new MCP tools
+## Writing tests (daemon-first, graph plane, optional MCP)
+
+Most regressions are caught by exercising **`MaintenanceDaemon`**, **`plumber_modules/`**, **`src/graph/`**, and **`graph_dispatch`** — not by spawning a stdio MCP host.
+
+### Where logic should live
+
+- **Fat modules, thin edges** — implement behavior in `src/graph/`, `src/agent/plumber_modules/`, or `src/agent/graph_dispatch.py`; keep **`@mcp.tool()`** handlers and CLI entrypoints as thin delegates.
+- **Parser is spatial truth** — hierarchy and `id::` contracts come from **`logseq-matryca-parser`**; do not hand-roll a second full-page AST for vault-wide work (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § bounded-work paradigm).
 
 ### Stack conventions
 
-- **FastMCP** — Tools are async functions registered with `@mcp.tool()` in `register_mcp_tools` (`src/agent/mcp_server.py`). Test the logic the tool calls; you usually do not need stdio MCP in tests.
-- **Pydantic** — Cover models with `model_validate` / `ValidationError` where rules apply.
-- **pytest-asyncio** — `asyncio_mode = auto` in `pyproject.toml`. Use `@pytest.mark.asyncio` when awaiting bridge methods.
+- **pytest + `tmp_path`** — graph fixtures under a fake `pages/` tree; set `LOGSEQ_GRAPH_PATH` with `monkeypatch.setenv` for integration-style tests.
+- **pytest-asyncio** — `asyncio_mode = auto` in `pyproject.toml`. Use `@pytest.mark.asyncio` when awaiting async dispatch or daemon helpers.
+- **Pydantic** — cover models with `model_validate` / `ValidationError` where schema rules apply.
+- **FastMCP (`@mcp.tool()`)** — registered in `register_mcp_tools` (`src/agent/mcp_server.py`). Test the **underlying** function or dispatch path; you almost never need a real stdio MCP session in CI.
 
 ### Recommended patterns
 
-1. **Model-only tests** — Fast, no I/O. Example: outline schema rules in `tests/test_mcp_server.py`.
-2. **Stub `LogseqClient`** — Monkeypatch bridge methods to record arguments. See `test_write_logseq_outline_chains_parent_uuids`.
-3. **Filesystem fixtures** — Use `tmp_path`, set `LOGSEQ_GRAPH_PATH` via `monkeypatch.setenv`, call `src/graph/` directly.
-4. **Thin MCP wrapper, fat module** — Implement in `src/graph/` or `src/agent/`, unit-test helpers, keep `@mcp.tool()` bodies short.
+1. **Pure unit tests** — Fast, no disk I/O: schema and guardrails (see `tests/test_mcp_server.py` for outline validation patterns — the file name is legacy; the style applies across surfaces).
+2. **Filesystem fixtures** — `tmp_path` graphs for mutators, OCC, and fence scanners (`src/graph/` tests are the template).
+3. **Async dispatch tests** — Await `graph_dispatch` / `MatrycaMCPServer` methods directly against a temp graph when you need end-to-end headless writes without MCP framing.
+4. **Daemon cycle tests** — Prefer targeted tests on `maintenance_daemon.py` helpers (or small integration tests) over long-running full-graph loops in CI.
 
-### Tool design checklist
+### Tool design checklist (CLI, MCP, and shared mutators)
 
-- Prefer explicit typed parameters; use `dict[str, Any]` only where MCP JSON must stay flexible.
-- For mutators, default `dry_run=true` when behavior could touch many files.
-- `src/` must satisfy **strict mypy**; tests may relax annotations per Ruff `per-file-ignores` for `tests/**`.
+- Prefer explicit typed parameters; use `dict[str, Any]` only where JSON interchange must stay flexible.
+- For mutators, default **`dry_run=true`** when behavior could touch many files.
+- **`src/`** must satisfy **strict mypy**; tests may relax annotations per Ruff `per-file-ignores` for `tests/**`.
 
-When you add or change a tool, **extend or add tests under [`tests/`](tests/)** so behavior is pinned before review.
+When you add or change behavior on the **Agentic OS** path, **extend or add tests under [`tests/`](tests/)** so Ironclad invariants stay pinned before review.
 
 ---
 
@@ -191,7 +240,7 @@ When you add or change a tool, **extend or add tests under [`tests/`](tests/)** 
 
 ## Reporting bugs
 
-Include OS, Logseq version, LM Studio model, Plumber version, and **zipped Loguru logs** from `logs/matryca_plumber.log` (rotated archives are `.zip` files in the same directory). See the [bug report issue template](.github/ISSUE_TEMPLATE/bug_report.yml).
+Include OS, Logseq version, LM Studio model, Matryca Plumber version, and **zipped** Loguru / ops logs from **`logs/matryca_plumber_ops.log`** (and rotated archives beside that path, if present). See the [bug report issue template](.github/ISSUE_TEMPLATE/bug_report.yml).
 
 ---
 

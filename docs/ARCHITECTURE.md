@@ -1,6 +1,6 @@
 # Architecture
 
-**matryca-plumber** connects an LLM agent to **Logseq OG** (pure local Markdown) through **FastMCP**, **Pydantic**, and a **100% headless** data plane powered by **`logseq-matryca-parser==0.3.3`**. This document is the engineering contract: **bounded-work parsing**, **where spatial truth lives**, **how the Headless CRUD & Mutation Plane commits structural edits**, **how X-Ray state persists across stateless invocations**, and **how the repository’s delivery gates stay aligned with runtime behavior**.
+**matryca-plumber** connects local LLM cognition and operator automation to **Logseq OG** (pure local Markdown) through a **standalone Python asynchronous daemon**, the **`matryca` CLI**, and a **100% headless** CRUD & mutation plane powered by **`logseq-matryca-parser==0.3.3`**. **FastMCP** provides an **optional auxiliary stdio API** for external MCP hosts; it is **not** the primary execution model — the **MaintenanceDaemon** runs duty-cycle graph scans, OCC-guarded writes, and ledger persistence with **no MCP client attached**. **Pydantic** validates structured payloads at every boundary. This document is the engineering contract: **bounded-work parsing**, **where spatial truth lives**, **how the Headless CRUD & Mutation Plane commits structural edits**, **how X-Ray state persists across stateless invocations**, and **how the repository’s delivery gates stay aligned with runtime behavior**.
 
 ---
 
@@ -16,7 +16,7 @@ The project deliberately does **not** introduce Postgres, SQLite, Redis, embeddi
 2. **No invalidation labyrinth** — A secondary index would require correctness proofs every time a human edits outside the agent.
 3. **Forces block-shaped thinking** — Tools steer toward AST-guided appends and scoped file surgery instead of destructive whole-file rewrites.
 
-When the codebase needs **ranking** (Okapi BM25), **adjacency** (wikilink and tag BFS), or **aggregates** (dashboard counts), it computes them **inside the MCP process** for that request. **Generational caches** (`st_mtime_ns` signatures) reuse in-memory structures across calls when the underlying files are quiescent — that is **memoization**, not a competing database.
+When the codebase needs **ranking** (Okapi BM25), **adjacency** (wikilink and tag BFS), or **aggregates** (dashboard counts), it computes them **inside the running Matryca process** — daemon poll cycle, CLI invocation, or MCP tool handler — without any auxiliary database. **Generational caches** (`st_mtime_ns` signatures) reuse in-memory structures across calls when the underlying files are quiescent — that is **memoization**, not a competing database.
 
 ---
 
@@ -57,7 +57,7 @@ Mutations (`write_logseq_outline`, `patch_logseq_block_property_lines`, `inject_
 
 ```mermaid
 flowchart TD
-  TOOL["MCP tool / CLI\nwrite_logseq_outline · mutate_graph_data"] --> GD["graph_dispatch.py"]
+  TOOL["Daemon / CLI / optional MCP\nwrite_logseq_outline · mutate_graph_data"] --> GD["graph_dispatch.py"]
   GD --> LOAD["LogseqGraph.load_directory(graph_root)"]
   LOAD --> RESOLVE["Resolve parent UUID\n(registry + id:: embed ref)"]
   RESOLVE --> LOCK["page_rmw_lock(source_path)"]
@@ -135,7 +135,9 @@ flowchart TD
 
 ## End-to-end data flow
 
-The MCP host spawns this process on **stdio**. Tool calls flow through FastMCP into **`MatrycaMCPServer`** and **`graph_dispatch`**: **structural writes** splice Markdown via **`append_child_to_node`** under **`page_rmw_lock`**; **spatial reads** use the parser adapter; **other disk mutators** use **`atomic_write_bytes`** (and often a **`.bak`** copy immediately before swap for property-style edits).
+On the **autonomous primary path**, **`MaintenanceDaemon`** and the **`matryca plumber`** / **`matryca`** CLI drive **`graph_dispatch`** directly: **structural writes** splice Markdown via **`append_child_to_node`** under **`page_rmw_lock`**; **spatial reads** use the parser adapter; **other disk mutators** use **`atomic_write_bytes`** (and often a **`.bak`** copy immediately before swap for property-style edits). **File I/O, OCC locks, and graph parsing are native to this process** — no MCP attachment is required for the daemon to run.
+
+When an **MCP host** spawns the same binary on **stdio**, tool calls flow through FastMCP into **`MatrycaMCPServer`** and the **identical** **`graph_dispatch`** layer:
 
 ```mermaid
 sequenceDiagram
@@ -617,7 +619,7 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 
 | Phase | What shipped | Core architectural reason |
 |:-----:|--------------|---------------------------|
-| **1 — Baseline** | MCP server (`FastMCP`, `register_mcp_tools`), **`OutlineNode`**, **`write_logseq_outline`** (DFS headless append), **`read_logseq_page`** via parser adapter, **`lint_logseq_block_refs`**, **`render_logseq_dashboard`** | Prove the bridge: agents **read spatially** and **write block-by-block** with validation before touching production graphs |
+| **1 — Baseline** | Headless **`graph_dispatch`** + parser adapter (`FastMCP` **optional** stdio registration, `register_mcp_tools`), **`OutlineNode`**, **`write_logseq_outline`** (DFS headless append), **`read_logseq_page`**, **`lint_logseq_block_refs`**, **`render_logseq_dashboard`** | Prove agents **read spatially** and **write block-by-block** with validation before touching production graphs; MCP is one ingress, not the sole runtime |
 | **2 — L1 / L2** | **`read_l1_memory`**, **`routing_hint`** attachments on tool outputs | Session-critical rules and traceability without loading the entire vault into context |
 | **3 — PKM refinements** | BM25 and substring **`query_logseq_pages_local`**, structural hops + hubs/orphans, **`patch_logseq_block_property_lines`**, templates list/read, **`lint_matryca_wiki_pages`**, namespace index, **`MATRYCA_GIT_SNAPSHOT_ON_WRITE`** integration | Discovery, **surgical** disk edits, house-style templates, and optional **reversible** checkpoints |
 | **4 — Logseq superpowers** | **`inject_logseq_advanced_query`**, journal task scan + append, **`resolve_logseq_entity`**, **`append_logseq_page_alias`** | First-class Logseq primitives (Datalog, journals, entity graph) as disk-native Markdown |
@@ -730,7 +732,7 @@ flowchart TB
 
 ## Matryca Plumber — autonomous maintenance daemon (Phase 14)
 
-**Matryca Plumber** is a **local-first background structure & cognitive maintenance daemon** that progressively indexes Logseq markdown with a **local LLM** (LM Studio OpenAI-compatible API). It complements the interactive MCP plane: agents mutate on demand; the daemon **continuously** repairs broken block references, flushes context loops via Ermes compression, appends semantic metadata, runs optional cognitive lint modules, and logs token economics to **`logs/matryca_plumber_ops.log`**.
+**Matryca Plumber** is a **local-first background structure & cognitive maintenance daemon** that progressively indexes Logseq markdown with a **local LLM** (LM Studio OpenAI-compatible API). It is the **primary autonomous runtime**: duty-cycle scans, cognitive lint, semantic index append, and ledger checkpoints do **not** depend on an MCP host. Each cycle may repair broken block references (when enabled), flush context loops via Ermes compression, append semantic metadata, run optional cognitive lint modules, and stream structured telemetry to **`logs/matryca_plumber_ops.log`**. On-demand **CLI** invocations and **optional FastMCP** sessions share the same **`graph_dispatch`** mutation plane for interactive edits.
 
 > **Brand separation:** **Matryca Brain** is reserved exclusively for the Nuitka-compiled Pro enterprise ingestion suite. The open-source maintenance daemon described here is **Matryca Plumber**.
 

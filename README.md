@@ -1,6 +1,6 @@
 # Matryca Plumber
 
-> **v1.5 — Ironclad Release.** Agentic Knowledge Management for Logseq OG. An **enterprise-grade, local-first background AI daemon** with a real-time **Sovereign UI** control room — plus a CLI and MCP server that turns your favorite AI into a spatial Knowledge Architect, heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). It treats your vault as a tree of blocks, not a flat document store. **100% native Logseq AST parity**, optimistic concurrency safety, versioned AI authorship stamping, and zero auxiliary databases.
+> **v1.5 — Ironclad Release.** Agentic Knowledge Management for Logseq OG. An **enterprise-grade, local-first background AI daemon** with a real-time **Sovereign UI** control room, a **typed CLI**, and **direct Logseq Markdown AST** mutation (no Logseq HTTP API, no auxiliary database). The default experience is **autonomous**: the daemon and Python workers poll your graph, run structured local-LLM passes, and commit indexes and lint artifacts while you work or sleep. An **optional FastMCP stdio sidecar** exposes the same headless mutation plane to external clients (for example Claude Desktop) — same `graph_dispatch` contract, not a separate data path. Heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). **100% native Logseq AST parity**, optimistic concurrency safety, versioned AI authorship stamping.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-417%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
@@ -9,9 +9,9 @@
 
 ![Matryca Plumber — Agentic Knowledge Management for Logseq OG](images/20260519%20Logseq%20Matryca%20LLM%20Wiki%20copertina%20github.jpg)
 
-Matryca is a **100% headless, sandboxed** MCP server and CLI that turns your local Logseq graph into a high token-density agentic workspace — **no network APIs and no background desktop app (Logseq OG) required**.
+Matryca is a **100% headless, sandboxed** **standalone daemon + CLI** that turns your local Logseq graph into a high token-density agentic workspace — **no network APIs and no Logseq desktop JSON-RPC**. It treats your vault as a **tree of blocks**, not a flat document store. Logseq OG remains optional: humans and the daemon co-edit the **same** `.md` trees on disk.
 
-**Matryca Plumber** is not a one-shot script — it is an **enterprise-grade, local-first background AI daemon for Logseq**. It polls your graph on a duty cycle, calls a local LLM (LM Studio), appends semantic indexes, runs optional cognitive lint modules, and logs every token transaction — **while you edit the same `.md` files in Logseq or via MCP**. Every write path mirrors Logseq's on-disk AST contract: page frontmatter at line 0, block properties contiguous to their parent bullet, namespace filenames encoded exactly like Logseq's Clojure Datalog layer, and **optimistic concurrency control** that aborts stale writes when you type during inference.
+**Matryca Plumber** is not a one-shot script — it is an **enterprise-grade, local-first background AI daemon for Logseq**. It polls your graph on a duty cycle, calls a local LLM (LM Studio), appends semantic indexes, runs optional cognitive lint modules, and logs every token transaction — **while you edit the same `.md` files in Logseq or leave the vault idle**. Optional **MCP-attached** sessions reuse the identical mutation plane for interactive queries; they are **not** required for background operation. Every write path mirrors Logseq's on-disk AST contract: page frontmatter at line 0, block properties contiguous to their parent bullet, namespace filenames encoded exactly like Logseq's Clojure Datalog layer, and **optimistic concurrency control** that aborts stale writes when you type during inference.
 
 The **v1.4.0 Headless Revolution** removed HTTP JSON-RPC; **v1.5 Ironclad** adds the production-hardened Plumber plane — the **Sovereign UI** React cockpit (`:8000`) with **Zero-Trust Bearer authentication**, **dynamic Human-vs-AI graph telemetry**, Ermes context compression, `JSON_SCHEMA` grammar sampling, structural quarantine, GraphRAG Louvain clustering, outliner-native MapReduce chunking, the **Context Acceleration Shield** for deterministic KV-cache reuse on giant pages, strict AST serialization parity (`logseq-matryca-parser`), versioned `made-by::` authorship stamping, **first-class Windows daemon support** (no legacy `os.fork()`), and a **417-test** CI bar with zero Ruff/Mypy strict warnings.
 
@@ -38,6 +38,7 @@ Built for power-users who run local LLMs on real vaults — including the r/Loca
 * 🗂️ **Zero-Config Multi-Graph:** point `LOGSEQ_GRAPH_PATH` at any Logseq graph; each graph carries its own hidden **`.matryca_daemon_state.json`** ledger — historical AI telemetry travels with the vault, no central database.
 * 📊 **Zero-DB Lexical Engine:** in-memory Okapi BM25 + generational cache patching.
 * ⚡ **Context Acceleration Shield:** deterministic prompt prefix alignment + Phase 1 summary substitution + semantic skeleton compression — obliterates LM Studio prefill latency on 5,000+ block pages while preserving entity topology.
+* 🔌 **Integrations — optional FastMCP sidecar:** stdio **MCP** server for operators who want to **query or mutate the graph from Claude Desktop** (or any MCP host) against the **same** headless CRUD plane. **Not** required for `matryca plumber start`, the Sovereign UI, or autonomous indexing.
 
 ---
 
@@ -159,18 +160,18 @@ Ops log default: `logs/matryca_plumber_ops.log` (override with `MATRYCA_PLUMBER_
 
 ## ⚙️ Configuration
 
-Copy **`.env.example`** → **`.env`**. The only **required** variable for MCP + Plumber is:
+Copy **`.env.example`** → **`.env`**. The only **required** variable for the daemon, Sovereign UI, CLI, and optional MCP sidecar is:
 
 | Variable | Default | Role |
 |----------|---------|------|
 | `LOGSEQ_GRAPH_PATH` | — | **Required.** Absolute graph root (`pages/`, `journals/`) |
 
-### Core MCP & graph plane
+### Core graph & mutation plane
 
 | Variable | Default | Role |
 |----------|---------|------|
 | `MATRYCA_GIT_SNAPSHOT_ON_WRITE` | `false` | Opt-in `git commit` before selected writes |
-| `MATRYCA_DEBUG` | `false` | Disable MCP log privacy masking |
+| `MATRYCA_DEBUG` | `false` | Disable MCP-telemetry log privacy masking (stdio sidecar) |
 | `MATRYCA_L1_PATH` | — | Optional L1 session rules (file or directory) |
 | `MATRYCA_WIKI_CONFIG` | `$GRAPH/matryca-wiki.yml` | Wiki orchestration YAML |
 
@@ -245,7 +246,7 @@ All default **`false`** unless noted. See `src/agent/plumber_config.py`.
 
 > **Commercial tier (Matryca Brain — not wired in OSS):** Twin Ingestion and Epistemic Guardian are reserved for the Nuitka-compiled **Matryca Brain** edition. Pavlyshyn bipartite validation is proprietary — not present in open source.
 
-### Claude Desktop (MCP only)
+### Claude Desktop (optional MCP host)
 
 ```json
 {
@@ -282,15 +283,15 @@ make check
 ```mermaid
 flowchart TB
   subgraph host["Host machine"]
-    IDE["MCP client · Logseq OG · Browser cockpit"]
+    IDE["Sovereign UI browser · Logseq OG · optional MCP client"]
   end
   subgraph proc["matryca process"]
-    MCP["FastMCP stdio"]
-    PLUMBER["MaintenanceDaemon\nlocal LLM loop"]
+    PLUMBER["MaintenanceDaemon\nautonomous duty cycle"]
     UI["FastAPI + Uvicorn :8000\nReact SPA + Zero-Trust REST"]
+    MCP["FastMCP stdio\noptional sidecar"]
     GD["graph_dispatch.py"]
-    MCP --> GD
     PLUMBER --> GD
+    MCP --> GD
     UI --> STATE
   end
   subgraph data["Data plane"]
@@ -300,8 +301,8 @@ flowchart TB
     GC["generational_cache\nincremental patch"]
     STATE[".matryca_daemon_state.json\nAI ledger + checkpoint"]
   end
-  IDE <-->|MCP| MCP
   IDE -->|plumber status + X-Matryca-Token| UI
+  IDE <-->|optional| MCP
   PLUMBER --> LOCK
   GD --> LOCK
   LOCK --> ATW
@@ -320,13 +321,13 @@ Lifecycle log: [`docs/PROJECT_DIARY.md`](docs/PROJECT_DIARY.md) — Phases 1–8
 
 | Phase | Core capabilities |
 |:-----:|-------------------|
-| **1–8** | MCP bridge → Ironclad data plane (fences, atomic writes, generational cache) |
+| **1–8** | Headless graph engine (+ optional MCP bridge) → Ironclad data plane (fences, atomic writes, generational cache) |
 | **9–13** | Trust plane, delivery CI, Fortress sandbox, Headless Revolution, service installer |
 | **14 — Plumber OS** | Local LLM daemon, cognitive lint modules, Ermes compression, Louvain GraphRAG clustering, outliner MapReduce chunking, **Context Acceleration Shield** (prefix-aligned caching + semantic compression), **Sovereign UI** (FastAPI + React cockpit), **dynamic Human-vs-AI graph telemetry**, intra-turn telemetry sync, POSIX atomic checkpoints, **`json_repair.py`**, **`reload_plumber_dotenv()`** hot-reload, **`patch_generational_caches_for_paths`** on Plumber writes |
 | **15 — Ironclad Logseq-Native Shield** | Logseq Datalog parity (namespace encoding, true frontmatter vs block properties, multiline block padding), optimistic concurrency (`st_mtime` guard), versioned **`made-by:: matryca plumber vX.X.X`** authorship stamping, alias-aware case-insensitive resolution, ghost-clone prevention (`logseq/bak/`, `.recycle/` exclusion), code-block immunity, UTF-8 / CRLF I/O hardening, **Trust & Safety** UI drawer |
 | **16 — Enterprise Security & Concurrency** | **Zero-Trust UI API** (`X-Matryca-Token`, `MATRYCA_UI_TOKEN`), cross-platform **`subprocess`** daemon launch (Windows-first), **`.matryca_plumber_daemon.lock`** exclusivity, paranoia-level ledger pipeline (`mkstemp` → `fsync` → `os.replace` → `.bak`), SSRF guards on LM proxy discovery, strict path sandbox + L1 `$HOME` isolation, **`PageLockUnavailableError`** lock-skip protocol, **`MATRYCA_ALLOW_FLOCK_DEGRADATION`**, **417** tests |
 
-Full MCP tool matrix: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § Complete phase evolution history.
+Full tool matrix (daemon, CLI, and optional MCP): [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § Complete phase evolution history.
 
 ---
 
@@ -342,9 +343,9 @@ Bleeding edge from `main`:
 uvx --from git+https://github.com/MarcoPorcellato/matryca-plumber.git matryca-plumber
 ```
 
-### Background MCP service (`matryca service`)
+### Background OS service (`matryca service`)
 
-Install a stable binary first — **not** via ephemeral `uvx`:
+Install a stable binary first — **not** via ephemeral `uvx` — so LaunchAgent/systemd can wake the **CLI/daemon** on login (same graph plane; MCP remains optional):
 
 ```bash
 uv tool install matryca-plumber
@@ -370,6 +371,8 @@ Point `LOGSEQ_GRAPH_PATH` at a **dedicated test graph** before enabling Plumber 
 ---
 
 ## Quickstart (clone and develop)
+
+**Primary path:** `matryca plumber start` (background daemon) → `matryca plumber status` (Sovereign UI on `:8000`). The optional **Claude Desktop / MCP** JSON block is for interactive sidecar use only — it does **not** start autonomous indexing.
 
 ### Prerequisites
 

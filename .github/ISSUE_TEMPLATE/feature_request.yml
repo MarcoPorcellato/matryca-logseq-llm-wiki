@@ -1,5 +1,5 @@
 name: Feature Request
-description: Propose an improvement aligned with local-first Matryca Plumber
+description: Propose an improvement aligned with daemon-first, local-first Matryca Plumber
 title: "[Feature] "
 labels:
   - enhancement
@@ -7,8 +7,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Matryca Plumber is **local-first**, **database-free**, and **Logseq OG–native**.
-        Features that require a hosted database, cloud sync as a hard dependency, or unstructured page blobs are usually out of scope.
+        **Matryca Plumber** is a **standalone**, **local-first** background AI **daemon** and **mutation plane** for your Logseq graph — **database-free** and **Logseq OG–native**.
+        Features that require auxiliary databases, a hosted system of record, cloud sync as a hard dependency, or unstructured page blobs are usually out of scope.
 
   - type: textarea
     id: problem
@@ -39,12 +39,12 @@ body:
     attributes:
       label: Paradigm checklist
       options:
-        - label: Keeps graph content in Logseq Markdown on disk — no new system-of-record database
+        - label: No auxiliary databases — graph content stays Logseq Markdown on disk; no new system-of-record store (SQLite, Postgres, Redis, etc.)
           required: true
-        - label: Respects the outliner model (blocks, nesting, `id::`) rather than flat document blobs
+        - label: Block-shaped thinking — respects the outliner model (blocks, nesting, `id::`) rather than flat document blobs
           required: true
-        - label: Respects OCC (Phase-1 snapshot + Phase-2 mtime verification) for any new mutator
-          required: false
+        - label: Strict OCC — Phase-1 snapshot + Phase-2 mtime verification for any new mutator
+          required: true
         - label: Respects AST parity (frontmatter, multiline padding, CRLF-safe I/O) for any graph write
           required: false
 

@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report unexpected behavior, data loss risk, or a crash in Matryca Plumber
+description: Report unexpected behavior, data loss risk, or a crash in the Matryca Plumber daemon
 title: "[Bug] "
 labels:
   - bug
@@ -10,7 +10,7 @@ body:
         Thanks for helping harden Matryca Plumber before and after launch.
 
         **Redact secrets** — never paste API keys, `LOGSEQ_API_TOKEN`, or private graph paths.
-        Attach **zipped Loguru logs** from your graph or repo `logs/` directory (rotated files are named like `matryca_plumber.log.*.zip`).
+        Attach **zipped Loguru logs** from your graph or repo `logs/` directory (rotated files are named like `matryca_plumber_ops.log.*.zip`).
 
   - type: textarea
     id: summary
@@ -92,7 +92,7 @@ body:
     attributes:
       label: Matryca Plumber version
       description: Package version, git tag, or commit SHA
-      placeholder: "1.5.0 or abc1234"
+      placeholder: "1.5.1 or abc1234"
     validations:
       required: true
 
@@ -109,7 +109,8 @@ body:
     id: mcp_host
     attributes:
       label: MCP host (if applicable)
-      placeholder: "Cursor, Claude Desktop, CLI only, matryca plumber daemon"
+      description: Matryca Plumber runs as a **standalone local daemon** by default. MCP is optional tooling on top — list what you used to drive or observe the daemon.
+      placeholder: "Standalone Daemon (default), Sovereign UI, CLI, or optional MCP Host (e.g., Claude Desktop, Cursor)"
     validations:
       required: false
 
@@ -128,7 +129,7 @@ body:
     attributes:
       label: Diagnostic attachments
       options:
-        - label: I attached zipped Loguru log files from `logs/matryca_plumber.log` (and rotated `.zip` archives if present)
+        - label: I attached zipped Loguru log files from `logs/matryca_plumber_ops.log` (and rotated `.zip` archives if present)
           required: true
         - label: I ran `make check` locally (or CI-equivalent commands) before opening this issue
           required: false

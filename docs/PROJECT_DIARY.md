@@ -1,6 +1,6 @@
 # Project diary — technical lifecycle log
 
-This document records **architecture decisions**, **phase milestones**, and **real-world bugs crushed** during the evolution of **matryca-plumber** from a baseline MCP bridge to a production-grade **Ironclad Autonomous Linter OS** with **100% Logseq Datalog parity** (Phase 15). For the engineering contract (modules, data planes, diagrams), see [`ARCHITECTURE.md`](ARCHITECTURE.md). For operator setup, see [`../README.md`](../README.md).
+This document records **architecture decisions**, **phase milestones**, and **real-world bugs crushed** during the evolution of **matryca-plumber**. The project **began** as an MCP-first bridge (Phases 1–3) so external LLM hosts could mutate Logseq Markdown safely; Phases **12–16** completed the pivot to a **fully autonomous background agent** — **`MaintenanceDaemon`**, Sovereign UI, CLI, native AST I/O, OCC, and Zero-Trust cockpit APIs — where **FastMCP is an optional auxiliary surface**, not the product’s center of gravity. Today’s identity is a production-grade **Ironclad Autonomous Linter OS** with **100% Logseq Datalog parity** (Phase 15) and enterprise security & concurrency (Phase 16). For the engineering contract (modules, data planes, diagrams), see [`ARCHITECTURE.md`](ARCHITECTURE.md). For operator setup, see [`../README.md`](../README.md).
 
 Entries are chronological (newest first within each phase summary). When a decision is superseded, add a new entry rather than rewriting history.
 
@@ -47,17 +47,35 @@ This phase closes the gap between "works on a test graph" and **100% parity with
 
 Matryca Plumber now understands Logseq's idiosyncrasies — namespace encoding, property planes, fence dead zones, alias graphs, and concurrent edit windows — **better than any third-party tool on the market**. The graph re-indexes cleanly after daemon passes; operators control mutation depth from the cockpit; and the test suite proves the contract.
 
+**Product positioning (with Phase 16):** Phases **15–16** close the loop on a narrative that started as “MCP server for Claude” and matured into a **sovereign, local-first agentic OS** — background duty cycles, direct Markdown AST surgery, and a Zero-Trust UI — with MCP demoted to an **optional integration** for hosts that still want stdio tool access.
+
 ### Status
 
 Shipped. **`make check`** — **349 passed**, 2 skipped; strict Mypy and Ruff clean.
 
 ---
 
-## Phase map (Phases 1 → 15)
+## [2026-05-23] Phase 16: Enterprise Security & Concurrency (Ironclad)
+
+### Context
+
+Phase 15 hardened Logseq-native filesystem parity. Phase **16** (documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) § phase table) layers **Zero-Trust** authentication on the Sovereign UI (`X-Matryca-Token`), cross-platform **`subprocess`** daemon launch (no `os.fork()`), exclusive **`.matryca_plumber_daemon.lock`**, SSRF-hardened LM discovery in the UI server, paranoia-level ledger commits, and **`MATRYCA_ALLOW_FLOCK_DEGRADATION`** for cloud-sync edge cases — lifting the autonomous daemon from “power-user script” to **production operator surface**.
+
+### Positioning outcome
+
+The shipped system is no longer fairly described as “a plugin for Claude Desktop.” **Matryca Plumber** is a **standalone autonomous daemon** with optional MCP; external MCP clients are one ingress among **`matryca plumber start`**, **`matryca` CLI**, and the React cockpit.
+
+### Status
+
+Shipped. CI bar **417** tests (see [`ARCHITECTURE.md`](ARCHITECTURE.md)); strict Mypy and Ruff clean.
+
+---
+
+## Phase map (condensed)
 
 | Phase | Name | What shipped |
 |:-----:|------|--------------|
-| **1** | Baseline headless plane | FastMCP stdio, `OutlineNode`, DFS `write_logseq_outline`, parser-backed `read_logseq_page`, block-ref lint |
+| **1** | Baseline headless plane | Headless **`graph_dispatch`** + parser-backed reads/writes; **optional** FastMCP stdio; `OutlineNode`, DFS `write_logseq_outline`, `read_logseq_page`, block-ref lint |
 | **2** | L1 / L2 routing | Capped `read_l1_memory`, `routing_hint` traceability on tool payloads |
 | **3** | PKM refinements | BM25 local query, structural hops, property-line surgery, templates, wiki lint, git snapshots |
 | **4** | Logseq superpowers | Advanced Query injection, journal mining, entity resolution, alias append |
@@ -66,6 +84,7 @@ Shipped. **`make check`** — **349 passed**, 2 skipped; strict Mypy and Ruff cl
 | **7** | Mldoc compliance | `mldoc_properties` + `mldoc_guards` integrated into mutators |
 | **8** | Ironclad Autonomous Linter OS | Global fence scanner, atomic writes, generational cache, **Matryca Plumber** daemon, Ermes context compression, structural quarantine, GraphRAG Louvain clustering, FastAPI + React cockpit, **349+ test** CI bar |
 | **15** | Logseq-native parity shield | Namespace encoding parity, OCC mtime guard, frontmatter vs block properties, alias case-insensitivity, ghost-clone prevention, Trust & Safety UI, UTF-8 I/O hardening |
+| **16** | Enterprise security & concurrency | Zero-Trust Sovereign UI (`X-Matryca-Token`), cross-platform subprocess daemon, `.matryca_plumber_daemon.lock`, SSRF-hardened LM discovery, paranoia ledger pipeline, **`MATRYCA_ALLOW_FLOCK_DEGRADATION`**, **417** tests |
 
 Phases **9–14** (Trust plane, delivery, Fortress, Headless Revolution, operational hardening, Plumber OS, Context Acceleration) are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md) § Complete phase evolution history.
 
