@@ -28,6 +28,9 @@ interface TrustSection {
   fields: FieldSpec[]
 }
 
+const INPUT_CLASS =
+  'w-full rounded-xl border border-theme-border/50 bg-theme-base px-3 py-2 text-sm text-theme-text outline-none transition placeholder:text-theme-muted focus:border-theme-accent/60 focus:ring-2 focus:ring-theme-accent/30'
+
 const INFRA_FIELDS: FieldSpec[] = [
   {
     key: 'logseq_graph_path',
@@ -83,7 +86,7 @@ const TRUST_SECTIONS: TrustSection[] = [
     title: 'Safe Mode',
     subtitle: 'Reads context and adds metadata only. Recommended default.',
     borderClass: 'border-emerald-500/30',
-    badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+    badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
     fields: [
       {
         key: 'semantic_routing',
@@ -91,7 +94,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Cache LLM index results by page fingerprint (read-only on disk).',
         type: 'boolean',
         badge: '🛡️ Safe',
-        badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+        badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
       },
       {
         key: 'context_compression',
@@ -99,7 +102,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Rolling condensation of multi-turn LLM history in memory only.',
         type: 'boolean',
         badge: '🛡️ Safe',
-        badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+        badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
       },
       {
         key: 'entity_consolidation',
@@ -107,7 +110,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Adds alias:: lines on canonical pages when duplicates are detected.',
         type: 'boolean',
         badge: '📝 Metadata',
-        badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+        badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
       },
       {
         key: 'property_hygiene',
@@ -115,7 +118,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Infers missing key:: value properties from page tags.',
         type: 'boolean',
         badge: '📝 Metadata',
-        badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+        badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
       },
       {
         key: 'marpa_framework',
@@ -123,7 +126,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Assigns type:: domain metadata and validation side-sections.',
         type: 'boolean',
         badge: '📝 Metadata',
-        badgeClass: 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300',
+        badgeClass: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
       },
     ],
   },
@@ -132,7 +135,7 @@ const TRUST_SECTIONS: TrustSection[] = [
     title: 'Augmented Mode',
     subtitle: 'Adds content in isolated side-blocks or new pages — your bullets stay intact.',
     borderClass: 'border-amber-500/30',
-    badgeClass: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+    badgeClass: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
     fields: [
       {
         key: 'heal_dangling',
@@ -140,7 +143,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Creates isolated seed pages for broken [[WikiLinks]] — never edits your text.',
         type: 'boolean',
         badge: '📎 Side blocks',
-        badgeClass: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+        badgeClass: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
       },
       {
         key: 'backpropagate_links',
@@ -148,7 +151,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Appends ### Matryca Backlink Context sections on target pages.',
         type: 'boolean',
         badge: '📎 Side blocks',
-        badgeClass: 'border-amber-500/40 bg-amber-950/40 text-amber-200',
+        badgeClass: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
       },
     ],
   },
@@ -156,8 +159,8 @@ const TRUST_SECTIONS: TrustSection[] = [
     id: 'surgeon',
     title: 'Surgeon Mode',
     subtitle: 'Alters your original bullet text or block structure. Handle with care.',
-    borderClass: 'border-rose-500/40',
-    badgeClass: 'border-rose-500/40 bg-rose-950/40 text-rose-300',
+    borderClass: 'border-red-500/40',
+    badgeClass: 'border-red-500/40 bg-red-500/10 text-red-500',
     fields: [
       {
         key: 'enable_inline_semantic_corrections',
@@ -166,7 +169,7 @@ const TRUST_SECTIONS: TrustSection[] = [
           'Wraps concepts in [[WikiLinks]] inside your bullets. Stamps matryca-plumber:: true for audit.',
         type: 'boolean',
         badge: '⚠️ Modifies text',
-        badgeClass: 'border-rose-500/40 bg-rose-950/40 text-rose-300',
+        badgeClass: 'border-red-500/40 bg-red-500/10 text-red-500',
       },
       {
         key: 'auto_split',
@@ -174,7 +177,7 @@ const TRUST_SECTIONS: TrustSection[] = [
         description: 'Extracts oversized subtrees into new pages and replaces them with link stubs.',
         type: 'boolean',
         badge: '💣 Structural',
-        badgeClass: 'border-rose-600/50 bg-rose-950/50 text-rose-200',
+        badgeClass: 'border-red-500/50 bg-red-500/10 text-red-500',
       },
     ],
   },
@@ -204,7 +207,7 @@ function emptyDraft(): PlumberConfig {
 function RiskBadge({ label, className }: { label: string; className: string }) {
   return (
     <span
-      className={`inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider ${className}`}
+      className={`inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider ${className}`}
     >
       {label}
     </span>
@@ -223,12 +226,12 @@ function ConfigField({
   return (
     <label className="block space-y-1.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-xs font-medium text-slate-200">{field.label}</span>
+        <span className="text-xs font-medium text-theme-text">{field.label}</span>
         {field.badge ? (
-          <RiskBadge label={field.badge} className={field.badgeClass ?? 'border-slate-700 text-slate-400'} />
+          <RiskBadge label={field.badge} className={field.badgeClass ?? 'border-theme-border text-theme-muted'} />
         ) : null}
       </div>
-      <p className="text-[11px] leading-relaxed text-slate-500">{field.description}</p>
+      <p className="text-[11px] leading-relaxed text-theme-muted">{field.description}</p>
       {field.type === 'boolean' ? (
         <input
           type="checkbox"
@@ -236,7 +239,7 @@ function ConfigField({
           onChange={(event) =>
             onChange(field.key, event.target.checked as PlumberConfig[typeof field.key])
           }
-          className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-900 accent-emerald-500"
+          className="mt-1 h-4 w-4 rounded border-theme-border bg-theme-base accent-theme-accent"
         />
       ) : field.type === 'number' ? (
         <input
@@ -246,7 +249,7 @@ function ConfigField({
           onChange={(event) =>
             onChange(field.key, Number(event.target.value) as PlumberConfig[typeof field.key])
           }
-          className="w-full rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 font-mono text-xs text-slate-100 outline-none ring-cyber-cyan/40 focus:ring-2"
+          className={INPUT_CLASS}
         />
       ) : (
         <input
@@ -255,7 +258,7 @@ function ConfigField({
           onChange={(event) =>
             onChange(field.key, event.target.value as PlumberConfig[typeof field.key])
           }
-          className="w-full rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 font-mono text-xs text-slate-100 outline-none ring-cyber-cyan/40 focus:ring-2"
+          className={INPUT_CLASS}
         />
       )}
     </label>
@@ -278,22 +281,22 @@ function TrustSectionCard({
   const emoji = section.id === 'safe' ? '🟢' : section.id === 'augmented' ? '🟠' : '🔴'
 
   return (
-    <section className={`rounded-xl border ${section.borderClass} bg-slate-950/40`}>
+    <section className={`rounded-xl border ${section.borderClass} bg-theme-base/60`}>
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left"
+        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-all hover:bg-theme-surface/30"
       >
         <div>
-          <p className="font-mono text-xs font-semibold text-slate-100">
+          <p className="text-xs font-semibold text-theme-text">
             {emoji} {section.title}
           </p>
-          <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{section.subtitle}</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-theme-muted">{section.subtitle}</p>
         </div>
-        <span className="font-mono text-[10px] text-slate-600">{expanded ? '−' : '+'}</span>
+        <span className="text-[10px] text-theme-muted">{expanded ? '−' : '+'}</span>
       </button>
       {expanded ? (
-        <div className="space-y-5 border-t border-slate-800/80 px-4 py-4">
+        <div className="space-y-5 border-t border-theme-border/50 px-4 py-4">
           {section.fields.map((field) => (
             <ConfigField key={field.key} field={field} draft={draft} onChange={onChange} />
           ))}
@@ -346,32 +349,32 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
   return (
     <>
       <div
-        className={`fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity duration-300 ${
+        className={`fixed inset-0 z-40 bg-theme-base/60 backdrop-blur-sm transition-opacity duration-300 ${
           open ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
         }`}
         onClick={onClose}
         aria-hidden={!open}
       />
       <aside
-        className={`fixed top-0 left-0 z-50 h-full w-[28rem] max-w-[92vw] transform border-r border-slate-800 bg-slate-950 shadow-2xl transition-transform duration-300 ease-out ${
+        className={`fixed top-0 left-0 z-50 h-full w-[28rem] max-w-[92vw] transform border-r border-theme-border bg-theme-surface shadow-2xl transition-transform duration-300 ease-out ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
         aria-hidden={!open}
         aria-label="Environment settings"
       >
         <div className="flex h-full flex-col">
-          <header className="border-b border-slate-800 px-5 py-4">
-            <p className="font-mono text-[10px] uppercase tracking-[0.35em] text-slate-500">
+          <header className="border-b border-theme-border/50 px-5 py-4">
+            <p className="text-[10px] font-medium uppercase tracking-[0.35em] text-theme-muted">
               Configuration
             </p>
-            <h2 className="mt-1 font-mono text-sm font-semibold text-slate-100">Trust &amp; Safety</h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Changes persist to <code className="text-cyber-cyan">.env</code> and hot-reload the daemon.
+            <h2 className="mt-1 text-sm font-semibold text-theme-text">Trust &amp; Safety</h2>
+            <p className="mt-1 text-xs text-theme-muted">
+              Changes persist to <code className="text-theme-accent">.env</code> and hot-reload the daemon.
             </p>
           </header>
 
           <form
-            className="flex-1 overflow-y-auto px-5 py-4 terminal-scroll"
+            className="markdown-theme terminal-scroll flex-1 overflow-y-auto px-5 py-4 text-sm"
             onSubmit={(event) => {
               event.preventDefault()
               void handleSave()
@@ -379,7 +382,7 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
           >
             <div className="space-y-6">
               <div>
-                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.3em] text-slate-600">
+                <p className="mb-3 text-[10px] font-medium uppercase tracking-[0.3em] text-theme-muted">
                   Infrastructure
                 </p>
                 <div className="space-y-5">
@@ -390,7 +393,7 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
               </div>
 
               <div>
-                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.3em] text-slate-600">
+                <p className="mb-3 text-[10px] font-medium uppercase tracking-[0.3em] text-theme-muted">
                   Invasiveness Matrix
                 </p>
                 <div className="space-y-3">
@@ -409,12 +412,12 @@ export function SettingsDrawer({ open, config, onClose, onSave }: SettingsDrawer
             </div>
           </form>
 
-          <footer className="border-t border-slate-800 px-5 py-4">
+          <footer className="border-t border-theme-border/50 px-5 py-4">
             <button
               type="button"
               disabled={saving}
               onClick={() => void handleSave()}
-              className="w-full rounded-lg border border-emerald-500/50 bg-emerald-950/50 px-4 py-2.5 font-mono text-xs font-semibold uppercase tracking-wider text-emerald-300 shadow-[0_0_18px_rgb(52_211_153_/_0.35)] transition hover:bg-emerald-900/40 disabled:opacity-50"
+              className="w-full rounded-xl border border-theme-accent/80 bg-theme-accent px-4 py-2.5 text-sm font-medium text-theme-accent-foreground transition hover:bg-theme-accent/90 disabled:opacity-50"
             >
               {saving ? 'Saving…' : saved ? 'Saved & Applied ✓' : 'Save & Apply Changes'}
             </button>

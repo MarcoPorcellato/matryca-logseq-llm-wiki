@@ -6,9 +6,9 @@ interface HardeningShieldCardProps {
 
 function IndicatorRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="grid grid-cols-[1fr_auto] gap-4 border-b border-slate-800/80 py-2.5 last:border-b-0">
-      <span className="font-mono text-xs text-slate-500">{label}</span>
-      <span className="font-mono text-xs font-medium text-slate-200">{value}</span>
+    <div className="grid grid-cols-[1fr_auto] gap-4 border-b border-theme-border/50 py-2.5 last:border-b-0">
+      <span className="text-xs text-theme-muted">{label}</span>
+      <span className="text-xs font-medium text-theme-text">{value}</span>
     </div>
   )
 }
@@ -19,14 +19,14 @@ export function HardeningShieldCard({ config }: HardeningShieldCardProps) {
     : '0 — Normal Priority'
 
   return (
-    <section className="card-glow rounded-xl border border-cyber-border bg-cyber-panel/90 p-5 backdrop-blur-sm">
-      <h2 className="font-mono text-xs uppercase tracking-[0.25em] text-slate-500">
+    <section className="rounded-2xl bg-theme-surface/45 p-5 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20">
+      <h2 className="text-xs font-medium uppercase tracking-[0.25em] text-theme-muted">
         Hardening Shield
       </h2>
       {!config ? (
-        <p className="mt-4 font-mono text-xs text-slate-600">Loading live config from /api/config…</p>
+        <p className="mt-4 text-xs text-theme-muted">Loading live config from /api/config…</p>
       ) : (
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4">
+        <div className="mt-4 rounded-xl border border-theme-border/50 bg-theme-base px-4">
           <IndicatorRow label="Process Niceness" value={nicenessLabel} />
           <IndicatorRow
             label="Thermal Delay (Bootstrap)"

@@ -1,7 +1,35 @@
 @import 'tailwindcss';
 @config '../tailwind.config.js';
 
+:root {
+  /* LIGHT THEME - Matryca beige base, white panels, yellow accent */
+  --theme-base: 242 238 227;       /* #f2eee3 canvas */
+  --theme-surface: 255 255 255;    /* white panels */
+  --theme-border: 218 211 193;     /* warm beige border */
+  --theme-text: 33 64 94;          /* brand blue text */
+  --theme-muted: 94 108 122;       /* slate muted text */
+  --theme-accent: 255 221 8;       /* #ffdd08 yellow accent */
+  --theme-accent-foreground: 33 64 94;
+  --theme-accent-bg: 255 246 210;  /* soft yellow halo */
+}
+
+.dark {
+  /* DARK THEME - Matryca blue depth: darker canvas, brand surface panels */
+  --theme-base: 22 43 63;          /* #162b3f dark canvas */
+  --theme-surface: 33 64 94;       /* #21405e brand blue surface */
+  --theme-border: 62 88 112;       /* blue-tinted border */
+  --theme-text: 236 241 246;       /* near white text */
+  --theme-muted: 148 168 188;      /* grey muted text */
+  --theme-accent: 255 221 8;       /* #ffdd08 yellow accent */
+  --theme-accent-foreground: 33 64 94;
+  --theme-accent-bg: 28 48 68;     /* dark blue halo */
+}
+
 @layer base {
+  html {
+    @apply transition-colors duration-300;
+  }
+
   html,
   body,
   #root {
@@ -9,22 +37,83 @@
   }
 
   body {
-    @apply bg-cyber-void text-slate-100 antialiased;
-    background-image:
-      radial-gradient(ellipse 80% 50% at 50% -20%, rgb(34 211 238 / 0.08), transparent),
-      radial-gradient(ellipse 60% 40% at 100% 100%, rgb(52 211 153 / 0.05), transparent);
+    @apply bg-theme-base text-theme-text transition-colors duration-300;
+    font-family: 'Inter', Arial, sans-serif;
+    scrollbar-color: rgb(var(--theme-border) / 0.85) rgb(var(--theme-surface) / 1);
+    scrollbar-width: thin;
+  }
+
+  * {
+    scrollbar-color: rgb(var(--theme-border) / 0.85) rgb(var(--theme-surface) / 1);
+    scrollbar-width: thin;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: rgb(var(--theme-surface) / 1);
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--theme-border) / 0.85);
+    border-radius: 3px;
   }
 }
 
 @layer utilities {
-  .card-glow {
-    box-shadow:
-      0 0 0 1px rgb(30 41 59 / 0.8),
-      0 4px 24px rgb(0 0 0 / 0.45);
+  .panel {
+    @apply bg-theme-surface rounded-xl border border-theme-border/38 transition-all duration-300;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06);
+  }
+
+  .dark .panel {
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.35);
+  }
+
+  .markdown-theme {
+    @apply text-sm leading-[1.75] text-theme-text;
+    font-size: 0.875rem;
+  }
+
+  .markdown-theme h1 {
+    font-size: 1.5rem;
+    letter-spacing: -0.02em;
+    @apply font-semibold text-theme-text;
+  }
+
+  .markdown-theme h2 {
+    @apply text-base font-semibold text-theme-text;
+  }
+
+  .markdown-theme h3 {
+    @apply text-sm font-semibold text-theme-text;
+  }
+
+  .markdown-theme p {
+    @apply text-theme-muted;
+  }
+
+  .markdown-theme code {
+    @apply rounded border border-theme-border/50 bg-theme-base/50 px-1 py-0.5 font-mono text-[0.8125rem] text-theme-text;
+  }
+
+  .markdown-theme pre {
+    @apply overflow-x-auto rounded-lg border border-theme-border/50 bg-theme-base/50 p-3 font-mono text-[0.8125rem];
+  }
+
+  .markdown-theme pre code {
+    @apply border-0 bg-transparent p-0;
+  }
+
+  .resize-handle {
+    @apply transition-colors duration-300 hover:bg-theme-accent/20;
   }
 
   .terminal-scroll {
-    scrollbar-color: rgb(51 65 85) rgb(15 23 42);
+    scrollbar-color: rgb(var(--theme-border) / 0.85) rgb(var(--theme-surface) / 1);
     scrollbar-width: thin;
   }
 
@@ -33,11 +122,11 @@
   }
 
   .terminal-scroll::-webkit-scrollbar-track {
-    background: rgb(15 23 42);
+    background: rgb(var(--theme-surface) / 1);
   }
 
   .terminal-scroll::-webkit-scrollbar-thumb {
-    background: rgb(51 65 85);
+    background: rgb(var(--theme-border) / 0.85);
     border-radius: 3px;
   }
 }

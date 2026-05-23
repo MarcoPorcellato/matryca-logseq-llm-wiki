@@ -19,11 +19,11 @@ function TokenReadout({
   flash: boolean
 }) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-slate-500">{label}</p>
+    <div className="rounded-xl border border-theme-border/50 bg-theme-base p-4">
+      <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-theme-muted">{label}</p>
       <p
-        className={`mt-2 font-mono text-3xl font-bold tabular-nums drop-shadow-md ${
-          flash ? 'animate-token-flash text-emerald-300' : 'text-emerald-400'
+        className={`mt-2 font-mono text-3xl font-bold tabular-nums ${
+          flash ? 'animate-token-flash text-emerald-500' : 'text-emerald-500'
         }`}
       >
         {formatTokenCount(value)}
@@ -62,8 +62,8 @@ export function TokenCounterCard({ promptTokens, completionTokens }: TokenCounte
   }, [promptTokens, completionTokens, sessionTotal])
 
   return (
-    <section className="card-glow rounded-xl border border-cyber-border bg-cyber-panel/90 p-5 backdrop-blur-sm">
-      <h2 className="font-mono text-xs uppercase tracking-[0.25em] text-slate-500">
+    <section className="rounded-2xl bg-theme-surface/45 p-5 shadow-sm ring-1 ring-theme-border/25 dark:bg-theme-surface/20">
+      <h2 className="text-xs font-medium uppercase tracking-[0.25em] text-theme-muted">
         Token Counter — Fuel Gauge
       </h2>
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">

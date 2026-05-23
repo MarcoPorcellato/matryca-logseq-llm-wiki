@@ -21,20 +21,20 @@ export default function App() {
   } = usePlumberPolling()
 
   return (
-    <div className="min-h-screen px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-4 lg:grid-cols-2">
-        <MasterHeader
-          state={state}
-          connectionStatus={connectionStatus}
-          lastUpdatedAt={lastUpdatedAt}
-          config={config}
-          frozen={frozen}
-          engineBusy={engineBusy}
-          onStartEngine={startEngine}
-          onStopEngine={stopEngine}
-          onSaveConfig={saveConfig}
-        />
+    <div className="mx-auto flex h-screen max-w-[1800px] flex-col gap-4 bg-theme-base p-4 text-theme-text">
+      <MasterHeader
+        state={state}
+        connectionStatus={connectionStatus}
+        lastUpdatedAt={lastUpdatedAt}
+        config={config}
+        frozen={frozen}
+        engineBusy={engineBusy}
+        onStartEngine={startEngine}
+        onStopEngine={stopEngine}
+        onSaveConfig={saveConfig}
+      />
 
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto rounded-2xl bg-theme-surface/35 p-4 dark:bg-theme-surface/15 lg:grid-cols-2">
         <FeatureStatusBar
           daemonStatus={state?.status}
           config={config}
