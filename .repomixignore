@@ -56,10 +56,25 @@ repomix-output.xml
 repomix-output.txt
 repomix-output.json
 
-# --- Roadmap d'Archivio ---
-# ROADMAP_LLM_WIKI.md
-# ROADMAP_LLM_WIKI_PHASE_3.md
-# ROADMAP_LOGSEQ_SUPERPOWERS.md
-# ROADMAP_PHASE_5_6.md
-# ROADMAP_MLDOC_COMPLIANCE.md
-# ROADMAP_IRONCLAD_SHIELD.md
+# --- Frontend & JS Dependencies (MOLTO IMPORTANTE PER I TOKEN) ---
+node_modules/
+**/node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+frontend/dist/
+frontend/build/
+public/
+assets/
+*.svg
+*.png
+*.jpg
+*.ico
+
+# --- Roadmap d'Archivio (Scommentali per nasconderli a Cursor) ---
+ROADMAP_LLM_WIKI.md
+ROADMAP_LLM_WIKI_PHASE_3.md
+ROADMAP_LOGSEQ_SUPERPOWERS.md
+ROADMAP_PHASE_5_6.md
+ROADMAP_MLDOC_COMPLIANCE.md
+ROADMAP_IRONCLAD_SHIELD.md

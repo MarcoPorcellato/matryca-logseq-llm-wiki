@@ -125,3 +125,24 @@ repomix-output.json
 .repomix-cache/
 .cursor/
 !.cursor/rules/
+
+# ========================================
+# 🌐 Frontend (React / Node.js)
+# ========================================
+node_modules/
+frontend/node_modules/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build del frontend
+frontend/dist/
+frontend/build/
+.next/
+out/
+
+# Env del frontend (se presenti)
+frontend/.env
+frontend/.env.local

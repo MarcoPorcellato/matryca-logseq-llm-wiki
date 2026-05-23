@@ -1,23 +1,68 @@
-# Ignora le cartelle del virtual environment
+# ==============================================================================
+# 🎯 .cursorignore - Matryca Plumber OS
+# ==============================================================================
+
+# --- 🐍 Python & Virtual Environments ---
 .venv/
 venv/
 env/
-
-# Ignora tutte le cache di Python e dei linter
 __pycache__/
+*.pyc
+
+# --- 🛠️ Linter & Test Caches ---
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+.coverage
+htmlcov/
 
-# Ignora i file generati da altri tool AI (per evitare loop di contesto)
-repomix-output.xml
-repomix-output.txt
+# --- 🌐 Frontend & Node.js (CRITICO PER SALVARE TOKEN) ---
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/build/
+.npm/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-# Ignora la cartella .git
-.git/
+# --- ⚙️ Runtime, Logs & State del Demone ---
+logs/
+*.log
+*.pid
+.matryca_plumber_daemon.pid
+.matryca_daemon_state.json
+.matryca_xray_state.json
+.matryca_semantic_cache/
 
-# Ignora eventuali file di database o grafi logseq testuali enormi
+# --- 🔒 Segreti e Configurazioni Locali ---
+.env
+.env.*
+matryca-wiki.yml
+
+# --- 📝 Logseq (Evita di intasare Cursor con il tuo vero grafo) ---
 *.sqlite3
 *.db
 journals/
 pages/
+LOGSEQ copy test LLM/
+
+# --- 🤖 Output AI & Tooling ---
+repomix-output.xml
+repomix-output.txt
+repomix-output.json
+.git/
+
+# --- 🗄️ File temporanei e OS ---
+*.bak
+*.tmp
+*.md.tmp
+.DS_Store
+
+# --- 🗺️ Roadmap d'Archivio (Togli il # se vuoi nasconderle a Cursor) ---
+# ROADMAP_LLM_WIKI.md
+# ROADMAP_LLM_WIKI_PHASE_3.md
+# ROADMAP_LOGSEQ_SUPERPOWERS.md
+# ROADMAP_PHASE_5_6.md
+# ROADMAP_MLDOC_COMPLIANCE.md
+# ROADMAP_IRONCLAD_SHIELD.md
