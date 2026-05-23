@@ -263,6 +263,7 @@ Mechanics:
 1. **`tempfile.mkstemp`** in the **target directory** with prefix `.<basename>.` and suffix `.tmp` — guarantees `os.replace` stays on one filesystem volume.
 2. **Write full payload**, **`flush`**, then **`os.fsync(fileno)`** — pushes data through the kernel toward durable media before any live path references the new bytes.
 3. **`os.replace(tmp, final)`** — POSIX **atomic** rename over the destination.
+4. **Parent-directory `fsync`** — reopens the containing directory read-only and fsyncs directory metadata so the rename survives sudden power loss on journaling-challenged volumes.
 
 On **any** exception before `replace` completes, the temp file is **unlinked** and the original path is unchanged. There is **no in-place truncation** window. Disk mutators across **`property_line_edit`**, **`tag_unify`**, **`reparent_blocks`**, **`split_large_blocks`**, **`journal_task_scan`**, **`flashcards`**, and **`moc_page`** route through this helper. Property-line apply additionally uses **`shutil.copy2`** to a **`.bak`** sibling before swap for a second, human-visible rollback lever.
 
@@ -354,11 +355,13 @@ Mechanics:
 | Template reads | `templates.py` | `_safe_templates_dir` + `assert_path_within_graph` |
 | Tmp hygiene | `sweep_dangling_atomic_tmp_files` | Skips files that fail sandbox (defense in depth under `pages/` / `journals/`) |
 
-**Invariant:** The sandbox runs **before** any `read_text`, `open`, or `atomic_write_bytes` temp-file creation. Prompt-injected relative paths cannot escape the designated Logseq graph directory even when an agent hallucinates `pages/` prefixes or `..` segments.
+**Invariant:** The sandbox runs **before** any `read_text`, `open`, or `atomic_write_bytes` temp-file creation. Prompt-injected relative paths cannot escape the designated Logseq graph directory even when an agent hallucinates `pages/` prefixes or `..` segments. **`resolve_graph_relative_key`** rejects `..` path components before resolution; **`Path.resolve()`** follows symlinks so a `pages/evil` symlink pointing outside the graph root still fails **`is_relative_to`** — closing the classic `../` and symlink-escape attack surface.
+
+**L1 memory isolation (`v1.5 Ironclad`):** **`src/agent/l1_memory.py`** restricts session-critical Markdown reads to paths under the operator's **`$HOME`** or the system temp directory. Any attempt to load L1 rules from outside those boundaries returns an empty set — agents cannot exfiltrate arbitrary filesystem paths via `MATRYCA_L1_PATH` injection.
 
 ### MCP tool guard and lifespan teardown
 
-**`guard_mcp_tool`** in **`src/agent/mcp_tool_guard.py`** catches domain errors (`ValueError`, `RuntimeError`, …) and returns concise tool failure strings to the agent — the MCP stdio session stays alive instead of surfacing raw stack traces.
+**`guard_mcp_tool`** in **`src/agent/mcp_tool_guard.py`** catches domain errors (`ValueError`, `RuntimeError`, **`PathTraversalSecurityError`**, …) and returns concise tool failure strings to the agent — the MCP stdio session stays alive instead of surfacing raw stack traces. Path sandbox violations surface as **`Security Violation: Path traversal attempt blocked.`** without stack leakage.
 
 **Lifespan setup (`v1.4.1`):** When **`LOGSEQ_GRAPH_PATH`** is set, **`app_lifespan`** in **`src/main.py`** canonicalizes the graph root with **`resolved_graph_root`**, then **`os.chdir(str(resolved_root))`** so the process working directory stays inside the sandbox (avoids **`EPERM`** / **`uv_cwd`** failures when MCP hosts or daemons start from arbitrary directories). Startup still sweeps dangling atomic-write temps under that root.
 
@@ -592,7 +595,7 @@ The decentralized ledger lives at the **root of each Logseq graph** — it trave
 | **`files`** | Per-markdown processing checkpoint (`mtime`, `status`, `error`) — idempotent daemon resume |
 | **`session_*_tokens`** | Live token economics mirrored to the UI mid-inference |
 
-Persistence follows the same Ironclad contract as page writes: **`.matryca_daemon_state.json.tmp` → `fsync` → `os.replace`**, with `load_daemon_state()` double-read retry for 1 Hz API readers.
+Persistence follows the same Ironclad contract as page writes: **`.matryca_daemon_state.json.tmp` → `fsync` → `os.replace` → `.matryca_daemon_state.json.bak`**, with `load_daemon_state()` double-read retry for 1 Hz API readers. See **Atomic filesystem integrity (paranoia level)** below for the full pipeline.
 
 **Zero-config multi-graph:** change `LOGSEQ_GRAPH_PATH` (or open a different graph in `.env`) and restart the daemon — each graph maintains its own ledger file. No migration scripts, no cloud sync of telemetry metadata.
 
@@ -603,7 +606,8 @@ Persistence follows the same Ironclad contract as page writes: **`.matryca_daemo
 | **`.matryca_daemon_state.json`** | Daemon checkpoint + AI incremental ledger |
 | **`.matryca_xray_state.json`** | X-Ray alias map (`[n]` → UUID) for MCP/CLI sessions |
 | **`.matryca_semantic_cache/`** | Filesystem-backed semantic routing cache + GraphRAG artifacts |
-| **`.matryca_plumber_daemon.pid`** | Single-instance process lock |
+| **`.matryca_plumber_daemon.pid`** | Published PID for operator visibility |
+| **`.matryca_plumber_daemon.lock`** | Cross-process exclusive lock — prevents dual-daemon race conditions (POSIX `flock` or Windows `O_EXCL` + `msvcrt.locking`) |
 
 ---
 
@@ -626,8 +630,9 @@ Use this table as a **mental map** for `src/` and `.github/` — phases are narr
 | **11 — Fortress (`v1.3.0`)** | **`path_sandbox.py`** (`is_relative_to` graph root), **`mcp_tool_guard`**, lifespan lock/tmp-task teardown | **Adversarial hardening**: block LLM path traversal, graceful MCP shutdown |
 | **12 — Headless Revolution (`v1.4.0`)** | Removed **`httpx`** / **`LogseqClient`** / `src/bridge/`; **`graph_dispatch.py`** + **`append_child_to_node`**; **`.matryca_xray_state.json`**; **`get_broken_references()`** lint | **Zero UI dependency**: server-safe automation with a single read/write path on disk |
 | **13 — Operational hardening (`v1.4.1`)** | Lifespan **`os.chdir`** to sandbox root; **`mcp_telemetry` privacy sanitizer** (`MATRYCA_DEBUG`); **`service_manager.py`** + CLI **`matryca service`**; **162** strict tests | **Daemon-safe cwd**, **production-safe MCP logs**, **LaunchAgent / systemd** background integration |
-| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`semantic_clustering.py`** (Louvain GraphRAG), strict phase separation, **`hierarchical_summarization.py`** (outliner MapReduce), **Context Acceleration Shield** (`llm_context_payload.py`, `prompt_layout.py`), **`ui_server.py`** + **Sovereign UI** React SPA, **`graph_analytics.py`** dynamic Human-vs-AI telemetry, intra-turn telemetry sync, POSIX atomic daemon checkpoints, **`json_repair.py`**, **`prompt_constraints`**, **`reload_plumber_dotenv()`** hot-reload, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; monolithic single-server operator UX; fault-tolerant background processing; **364+** strict tests |
+| **14 — Ironclad Autonomous Linter OS (`v1.5.x`)** | **`MaintenanceDaemon`**, Instructor **`JSON_SCHEMA`**, Ermes **context compression**, cognitive lint modules, **structural quarantine**, **`semantic_clustering.py`** (Louvain GraphRAG), strict phase separation, **`hierarchical_summarization.py`** (outliner MapReduce), **Context Acceleration Shield** (`llm_context_payload.py`, `prompt_layout.py`), **`ui_server.py`** + **Sovereign UI** React SPA, **`graph_analytics.py`** dynamic Human-vs-AI telemetry, intra-turn telemetry sync, POSIX atomic daemon checkpoints, **`json_repair.py`**, **`prompt_constraints`**, **`reload_plumber_dotenv()`** hot-reload, **`patch_generational_caches_for_paths`** on Plumber writes | **Continuous local graph maintenance** without cloud APIs; monolithic single-server operator UX; fault-tolerant background processing |
 | **15 — Logseq-native parity shield (`v1.5.x`)** | **`page_path.py`** namespace encoding (`___` + percent-encode), **`page_properties.py`** true frontmatter vs block property placement + **`made-by::`** versioned stamping, **`atomic_write_bytes_if_unchanged`** optimistic concurrency (mtime guard), **`alias_index.py`** case-insensitive alias resolution + `logseq/bak/` / `.recycle/` exclusion, **`global_fence_scanner.py`** code-block immunity, UTF-8 / CRLF I/O on all graph paths, **`SettingsDrawer.tsx`** Trust & Safety UI (Safe / Augmented / Surgeon tiers), **`auto_split.py`** embed stubs, **`GraphInsightsCard.tsx`** Organic vs Agent telemetry | **100% Datalog filesystem parity** with Logseq OG; zero ghost-clone pages; no data loss during concurrent human + daemon edits; operator-visible mutation guardrails |
+| **16 — Enterprise security & concurrency (`v1.5 Ironclad`)** | **Zero-Trust UI API** (`ui_auth.py`, `X-Matryca-Token`), SSRF guards on LM proxy discovery (`ui_server.py`), cross-platform **`subprocess`** daemon launch (`start_daemon_detached`), **`.matryca_plumber_daemon.lock`** exclusivity, paranoia-level ledger pipeline + **`.bak`** recovery, **`PageLockUnavailableError`** lock-skip protocol, **`MATRYCA_ALLOW_FLOCK_DEGRADATION`**, L1 **`$HOME`** path isolation, **`graph_path_validate.py`**, **`json_flock.py`** cross-process JSON checkpoints, **417** strict tests | **Indestructible by default** for r/LocalLLaMA power-users: secure loopback cockpit, Windows-first daemon ops, zero ledger corruption on power loss, no path escape |
 
 **Cross-cutting:** **`src/config.py`**, **`matryca-wiki.yml`**, **`docs/openspec/`**, **`docs/PROJECT_DIARY.md`**, roadmap documents under **`docs/roadmaps/`**.
 
@@ -714,7 +719,8 @@ flowchart TB
 | `src/agent/prompt_constraints.py` | Cross-lingual output constraint for Plumber LLM prompts |
 | `src/agent/prompt_layout.py` | Cache-aligned prompt builder (`build_cache_aligned_prompt`) for KV prefix reuse |
 | `src/agent/llm_context_payload.py` | Phase 1 summary substitution + semantic skeleton for giant-page LLM payloads |
-| `src/cli/ui_server.py` | FastAPI + Uvicorn monolith for `matryca plumber status` — REST API + **Sovereign UI** React SPA on `:8000` |
+| `src/cli/ui_server.py` | FastAPI + Uvicorn monolith for `matryca plumber status` — REST API + **Sovereign UI** React SPA on `:8000`; Zero-Trust auth + SSRF guards |
+| `src/cli/ui_auth.py` | UI Bearer token resolution (`MATRYCA_UI_TOKEN` or runtime generation) and constant-time verification |
 | `src/graph/graph_analytics.py` | Live graph telemetry — dynamic Human-vs-AI subtraction for `GraphInsightsCard` |
 | `frontend/` | **Sovereign UI** React cockpit (Vite build → `frontend/dist/`); Light/Dark theme; Tauri-ready layout |
 | `src/graph/hierarchical_summarization.py` | Outliner-native MapReduce chunking for giant pages (Phase 1 bootstrap) |
@@ -728,7 +734,46 @@ flowchart TB
 
 > **Brand separation:** **Matryca Brain** is reserved exclusively for the Nuitka-compiled Pro enterprise ingestion suite. The open-source maintenance daemon described here is **Matryca Plumber**.
 
-State checkpoint: **`.matryca_daemon_state.json`** at the graph root (per-file `mtime`, `processed` / `skipped` / `error`). Process lock: **`.matryca_plumber_daemon.pid`**.
+State checkpoint: **`.matryca_daemon_state.json`** at the graph root (per-file `mtime`, `processed` / `skipped` / `error`). Process exclusivity: **`.matryca_plumber_daemon.lock`** + **`.matryca_plumber_daemon.pid`**.
+
+### Cross-platform process management (`v1.5 Ironclad`)
+
+Early Plumber builds detached the daemon with UNIX-only **`os.fork()`** — a pattern that **cannot run on Windows** and complicates signal handling on modern macOS sandboxes. **v1.5 Ironclad** replaces this with a robust **`subprocess.Popen`** launcher in **`start_daemon_detached()`** (`src/agent/maintenance_daemon.py`):
+
+```python
+subprocess.Popen(
+    [sys.executable, "-m", "src.cli", "plumber", "start", "--foreground"],
+    cwd=str(_REPO_ROOT),
+    env=env,  # LOGSEQ_GRAPH_PATH injected
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,  # detach from terminal session
+    close_fds=True,
+)
+```
+
+The parent polls **`read_pid_file()`** for up to 15 seconds; the foreground worker acquires the exclusive daemon lock and publishes its PID. This yields **identical semantics on Windows, macOS, and Linux** without fork-specific edge cases.
+
+#### Exclusive `.lock` file — dual-daemon prevention
+
+A stale PID file alone cannot guarantee single-instance safety (crashed processes leave orphan PIDs). Matryca therefore acquires **`.matryca_plumber_daemon.lock`** at daemon bootstrap:
+
+| Platform | Mechanism | Module |
+|----------|-----------|--------|
+| **POSIX** | `fcntl.flock(LOCK_EX \| LOCK_NB)` on lock sidecar | `_try_acquire_daemon_process_lock()` |
+| **Windows** | `O_CREAT \| O_EXCL` create + `msvcrt.locking(LK_NBLCK)` | `_try_acquire_daemon_process_lock_windows()` |
+
+If the lock is held by a live Plumber process, **`start_daemon_detached()`** returns **`already_running`**; if held by a dead PID, the lock file is reclaimed. Graceful shutdown (`SIGTERM`/`SIGINT`) releases flock descriptors and unlinks the lock sidecar before exit.
+
+```mermaid
+flowchart TD
+  START["matryca plumber start"] --> SUB["subprocess.Popen\n--foreground worker"]
+  SUB --> LOCK{"Acquire\n.matryca_plumber_daemon.lock"}
+  LOCK -->|held by live PID| FAIL["exit: already running"]
+  LOCK -->|acquired| RUN["MaintenanceDaemon.run_forever()"]
+  RUN --> PUB["write .matryca_plumber_daemon.pid"]
+```
 
 ### Sovereign UI — monolithic FastAPI + React SPA
 
@@ -742,6 +787,57 @@ The legacy Rich terminal canvas is **deprecated**. **`matryca plumber status`** 
 | **React SPA** | `/` | Static assets from `frontend/dist/` when built (`npm run build`); Light/Dark theme via `next-themes` |
 
 The React hook **`usePlumberPolling`** polls `/api/state`, `/api/logs`, and `/api/config` at **1 Hz**. **`GraphInsightsCard`** renders the Organic Human Mind vs Plumber Agent Cognition columns. CORS allows local Vite dev (`:5173`) and future **Tauri** packaging (`tauri://localhost`). One process, one port — no split between “API server” and “dashboard server.”
+
+#### Zero-Trust local API authentication (`v1.5 Ironclad`)
+
+Even on loopback, Matryca treats the Sovereign UI as an **untrusted client surface** — any other local process must not drive daemon lifecycle or read telemetry without proof of possession.
+
+| Component | Module | Contract |
+|-----------|--------|----------|
+| **Token resolution** | `src/cli/ui_auth.py` → `resolve_ui_token()` | Reads **`MATRYCA_UI_TOKEN`** from env, or generates **`secrets.token_urlsafe(32)`** once per Uvicorn process |
+| **Session bootstrap** | `GET /api/auth/session` | Returns `{ "token": "…" }` — the React SPA caches this and attaches it to every subsequent request |
+| **Request gate** | `_require_ui_token()` dependency | Validates **`X-Matryca-Token`** header via constant-time compare; missing/invalid → **401** |
+| **Protected routes** | `/api/state`, `/api/logs`, `/api/config`, daemon control | All require Bearer token except `/api/auth/session` and static SPA assets |
+
+**`frontend/src/hooks/usePlumberPolling.ts`** resolves the token on first poll, then sends **`X-Matryca-Token`** on every 1 Hz fetch — the daemon inference loop never blocks on auth, but the control plane is cryptographically gated.
+
+```mermaid
+sequenceDiagram
+    participant SPA as React SPA
+    participant API as FastAPI :8000
+    participant DAEMON as MaintenanceDaemon
+
+    SPA->>API: GET /api/auth/session
+    API-->>SPA: { token }
+    loop 1 Hz poll
+        SPA->>API: GET /api/state + X-Matryca-Token
+        API->>API: verify_ui_token()
+        API->>DAEMON: load_daemon_state (read-only)
+        API-->>SPA: checkpoint + graph_analytics
+    end
+```
+
+#### SSRF guards on LM proxy discovery
+
+The Settings drawer allows operators to point model discovery at alternate LM Studio endpoints. Because the UI server performs server-side HTTP fetches, **`src/cli/ui_server.py`** implements a **defense-in-depth SSRF filter** before any outbound request:
+
+1. **Hostname blocklist** — hard-deny **`169.254.169.254`**, **`metadata.google.internal`**, and other cloud metadata hosts.
+2. **IPv4-mapped normalization** — **`::ffff:169.254.169.254`** is canonicalized to IPv4 before classification, closing the IPv6-mapped bypass.
+3. **DNS resolution audit** — `socket.getaddrinfo()` resolves every A/AAAA record; any answer in link-local, multicast, reserved, unspecified, or non-loopback private ranges is rejected unless the hostname is explicitly **`localhost` / `127.0.0.1` / `::1`** or matches the configured **`MATRYCA_LM_BASE_URL`** host.
+4. **Allowlist default** — only loopback hosts and the operator-configured LM base URL pass **`_validate_lm_models_base_url()`**.
+
+This prevents a compromised browser tab or malicious local process from using the Matryca UI as a springboard to scrape AWS/GCP instance metadata or scan the LAN — even though inference itself remains local-first.
+
+```mermaid
+flowchart TD
+  REQ["GET /api/lm/models?base_url=…"] --> PARSE["urlparse host"]
+  PARSE --> BL{"Blocked host?\n169.254.169.254 · metadata.*"}
+  BL -->|yes| DENY["400 host not allowed"]
+  BL -->|no| DNS["getaddrinfo → normalize IPv4-mapped"]
+  DNS --> IP{"Any blocked IP class?"}
+  IP -->|yes| DENY
+  IP -->|no| ALLOW["resolve_llm_base_url → fetch models"]
+```
 
 ```mermaid
 flowchart LR
@@ -803,19 +899,32 @@ sequenceDiagram
     D->>DISK: _save_cycle_checkpoint (post-inference)
 ```
 
-#### POSIX-atomic write-and-replace daemon checkpoints
+#### POSIX-atomic write-and-replace daemon checkpoints (paranoia level)
 
-**Problem:** Standard non-atomic truncation (`open(path, "w")`) on `.matryca_daemon_state.json` exposes a torn-write window. Concurrent **1 Hz** frontend pollers calling **`json.loads`** during truncation raised transient **`JSONDecodeError`** flakes — decoupling disk persistence from parallel Web API readers.
+**Problem:** Standard non-atomic truncation (`open(path, "w")`) on `.matryca_daemon_state.json` exposes a torn-write window. Concurrent **1 Hz** frontend pollers calling **`json.loads`** during truncation raised transient **`JSONDecodeError`** flakes — decoupling disk persistence from parallel Web API readers. A sudden power loss mid-write could corrupt the incremental AI ledger.
 
-**Solution:** **`save_daemon_state()`** mirrors the Ironclad page commit discipline:
+**Solution:** **`save_daemon_state()`** implements the full **paranoia-level** commit pipeline shared with page writes, plus a hot backup tier:
 
-1. Write full JSON payload to **`.matryca_daemon_state.json.tmp`** in the graph root.
-2. **`flush()`** + **`os.fsync(fileno)`** — push bytes to the OS before any live path references them.
-3. **`os.replace(tmp, final)`** — POSIX **atomic** inode swap; readers always see the previous complete checkpoint or the next one.
+1. **`tempfile.mkstemp`** in the graph root with prefix **`.matryca_daemon_state.json.`** and suffix **`.tmp`** — guarantees **`os.replace`** stays on one filesystem volume.
+2. **Write full JSON payload**, **`flush()`**, then **`os.fsync(fileno)`** — data reaches durable media before any live inode references the new bytes.
+3. **`os.replace(tmp, final)`** — POSIX **atomic** inode swap; concurrent readers observe either the previous complete checkpoint or the next one — never a torn JSON document.
+4. **`shutil.copy2(final, .matryca_daemon_state.json.bak)`** — human-visible recovery sibling; **`load_daemon_state()`** auto-restores from **`.bak`** when the primary file is corrupt or empty.
+5. **`cross_process_json_flock()`** (`src/graph/json_flock.py`) — exclusive **`.matryca_daemon_state.json.flock`** sidecar serializes concurrent writers (daemon checkpoint + UI control actions) on POSIX; Windows skips flock but retains atomic replace.
 
-**`load_daemon_state()`** pairs this with a **defensive double-read fallback**: **`_read_daemon_state_payload()`** retries once on empty or malformed reads (catching the microsecond race if a reader opens mid-replace). Corrupt payloads self-heal to a fresh **`DaemonState()`** with a logged **`[METADATA CORRUPTION DETECTED]`** warning.
+Markdown page writes use the same core discipline in **`atomic_write_bytes`** (`src/graph/markdown_blocks.py`), with an additional **parent-directory `fsync`** after replace (directory metadata durability) and optional **`.bak`** siblings on property-style mutators.
 
-Markdown page writes continue to use **`atomic_write_bytes`** in **`markdown_blocks.py`**; daemon state uses the same **write → fsync → replace** contract without sharing the page-level `((uuid))` pre-flight guard.
+```mermaid
+flowchart LR
+  PAYLOAD["DaemonState JSON"] --> MK["mkstemp in graph root"]
+  MK --> W["write + flush + fsync"]
+  W --> R["os.replace → live checkpoint"]
+  R --> BAK["copy2 → .bak sibling"]
+  R --> READERS["1 Hz API pollers\nalways valid JSON"]
+```
+
+**`load_daemon_state()`** pairs this with a **defensive double-read fallback**: **`_read_daemon_state_payload()`** retries once on empty or malformed reads (catching the microsecond race if a reader opens mid-replace). Corrupt primary + corrupt backup self-heal to a fresh **`DaemonState()`** with a logged **`[METADATA CORRUPTION DETECTED]`** warning.
+
+Markdown page writes continue to use **`atomic_write_bytes`** in **`markdown_blocks.py`**; daemon state uses the same **write → fsync → replace → backup** contract without sharing the page-level `((uuid))` pre-flight guard.
 
 ### Why these mechanisms exist
 
@@ -824,6 +933,10 @@ Markdown page writes continue to use **`atomic_write_bytes`** in **`markdown_blo
 Matryca Plumber runs **concurrently** with human edits in Logseq OG and with MCP tool sessions on the same files. Without serialization, read-modify-write cycles (read page → LLM lint → append index → `os.replace`) would interleave and produce torn writes or lost bullets.
 
 **`page_rmw_lock(path)`** (`src/graph/page_write_lock.py`) acquires an exclusive **`fcntl.flock`** on a sidecar lock file beside each page. The Plumber daemon, MCP mutators, and cognitive modules all acquire this lock before mutating a page — **transactional immutability** at the file grain.
+
+**Cloud-sync degradation:** iCloud, Dropbox, and OneDrive often reject or noop **`flock`**. By default Matryca **fails closed** — raising **`PageLockUnavailableError`** so the daemon skips the file rather than writing without cross-process safety. Operators on synced vaults may set **`MATRYCA_ALLOW_FLOCK_DEGRADATION=true`** (at-your-own-risk) to fall back to in-process thread locking only.
+
+**Strict lock-skip protocol:** when **`PageLockUnavailableError`** fires (e.g., Logseq holds the file open, or flock retries exhaust), **`MaintenanceDaemon._process_one_file()`** logs a structural warning, **does not mutate the page**, **does not update the per-file ledger entry**, and leaves the file **pending for the next poll cycle** — zero torn writes, zero false "processed" states.
 
 #### Incremental cache patching (`patch_generational_caches_for_paths`)
 
@@ -1009,7 +1122,7 @@ Principle 15 makes runtime parameters **dynamic within live background threads**
 | `index_page()` | Auto-invokes `prepare_llm_context_payload()` when `graph_root` is available |
 | `tests/test_llm_context_payload.py` | Six integration tests validating payload selection, skeleton extraction, and prefix order |
 
-| **364+** pytest targets green (2 skipped); strict Mypy and Ruff clean via `make check`.
+| **417** pytest targets green (2 skipped); strict Mypy and Ruff clean via `make check`.
 
 ---
 
@@ -1096,7 +1209,7 @@ Implemented in pure Python to exclude heavy C dependencies or external vector da
 ### 3. Operating System Hardening Mechanisms
 
 - **Universal Unicode Resilience:** Every decode/encode I/O operation applies `errors="replace"` to digest corrupted web fragments without ever raising `UnicodeDecodeError`.
-- **Graceful Signal Evacuation (`SIGTERM`/`SIGINT`):** On shutdown signal interception, an atomic hook writes current state, persists the in-RAM catalog, releases all process lock descriptors (`*.matryca.lock`), and deallocates the PID file before `sys.exit(0)`.
+- **Graceful Signal Evacuation (`SIGTERM`/`SIGINT`):** On shutdown signal interception, an atomic hook writes current state, persists the in-RAM catalog, releases all process lock descriptors (`*.matryca.lock`, **`.matryca_plumber_daemon.lock`**), and deallocates the PID file before `sys.exit(0)`.
 - **Live cockpit telemetry:** The React control room polls `/api/state` and `/api/logs` at 1 Hz; ops log tailing uses bounded line reads — constant RAM regardless of multi-megabyte JSONL history.
 - **Error Backoff:** Pages that fail indexing due to external causes (e.g. LM Studio VRAM timeout) are marked `"error"`. The daemon excludes them from subsequent scan cycles until their on-disk `st_mtime` receives a physical modification from the user, zeroing wasted CPU cycles.
 

@@ -8,6 +8,17 @@ You are an autonomous **Knowledge Graph Architect** operating on **Logseq OG**: 
 
 **Concurrency contract:** Matryca operates under **Optimistic Concurrency Control (OCC)**. Before any LLM-backed or daemon write, the engine snapshots `st_mtime`. If the human edits the same `.md` file in Logseq while inference runs, the write **aborts** — no torn pages, no silent overwrite. Always re-read after a failed mutation.
 
+**Strict lock-skip protocol (`PageLockUnavailableError`):** When the engine cannot acquire a cross-process page lock — for example because Logseq is actively writing the file, another MCP session holds the sidecar flock, or a cloud-sync filesystem rejects `flock` without degradation enabled — Matryca raises **`PageLockUnavailableError`**. You **must**:
+
+1. **Skip the file entirely** for this turn — do not retry the write in a tight loop.
+2. **Do not update** the daemon telemetry ledger or mark the file as processed.
+3. **Leave the file pending** for the next daemon cycle or a later MCP invocation when the lock clears.
+4. **Log and move on** — structural warnings are recorded in the ops log; forcing a write without the lock risks torn pages.
+
+This is non-negotiable for both MCP agents and the Plumber daemon. Patience beats corruption.
+
+**Path isolation rule (Zero-Trust sandbox):** All graph reads and mutations are strictly confined to **`LOGSEQ_GRAPH_PATH`**. The path sandbox (`path_sandbox.py`) resolves every candidate path (following symlinks) and requires it to remain **`is_relative_to`** the canonical graph root — blocking `../` traversal, `pages/../../outside.md`, and symlink escape attempts. **L1 memory** reads are further restricted to paths under the operator's **`$HOME`** or system temp. Any attempt to read or mutate memory outside these explicitly validated boundaries triggers a **fatal security error** (`PathTraversalSecurityError` / `Security Violation: Path traversal attempt blocked.`) — the MCP session survives, but the operation is rejected with no partial side effects. Never construct absolute paths outside the graph; never ask tools to read `/etc`, other users' home directories, or sibling vaults.
+
 **Authorship protocol:** Pages created by Matryca Plumber (seed pages, auto-split children, backlink contexts) are automatically stamped at the top of the file:
 
 ```text
@@ -90,6 +101,7 @@ These rules mirror Logseq OG's Clojure/Datalog on-disk contract. Violations caus
 4. **Namespace filenames** — semantic `Domain/Topic` → on-disk `Domain___Topic.md` with percent-encoding for reserved OS chars; never hand-craft filenames with raw `/`.
 5. **UTF-8 only** — all graph I/O is `encoding="utf-8"`.
 6. **Dead zones** — never mutate lines inside fenced code blocks, HTML comments, or `#+BEGIN_QUERY` … `#+END_QUERY` regions.
+7. **Sandbox boundary** — never supply paths outside `LOGSEQ_GRAPH_PATH` or L1 `$HOME` scope; traversal attempts are rejected fatally.
 
 When in doubt: `read_graph_data` / `target_type="page"` first, then `dry_run: true` on every mutator.
 
@@ -380,6 +392,8 @@ Mirror llm-wiki-style ingest. See `docs/ARCHITECTURE.md` for bridge vs on-disk b
 ## Human co-working (non-destructive)
 
 A human edits the same files concurrently with the Plumber daemon and MCP tools. **Optimistic Concurrency Control** protects live edits: if `st_mtime` drifts during your inference window, abort and re-read — do not force the write.
+
+**Page lock contention:** If Logseq or another writer holds the file, you may receive a lock-unavailable outcome instead of an OCC abort. Treat this like a **deferred retry**: skip the mutation, do not mark work complete, and revisit on the next cycle. Never bypass `page_rmw_lock` or set `MATRYCA_ALLOW_FLOCK_DEGRADATION` unless the operator explicitly accepts weaker cross-process safety on a cloud-synced vault.
 
 If new information **contradicts** existing blocks, you **must not** silently overwrite.
 
