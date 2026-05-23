@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 from src.agent.mcp_tool_guard import guard_mcp_tool
 from src.graph.markdown_blocks import atomic_write_bytes, graph_safe_page_path
-from src.graph.path_sandbox import SECURITY_VIOLATION_MSG, assert_path_within_graph
+from src.graph.path_sandbox import (
+    SECURITY_VIOLATION_MSG,
+    PathTraversalSecurityError,
+    assert_path_within_graph,
+)
 from src.rag.matryca_hooks import resolve_logseq_page_md
 
 
@@ -19,20 +23,20 @@ def _make_graph(tmp_path: Path) -> Path:
 
 def test_graph_safe_page_path_blocks_dotdot_page_ref(tmp_path: Path) -> None:
     graph = _make_graph(tmp_path)
-    with pytest.raises(ValueError, match="Security Violation"):
+    with pytest.raises(PathTraversalSecurityError, match="Security Violation"):
         graph_safe_page_path(graph, "../../../etc/passwd")
 
 
 def test_graph_safe_page_path_blocks_pages_prefix_escape(tmp_path: Path) -> None:
     graph = _make_graph(tmp_path)
-    with pytest.raises(ValueError, match="Security Violation"):
+    with pytest.raises(PathTraversalSecurityError, match="Security Violation"):
         graph_safe_page_path(graph, "pages/../../outside.md")
 
 
 def test_atomic_write_bytes_blocks_path_outside_graph(tmp_path: Path) -> None:
     graph = _make_graph(tmp_path)
     outside = tmp_path / "escape.md"
-    with pytest.raises(ValueError, match="Security Violation"):
+    with pytest.raises(PathTraversalSecurityError, match="Security Violation"):
         atomic_write_bytes(outside, b"owned", graph_root=graph)
 
 
@@ -46,7 +50,7 @@ def test_assert_path_within_graph_allows_in_graph_file(tmp_path: Path) -> None:
 
 def test_resolve_logseq_page_md_blocks_traversal_before_lookup(tmp_path: Path) -> None:
     graph = _make_graph(tmp_path)
-    with pytest.raises(ValueError, match="Security Violation"):
+    with pytest.raises(PathTraversalSecurityError, match="Security Violation"):
         resolve_logseq_page_md(graph, "../../outside")
 
 
@@ -54,7 +58,7 @@ def test_resolve_logseq_page_md_blocks_traversal_before_lookup(tmp_path: Path) -
 async def test_guard_mcp_tool_surfaces_path_traversal_value_error() -> None:
     @guard_mcp_tool
     async def blocked() -> dict[str, object]:
-        raise ValueError(SECURITY_VIOLATION_MSG)
+        raise PathTraversalSecurityError(SECURITY_VIOLATION_MSG)
 
     out = await blocked()
     assert out["ok"] is False

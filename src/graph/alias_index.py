@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Literal
 
 from .page_path import page_title_from_path as _page_title_from_path
+from .path_sandbox import (
+    PathTraversalSecurityError,
+    is_resolved_path_within_graph,
+    read_graph_file_text,
+    resolved_graph_root,
+)
 
 _ALIAS_LINE = re.compile(r"(?im)^\s*alias::\s*(.+?)\s*$")
 
@@ -55,9 +61,10 @@ EXCLUDED_GRAPH_DIR_NAMES = frozenset({"logseq", ".recycle", ".git"})
 
 
 def is_scannable_graph_markdown(path: Path, graph_root: Path) -> bool:
-    """Return False for hidden, internal, backup, recycle, or VCS path segments."""
+    """Return False for hidden, internal, backup, recycle, VCS, or symlink-escape paths."""
+    root = resolved_graph_root(graph_root)
     try:
-        rel = path.relative_to(graph_root)
+        rel = path.relative_to(root)
     except ValueError:
         return False
     for part in rel.parts:
@@ -67,7 +74,7 @@ def is_scannable_graph_markdown(path: Path, graph_root: Path) -> bool:
             return False
         if part in EXCLUDED_GRAPH_DIR_NAMES:
             return False
-    return True
+    return is_resolved_path_within_graph(path, root)
 
 
 def iter_scannable_pages_markdown(graph_root: str | Path) -> list[Path]:
@@ -194,8 +201,8 @@ def build_alias_index(graph_root: str | Path) -> AliasIndex:
     idx = AliasIndex(graph_root=str(root))
     for path in _iter_markdown_files(root):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
+            text = read_graph_file_text(path, root)
+        except (OSError, PathTraversalSecurityError) as exc:
             idx.collision_notes.append(f"unreadable {path}: {exc}")
             continue
         rel = path.relative_to(root).as_posix()
@@ -251,8 +258,8 @@ def index_aliases_from_file(idx: AliasIndex, graph_root: Path, path: Path) -> No
     """Merge ``alias::`` lines from one markdown file into an existing index."""
     root = Path(graph_root).expanduser().resolve(strict=False)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+        text = read_graph_file_text(path, root)
+    except (OSError, PathTraversalSecurityError) as exc:
         idx.collision_notes.append(f"unreadable {path}: {exc}")
         return
     rel = path.relative_to(root).as_posix()

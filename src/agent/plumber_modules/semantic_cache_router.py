@@ -153,6 +153,37 @@ def _env_ttl() -> int:
         return _DEFAULT_TTL_SECONDS
 
 
+def purge_expired_semantic_cache(graph_root: Path) -> int:
+    """Remove expired on-disk cache entries proactively (returns count removed)."""
+    root = _cache_root(graph_root)
+    if not root.is_dir():
+        return 0
+    now = time.time()
+    removed = 0
+    for path in root.glob("*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            removed += 1
+            continue
+        if not isinstance(raw, dict):
+            path.unlink(missing_ok=True)
+            removed += 1
+            continue
+        try:
+            created = float(raw.get("created_at", 0.0))
+            ttl = int(raw.get("ttl_seconds", _env_ttl()))
+        except (TypeError, ValueError):
+            path.unlink(missing_ok=True)
+            removed += 1
+            continue
+        if now - created > ttl:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def clear_semantic_cache(graph_root: Path | None = None) -> None:
     """Drop in-process entries and optional on-disk cache directory."""
     with _lock:
@@ -171,5 +202,6 @@ __all__ = [
     "cache_put",
     "clear_semantic_cache",
     "get_or_compute_model",
+    "purge_expired_semantic_cache",
     "semantic_cache_key",
 ]

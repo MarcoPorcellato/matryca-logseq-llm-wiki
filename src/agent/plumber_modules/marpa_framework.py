@@ -16,6 +16,7 @@ from ...graph.markdown_blocks import (
 )
 from ...graph.page_properties import inject_page_properties, page_property_keys
 from ...graph.page_write_lock import page_rmw_lock
+from ...graph.path_sandbox import read_graph_file_text, resolved_graph_root
 from ..plumber_llm import MarpaClassificationResult
 from ..prompt_constraints import finalize_system_prompt
 from ..prompt_layout import build_cache_aligned_prompt
@@ -102,27 +103,28 @@ def _scan_ssot_duplication(graph_root: Path, page_path: Path, content: str) -> l
         return flags
 
     try:
-        self_text = page_path.read_text(encoding="utf-8", errors="replace")
+        self_text = read_graph_file_text(page_path, graph_root)
     except OSError:
         self_text = content
     from ...graph.alias_index import is_scannable_graph_markdown
 
-    pages_dir = graph_root / "pages"
+    root = resolved_graph_root(graph_root)
+    pages_dir = root / "pages"
     if not pages_dir.is_dir():
         return flags
 
     for other in pages_dir.rglob("*.md"):
-        if not other.is_file() or not is_scannable_graph_markdown(other, graph_root):
+        if not other.is_file() or not is_scannable_graph_markdown(other, root):
             continue
         if other.resolve() == page_path.resolve():
             continue
         try:
-            other_text = other.read_text(encoding="utf-8", errors="replace")
+            other_text = read_graph_file_text(other, root)
         except OSError:
             continue
         for block in blocks:
             if block in other_text and block not in self_text.replace(block, "", 1):
-                rel = other.relative_to(graph_root).as_posix()
+                rel = other.relative_to(root).as_posix()
                 flags.append(f"ssot_duplicate:{rel}")
                 break
     return flags

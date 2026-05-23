@@ -17,7 +17,9 @@ from .config import load_matryca_wiki_config
 from .graph.markdown_blocks import sweep_dangling_atomic_tmp_files
 from .graph.page_write_lock import clear_page_write_locks
 from .graph.path_sandbox import resolved_graph_root
+from .utils.logging_config import configure_loguru
 
+configure_loguru()
 install_loguru_mcp_bridge()
 
 

@@ -40,6 +40,7 @@ from src.cli.tui_dashboard import MONITOR_TITLE, collect_snapshot
 from src.graph.bootstrap_harvest import run_bootstrap_harvest
 from src.graph.master_catalog import CatalogEntry, load_master_catalog, master_index_page_path
 from src.graph.page_write_lock import clear_page_write_locks, page_rmw_lock
+from src.graph.path_sandbox import graph_relative_path_key
 from src.utils.token_logger import TokenLogger, format_activity_summary, resolve_plumber_log_path
 
 BLOCK_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -209,7 +210,7 @@ def test_save_daemon_state_persists_block_ref_error_text(graph_root: Path) -> No
         "Error: Malformed UUID detected in block ref. "
         f"Must be standard 36-char format. (example: (({bad_uuid})))."
     )
-    page_key = str((graph_root / "pages" / "Broken.md").resolve())
+    page_key = graph_relative_path_key(graph_root / "pages" / "Broken.md", graph_root)
     state = DaemonState(
         files={
             page_key: FileState(
@@ -334,7 +335,7 @@ def test_maintenance_daemon_processes_pending_page(graph_root: Path, tmp_path: P
         max_files_per_cycle=5,
     )
     state = daemon.run_cycle()
-    key = str(path.resolve())
+    key = graph_relative_path_key(path, graph_root)
     assert key in state.files
     assert state.files[key].status == "processed"
     text = path.read_text(encoding="utf-8")
@@ -365,7 +366,7 @@ def test_pending_detection_skips_processed_mtime(graph_root: Path) -> None:
 
 def test_pending_detection_after_file_change(graph_root: Path) -> None:
     path = _write_page(graph_root, "Gamma", "- v1\n")
-    key = str(path.resolve())
+    key = graph_relative_path_key(path, graph_root)
     state = DaemonState(
         files={
             key: FileState(
@@ -382,7 +383,7 @@ def test_pending_detection_after_file_change(graph_root: Path) -> None:
 def test_pending_detection_skips_error_with_stable_mtime(graph_root: Path) -> None:
     path = _write_page(graph_root, "ErrorBackoff", "- broken\n")
     mtime = path.stat().st_mtime
-    key = str(path.resolve())
+    key = graph_relative_path_key(path, graph_root)
     state = DaemonState(
         files={
             key: FileState(
@@ -398,7 +399,7 @@ def test_pending_detection_skips_error_with_stable_mtime(graph_root: Path) -> No
 
 def test_pending_detection_requeues_error_after_edit(graph_root: Path) -> None:
     path = _write_page(graph_root, "ErrorRetry", "- v1\n")
-    key = str(path.resolve())
+    key = graph_relative_path_key(path, graph_root)
     state = DaemonState(
         files={
             key: FileState(
@@ -872,10 +873,11 @@ def test_maintenance_daemon_applies_semantic_lint(
 
 def test_prune_stale_daemon_file_entries_removes_ghosts(graph_root: Path) -> None:
     live = _write_page(graph_root, "Live", "- ok\n")
-    ghost_key = str((graph_root / "pages" / "Deleted.md").resolve())
+    live_key = graph_relative_path_key(live, graph_root)
+    ghost_key = "pages/Deleted.md"
     state = DaemonState(
         files={
-            str(live.resolve()): FileState(
+            live_key: FileState(
                 mtime=live.stat().st_mtime,
                 processed_at="2026-01-01T00:00:00+00:00",
                 status="processed",
@@ -890,7 +892,7 @@ def test_prune_stale_daemon_file_entries_removes_ghosts(graph_root: Path) -> Non
     removed = prune_stale_daemon_file_entries(state, graph_root)
     assert removed == 1
     assert ghost_key not in state.files
-    assert str(live.resolve()) in state.files
+    assert live_key in state.files
 
 
 def test_instructor_client_reset_execution_history() -> None:
@@ -1064,8 +1066,8 @@ def test_daemon_skips_malformed_block_ref_and_processes_healthy_page(
     )
     state = daemon.run_cycle()
 
-    bad_key = str(bad_path.resolve())
-    good_key = str(good_path.resolve())
+    bad_key = graph_relative_path_key(bad_path, graph_root)
+    good_key = graph_relative_path_key(good_path, graph_root)
     assert state.files[bad_key].status == "skipped"
     assert state.files[good_key].status == "processed"
     assert list_pending_files(graph_root, state) == []
@@ -1227,7 +1229,7 @@ def test_run_cycle_bulk_fast_track_drains_cached_pages_despite_llm_cap(
     state = daemon.run_cycle()
 
     for path in paths:
-        key = str(path.resolve())
+        key = graph_relative_path_key(path, graph_root)
         assert state.files[key].status == "skipped"
     assert list_pending_files(graph_root, state) == []
 
@@ -1422,7 +1424,7 @@ def test_phase2_requeues_semantic_index_skipped_pages(graph_root: Path) -> None:
         "IndexedPhaseTwo",
         f"- body\n\n{SEMANTIC_INDEX_HEADER}\n- summary:: cached\n",
     )
-    key = str(path.resolve())
+    key = graph_relative_path_key(path, graph_root)
     state = DaemonState(
         bootstrap_complete=True,
         files={

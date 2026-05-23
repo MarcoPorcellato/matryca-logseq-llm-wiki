@@ -35,12 +35,12 @@ def page_title_to_filename(title: str) -> str:
 
 def page_title_from_graph_relpath(relpath: str) -> str:
     """Derive a semantic page title from a graph-relative path (``pages/…`` or ``journals/…``)."""
-    normalized = relpath.replace("\\", "/").removesuffix(".md")
-    if normalized.startswith("pages/"):
-        normalized = normalized.removeprefix("pages/")
-    elif normalized.startswith("journals/"):
-        normalized = normalized.removeprefix("journals/")
-    return normalized.replace("___", "/")
+    rel = Path(relpath.replace("\\", "/"))
+    parts = rel.parts
+    if parts and parts[0] in ("pages", "journals"):
+        rel = Path(*parts[1:]) if len(parts) > 1 else Path()
+    stem = rel.as_posix().removesuffix(".md") if rel.parts else ""
+    return stem.replace("___", "/")
 
 
 def page_title_from_path(graph_root: Path, path: Path) -> str:

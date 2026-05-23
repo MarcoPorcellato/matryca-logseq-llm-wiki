@@ -71,12 +71,17 @@ from ..graph.page_write_lock import (
     page_rmw_lock,
     sweep_matryca_lock_sidecars,
 )
+from ..graph.path_sandbox import (
+    graph_relative_path_key,
+    normalize_daemon_file_key,
+)
 from ..graph.semantic_clustering import (
     format_cluster_neighborhood,
     load_or_compute_semantic_clusters,
 )
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.json_repair import parse_llm_json
+from ..utils.logging_config import configure_loguru
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -116,6 +121,7 @@ from .plumber_modules.marpa_framework import (
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
+    purge_expired_semantic_cache,
     semantic_cache_key,
 )
 from .prompt_constraints import ALIAS_FIRST_LINK_CONSTRAINT, finalize_system_prompt
@@ -358,6 +364,40 @@ def record_daemon_impact(
         state.ai_links_injected += links_backpropagated
 
 
+def normalize_daemon_state_file_keys(graph_root: Path, state: DaemonState) -> bool:
+    """Rewrite legacy absolute file keys to graph-relative POSIX paths."""
+    if not state.files:
+        return False
+    migrated: dict[str, FileState] = {}
+    changed = False
+    for key, rec in state.files.items():
+        new_key = normalize_daemon_file_key(graph_root, key)
+        if new_key != key:
+            changed = True
+        migrated[new_key] = rec
+    if changed:
+        state.files = migrated
+    return changed
+
+
+def _daemon_file_key(graph_root: Path, path: Path) -> str:
+    return graph_relative_path_key(path, graph_root)
+
+
+def _lookup_file_state(
+    graph_root: Path,
+    state: DaemonState,
+    path: Path,
+) -> tuple[str, FileState | None]:
+    """Resolve file ledger entry using graph-relative keys with legacy fallback."""
+    key = _daemon_file_key(graph_root, path)
+    rec = state.files.get(key)
+    if rec is not None:
+        return key, rec
+    legacy = str(path.resolve())
+    return key, state.files.get(legacy)
+
+
 def heal_daemon_state_ledger(graph_root: Path, state: DaemonState) -> bool:
     """Clamp ledger counters when live graph totals fall below persisted AI impact."""
     snapshot = reconcile_telemetry_ledger(
@@ -434,7 +474,10 @@ def load_daemon_state(graph_root: Path) -> DaemonState:
             "self-healing by initializing a fresh instance."
         )
         return sync_daemon_state_from_env(DaemonState())
-    return sync_daemon_state_from_env(DaemonState.from_json(payload))
+    state = sync_daemon_state_from_env(DaemonState.from_json(payload))
+    if normalize_daemon_state_file_keys(graph_root, state):
+        logger.info("Migrated daemon file ledger keys to graph-relative POSIX paths")
+    return state
 
 
 def save_daemon_state(graph_root: Path, state: DaemonState) -> None:
@@ -446,6 +489,7 @@ def save_daemon_state(graph_root: Path, state: DaemonState) -> None:
     """
     path = state_path(graph_root)
     tmp_path = path.parent / STATE_TMP_FILENAME
+    normalize_daemon_state_file_keys(graph_root, state)
     payload = json.dumps(state.to_json(), indent=2, ensure_ascii=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     committed = False
@@ -1678,9 +1722,8 @@ def page_needs_phase2_cognitive(
     if _page_is_terminal_skip(text):
         return False
 
-    key = str(path.resolve())
+    _key, rec = _lookup_file_state(graph_root, state, path)
     mtime = path.stat().st_mtime
-    rec = state.files.get(key)
     if rec is None:
         return True
     if not _mtime_matches(rec.mtime, mtime):
@@ -1708,9 +1751,8 @@ def compute_phase2_progress_metrics(
         if title in MATRYCA_GENERATED_PAGE_TITLES:
             continue
         total += 1
-        key = str(path.resolve())
+        _key, rec = _lookup_file_state(graph_root, state, path)
         mtime = path.stat().st_mtime if path.is_file() else 0.0
-        rec = state.files.get(key)
         if rec is not None and _mtime_matches(rec.mtime, mtime) and rec.status == "processed":
             cognitive_done += 1
         elif page_needs_phase2_cognitive(graph_root, path, state):
@@ -1726,9 +1768,8 @@ def compute_scan_metrics(graph_root: Path, state: DaemonState) -> ScanMetrics:
     processed = 0
     pending = 0
     for path in files:
-        key = str(path.resolve())
+        _key, rec = _lookup_file_state(graph_root, state, path)
         mtime = path.stat().st_mtime if path.is_file() else 0.0
-        rec = state.files.get(key)
         if rec is not None and _mtime_matches(rec.mtime, mtime):
             if rec.status == "processed":
                 processed += 1
@@ -1758,9 +1799,8 @@ def list_pending_files(
             if page_needs_phase2_cognitive(graph_root, path, state):
                 pending.append(path)
             continue
-        key = str(path.resolve())
+        _key, rec = _lookup_file_state(graph_root, state, path)
         mtime = path.stat().st_mtime
-        rec = state.files.get(key)
         if rec is not None and _mtime_matches(rec.mtime, mtime):
             if rec.status in settled_statuses:
                 continue
@@ -1772,7 +1812,7 @@ def list_pending_files(
 
 def prune_stale_daemon_file_entries(state: DaemonState, graph_root: Path) -> int:
     """Remove ghost paths from daemon state (deleted or renamed markdown files)."""
-    live_keys = {str(path.resolve()) for path in iter_alias_source_paths(graph_root)}
+    live_keys = {_daemon_file_key(graph_root, path) for path in iter_alias_source_paths(graph_root)}
     ghosts = [key for key in state.files if key not in live_keys]
     for key in ghosts:
         del state.files[key]
@@ -2147,7 +2187,7 @@ class MaintenanceDaemon:
 
     def _try_fast_track_cycle_file(self, path: Path, state: DaemonState) -> bool:
         """Settle a pending page without LLM tokens (quarantine, cache, empty)."""
-        key = str(path.resolve())
+        key = _daemon_file_key(self.graph_root, path)
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -2200,7 +2240,7 @@ class MaintenanceDaemon:
         cluster_id: str | None = None,
     ) -> bool:
         """Index one pending page via LLM path. Returns whether inference ran this turn."""
-        key = str(path.resolve())
+        key = _daemon_file_key(self.graph_root, path)
         mtime = path.stat().st_mtime
         title = _page_title_from_path(self.graph_root, path)
         state.last_file = sanitize_for_console(key)
@@ -2371,6 +2411,11 @@ class MaintenanceDaemon:
         state = self._sync_runtime_config(state or load_daemon_state(self.graph_root))
         self._hydrate_bootstrap_phase(state)
         self._hydrate_token_logger_from_state(state)
+        normalize_daemon_state_file_keys(self.graph_root, state)
+        try:
+            purge_expired_semantic_cache(self.graph_root)
+        except OSError as exc:
+            logger.warning("Semantic cache purge skipped: {}", exc)
         try:
             prune_stale_daemon_file_entries(state, self.graph_root)
         except (OSError, FileNotFoundError) as exc:
@@ -2550,6 +2595,7 @@ def run_plumber_audit(graph_root: Path | None = None) -> dict[str, Any]:
 def start_daemon_foreground(graph_root: Path | None = None) -> None:
     """Run the daemon in the current process (foreground)."""
     reload_plumber_dotenv()
+    configure_loguru()
     root = graph_root or resolve_graph_root()
     daemon = MaintenanceDaemon(root)
     daemon.run_forever()
@@ -2599,8 +2645,7 @@ def start_daemon_detached(graph_root: Path | None = None) -> dict[str, Any]:
         except OSError as e:
             logger.warning(f"[OS SCHEDULER] Could not adjust process niceness: {e}")
 
-    with contextlib.suppress(Exception):
-        logger.remove()
+    configure_loguru(stderr=False)
 
     MaintenanceDaemon(root).run_forever()
     os._exit(0)
@@ -2628,6 +2673,7 @@ __all__ = [
     "append_structural_lint_warning",
     "compute_scan_metrics",
     "load_daemon_state",
+    "normalize_daemon_state_file_keys",
     "prune_stale_daemon_file_entries",
     "read_pid_file",
     "resolve_graph_root",

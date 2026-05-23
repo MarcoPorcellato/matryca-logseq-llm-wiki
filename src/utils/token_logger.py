@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..utils.console_sanitize import sanitize_for_console
+from ..utils.rotating_file import rotate_file_if_oversized
 
 OperationType = Literal[
     "Concept Indexing",
@@ -150,10 +151,14 @@ class TokenLogger:
         self._append(entry)
         return entry
 
+    def _prepare_log_append(self) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_file_if_oversized(self.log_path)
+
     def _append(self, entry: TokenLogEntry) -> None:
         line = json.dumps(entry.to_dict(), ensure_ascii=False) + "\n"
         with _write_guard:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_log_append()
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -278,7 +283,7 @@ class TokenLogger:
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         with _write_guard:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_log_append()
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -299,7 +304,7 @@ class TokenLogger:
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         with _write_guard:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_log_append()
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
@@ -320,7 +325,7 @@ class TokenLogger:
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         with _write_guard:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_log_append()
             with self.log_path.open("a", encoding="utf-8", errors="replace") as handle:
                 handle.write(line)
                 handle.flush()
@@ -392,7 +397,7 @@ class TokenLogger:
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
         with _write_guard:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_log_append()
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
                 handle.flush()
