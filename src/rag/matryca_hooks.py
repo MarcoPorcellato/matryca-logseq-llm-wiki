@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from loguru import logger
 
+from ..agent.llm_context_payload import cap_llm_payload_chars
 from ..graph.page_path import page_title_to_filename
 from ..graph.path_sandbox import assert_path_within_graph
 
@@ -342,7 +343,7 @@ async def get_page_spatial_context(page_name: str, graph_path: str) -> str:
             "Resolved Logseq page path for spatial read",
         )
         parsed = get_spatial_context(str(path))
-        return _format_parsed_page_markdown(parsed)
+        return cap_llm_payload_chars(_format_parsed_page_markdown(parsed))
 
     return await asyncio.to_thread(_resolve_load_and_format)
 

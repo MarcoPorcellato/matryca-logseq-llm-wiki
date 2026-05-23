@@ -7,7 +7,7 @@ from pathlib import Path
 from ...agent.plumber_config import PlumberLintConfig, apply_thermal_pause_cognitive
 from ...graph.alias_index import normalize_concept_key
 from ...graph.generational_cache import patch_generational_caches_for_paths
-from ...graph.markdown_blocks import graph_safe_page_path
+from ...graph.markdown_blocks import graph_safe_page_path, occ_snapshot
 from ...graph.property_line_edit import append_page_alias_line
 from ._shared import ModuleOutcome, extract_wikilink_targets, page_file_exists
 
@@ -45,6 +45,17 @@ def run_entity_consolidation(
             continue
         seen_pairs.add(pair)
 
+        baselines: dict[str, float | None] = {}
+        for candidate in (page_title, target):
+            try:
+                candidate_path = graph_safe_page_path(graph_root, candidate)
+            except ValueError:
+                baselines[candidate] = None
+            else:
+                baselines[candidate] = (
+                    occ_snapshot(candidate_path) if candidate_path.is_file() else None
+                )
+
         assessment = llm.assess_entity_overlap(
             title_a=page_title,
             title_b=target,
@@ -61,21 +72,24 @@ def run_entity_consolidation(
         if normalize_concept_key(canonical) == normalize_concept_key(alias):
             continue
 
+        try:
+            canonical_path = graph_safe_page_path(graph_root, canonical)
+        except ValueError:
+            continue
+        alias_baseline = baselines.get(canonical)
+
         result = append_page_alias_line(
             graph_root,
             canonical,
             alias,
             dry_run=False,
+            baseline_mtime=alias_baseline,
         )
         if result.ok and result.added:
             outcome.pages_modified.append(canonical)
             outcome.details.append(
                 f"alias:{canonical}<-{alias} score={assessment.overlap_score:.2f}",
             )
-            try:
-                canonical_path = graph_safe_page_path(graph_root, canonical)
-            except ValueError:
-                continue
             if canonical_path.is_file():
                 patch_generational_caches_for_paths(graph_root, [canonical_path])
 

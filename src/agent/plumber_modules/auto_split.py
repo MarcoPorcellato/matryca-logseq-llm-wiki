@@ -10,8 +10,10 @@ from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import (
     atomic_write_bytes,
     atomic_write_bytes_if_unchanged,
+    file_mtime_drifted,
     graph_safe_page_path,
     locate_block_by_uuid,
+    occ_snapshot,
     read_file_mtime,
 )
 from ...graph.page_properties import inject_page_property, stamp_plumber_authored_page
@@ -64,11 +66,16 @@ def run_auto_split(
     if not page_path.is_file():
         return outcome
 
+    baseline_mtime = occ_snapshot(page_path)
+
     with page_rmw_lock(page_path):
         text = page_path.read_text(encoding="utf-8", errors="replace")
         if is_blank_page_content(text):
             return outcome
-        baseline_mtime = read_file_mtime(page_path)
+        if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+            return outcome
+        if baseline_mtime is None:
+            baseline_mtime = read_file_mtime(page_path)
         if baseline_mtime is None:
             return outcome
         lines = text.splitlines(keepends=True)

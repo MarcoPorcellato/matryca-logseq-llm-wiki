@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from ..config import MatrycaWikiConfig
+from .llm_context_payload import cap_llm_payload_chars
 
 # Guardrails so agents cannot accidentally load huge trees into context.
 _MAX_FILES = 32
@@ -122,7 +123,7 @@ def read_l1_memory_text(
         return [], ""
 
     header = f"# L1 memory (fast context)\n\n**Files loaded:** {', '.join(labels)}\n\n---\n\n"
-    return labels, header + "\n".join(chunks).rstrip() + "\n"
+    return labels, cap_llm_payload_chars(header + "\n".join(chunks).rstrip() + "\n")
 
 
 def read_l1_memory_from_env(wiki_config: MatrycaWikiConfig | None = None) -> tuple[list[str], str]:

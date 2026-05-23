@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import instructor
+from loguru import logger
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -29,8 +31,13 @@ from ..graph.bootstrap_harvest import (
     run_bootstrap_harvest,
     run_incremental_catalog_refresh,
 )
-from ..graph.generational_cache import cached_build_alias_index, patch_generational_caches_for_paths
+from ..graph.generational_cache import (
+    cached_build_alias_index,
+    gc_generational_alias_cache,
+    patch_generational_caches_for_paths,
+)
 from ..graph.global_fence_scanner import compute_page_protected_line_indices
+from ..graph.graph_analytics import reconcile_telemetry_ledger
 from ..graph.insights_engine import (
     INSIGHTS_SYSTEM_PROMPT,
     run_graph_insights_engine,
@@ -39,9 +46,14 @@ from ..graph.logseq_uuid import find_malformed_block_refs, is_malformed_block_re
 from ..graph.markdown_blocks import (
     atomic_write_bytes,
     atomic_write_bytes_if_unchanged,
+    block_property_insert_index,
     bullet_indent_unit,
+    file_mtime_drifted,
     locate_block_by_uuid,
+    occ_snapshot,
+    occ_verify_before_write,
     read_file_mtime,
+    strip_lines_for_match,
 )
 from ..graph.master_catalog import (
     SEMANTIC_INDEX_HEADER,
@@ -54,6 +66,7 @@ from ..graph.master_catalog import (
 from ..graph.mldoc_properties import parse_logseq_property_line
 from ..graph.page_path import page_title_from_path
 from ..graph.page_write_lock import (
+    PageLockUnavailableError,
     clear_page_write_locks,
     page_rmw_lock,
     sweep_matryca_lock_sidecars,
@@ -62,6 +75,7 @@ from ..graph.semantic_clustering import (
     format_cluster_neighborhood,
     load_or_compute_semantic_clusters,
 )
+from ..utils.console_sanitize import sanitize_for_console
 from ..utils.json_repair import parse_llm_json
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
@@ -344,6 +358,22 @@ def record_daemon_impact(
         state.ai_links_injected += links_backpropagated
 
 
+def heal_daemon_state_ledger(graph_root: Path, state: DaemonState) -> bool:
+    """Clamp ledger counters when live graph totals fall below persisted AI impact."""
+    snapshot = reconcile_telemetry_ledger(
+        graph_root,
+        ai_links_injected=state.ai_links_injected,
+        ai_blocks_healed=state.ai_blocks_healed,
+        ai_pages_created=state.ai_pages_created,
+    )
+    if not snapshot.healed:
+        return False
+    state.ai_links_injected = snapshot.ai_links_injected
+    state.ai_blocks_healed = snapshot.ai_blocks_healed
+    state.ai_pages_created = snapshot.ai_pages_created
+    return True
+
+
 def resolve_graph_root() -> Path:
     """Return ``LOGSEQ_GRAPH_PATH`` or raise when unset."""
     raw = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
@@ -518,8 +548,8 @@ def _stamp_matryca_plumber_property(
     block_end: int,
 ) -> None:
     """Append ``matryca-plumber:: true`` under the modified block (Logseq audit trail)."""
-    stripped = [ln.rstrip("\n") for ln in lines]
-    insert_at = _direct_property_insert_index(stripped, bullet_idx, block_end)
+    stripped = strip_lines_for_match(lines)
+    insert_at = block_property_insert_index(stripped, bullet_idx, block_end)
     for i in range(bullet_idx + 1, insert_at):
         if _MATRYCA_PLUMBER_LINE.match(stripped[i]):
             return
@@ -527,30 +557,6 @@ def _stamp_matryca_plumber_property(
     base_ws = bullet_match.group(1) if bullet_match else ""
     indent = base_ws + bullet_indent_unit(stripped, bullet_idx)
     lines.insert(insert_at, f"{indent}matryca-plumber:: true\n")
-
-
-def _direct_property_insert_index(
-    stripped: list[str],
-    bullet_idx: int,
-    block_end: int,
-) -> int:
-    """Return the line index for a new property (after existing props, before child bullets)."""
-    bullet_match = _BULLET.match(stripped[bullet_idx])
-    if not bullet_match:
-        return bullet_idx + 1
-    child_bullet_min_indent = len(bullet_match.group(1)) + len(
-        bullet_indent_unit(stripped, bullet_idx),
-    )
-    insert_at = bullet_idx + 1
-    for i in range(bullet_idx + 1, min(block_end, len(stripped))):
-        line = stripped[i]
-        child_match = _BULLET.match(line)
-        if child_match:
-            if len(child_match.group(1)) >= child_bullet_min_indent:
-                break
-            break
-        insert_at = i + 1
-    return insert_at
 
 
 def _enumerate_blocks_for_prompt(content: str) -> str:
@@ -881,39 +887,55 @@ def append_structural_lint_warning(
     malformed_refs: list[str],
 ) -> bool:
     """Append a non-destructive structural lint section (preserves existing malformed refs)."""
+    from loguru import logger
+
     if not page_path.is_file() or not malformed_refs:
         return False
-    text = page_path.read_text(encoding="utf-8", errors="replace")
-    baseline_mtime = read_file_mtime(page_path)
+    baseline_mtime = occ_snapshot(page_path)
     if baseline_mtime is None:
         return False
-    if _structural_lint_section_present(text):
+    if not occ_verify_before_write(page_path, baseline_mtime):
+        logger.warning(
+            "OCC Conflict: User modified {} during inference. Aborting write.",
+            page_path,
+        )
         return False
 
-    sample = malformed_refs[:5]
-    section_lines = [
-        "",
-        STRUCTURAL_LINT_HEADER,
-        "- malformed-block-refs::",
-    ]
-    for ref in sample:
-        section_lines.append(f"  - (({ref}))")
-    if len(malformed_refs) > len(sample):
-        section_lines.append(f"  - ... and {len(malformed_refs) - len(sample)} more")
-    section_lines.extend(
-        [
-            "- todo:: #todo [[Matryca Broken Reference]] — fix ((uuid)) typos in Logseq",
+    with page_rmw_lock(page_path):
+        if file_mtime_drifted(page_path, baseline_mtime):
+            logger.warning(
+                "OCC Conflict: User modified {} during inference. Aborting write.",
+                page_path,
+            )
+            return False
+        text = page_path.read_text(encoding="utf-8", errors="replace")
+        if _structural_lint_section_present(text):
+            return False
+
+        sample = malformed_refs[:5]
+        section_lines = [
             "",
-        ],
-    )
-    new_text = text.rstrip("\n") + "\n" + "\n".join(section_lines)
-    return atomic_write_bytes_if_unchanged(
-        page_path,
-        new_text.encode("utf-8"),
-        graph_root=graph_root,
-        baseline_mtime=baseline_mtime,
-        validate_block_refs=False,
-    )
+            STRUCTURAL_LINT_HEADER,
+            "- malformed-block-refs::",
+        ]
+        for ref in sample:
+            section_lines.append(f"  - (({ref}))")
+        if len(malformed_refs) > len(sample):
+            section_lines.append(f"  - ... and {len(malformed_refs) - len(sample)} more")
+        section_lines.extend(
+            [
+                "- todo:: #todo [[Matryca Broken Reference]] — fix ((uuid)) typos in Logseq",
+                "",
+            ],
+        )
+        new_text = text.rstrip("\n") + "\n" + "\n".join(section_lines)
+        return atomic_write_bytes_if_unchanged(
+            page_path,
+            new_text.encode("utf-8"),
+            graph_root=graph_root,
+            baseline_mtime=baseline_mtime,
+            validate_block_refs=False,
+        )
 
 
 def apply_semantic_page_result(
@@ -925,19 +947,38 @@ def apply_semantic_page_result(
     backpropagate: bool = False,
     alias_index: AliasIndex | None = None,
     disable_semantic_corrections: bool = True,
+    baseline_mtime: float | None = None,
 ) -> CorrectionOutcome:
     """Lint blocks surgically, then append the semantic index (one locked transaction)."""
     from loguru import logger
 
     lint_outcome = CorrectionOutcome()
+    if baseline_mtime is None and page_path.is_file():
+        baseline_mtime = occ_snapshot(page_path)
+    if baseline_mtime is not None and not occ_verify_before_write(page_path, baseline_mtime):
+        logger.warning(
+            "OCC Conflict: User modified {} during inference. Aborting write.",
+            page_path,
+        )
+        lint_outcome.write_aborted = True
+        return lint_outcome
+
     with page_rmw_lock(page_path):
         if page_path.is_file():
             prev = page_path.read_text(encoding="utf-8", errors="replace")
-            baseline_mtime = read_file_mtime(page_path)
+            if baseline_mtime is None:
+                baseline_mtime = read_file_mtime(page_path)
         else:
             prev = ""
             baseline_mtime = None
         if not prev.strip():
+            return lint_outcome
+        if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+            logger.warning(
+                "OCC Conflict: User modified {} during inference. Aborting write.",
+                page_path,
+            )
+            lint_outcome.write_aborted = True
             return lint_outcome
         lines = prev.splitlines(keepends=True)
         if disable_semantic_corrections:
@@ -1780,6 +1821,9 @@ class MaintenanceDaemon:
         self.max_files_per_cycle = max_files_per_cycle
         self._stop_requested = False
         self._shutdown_in_progress = False
+        self._shutdown_event = threading.Event()
+        self._inflight_writes = threading.Condition()
+        self._active_write_count = 0
         self.bootstrap_complete = False
 
     def _ensure_shared_token_logger(self) -> None:
@@ -1851,36 +1895,55 @@ class MaintenanceDaemon:
         signal.signal(signal.SIGINT, self._handle_daemon_graceful_shutdown)
 
     def _handle_daemon_graceful_shutdown(self, signum: int, _frame: object) -> None:
-        """Safe evacuation: log, persist catalog, drop PID/locks, then exit."""
+        """Request cooperative shutdown; the main loop performs flush and cleanup."""
         if self._shutdown_in_progress:
             return
         self._shutdown_in_progress = True
         self._stop_requested = True
+        self._shutdown_event.set()
 
         with contextlib.suppress(Exception):
             self.token_logger.log_daemon_shutdown(signum)
 
-        try:
-            load_master_catalog(self.graph_root).save()
-        except Exception as exc:  # noqa: BLE001 - log and continue evacuation
-            with contextlib.suppress(Exception):
-                self.token_logger.log_structural_lint_warning(
-                    target_file=self.graph_root,
-                    message=f"Catalog evacuation save failed: {exc}",
-                    malformed_refs=[],
-                )
+    def _begin_phase2_write(self) -> None:
+        with self._inflight_writes:
+            self._active_write_count += 1
 
-        try:
-            state = load_daemon_state(self.graph_root)
-            state.status = "stopped"
-            save_daemon_state(self.graph_root, state)
-        except Exception:  # noqa: BLE001
-            pass
+    def _end_phase2_write(self) -> None:
+        with self._inflight_writes:
+            self._active_write_count -= 1
+            self._inflight_writes.notify_all()
+
+    def _wait_for_inflight_writes(self, *, timeout_s: float = 120.0) -> None:
+        """Block until active Phase-2 writes finish or ``timeout_s`` elapses."""
+        deadline = time.monotonic() + timeout_s
+        with self._inflight_writes:
+            while self._active_write_count > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Shutdown timed out waiting for {} in-flight Phase-2 write(s)",
+                        self._active_write_count,
+                    )
+                    return
+                self._inflight_writes.wait(timeout=remaining)
+
+    def _finalize_graceful_shutdown(self, state: DaemonState | None = None) -> None:
+        """Flush ledger telemetry and release daemon resources after the loop exits."""
+        self._wait_for_inflight_writes()
+
+        with contextlib.suppress(Exception):
+            load_master_catalog(self.graph_root).save()
+
+        checkpoint = state or load_daemon_state(self.graph_root)
+        checkpoint.status = "stopped"
+        self._sync_live_telemetry(checkpoint)
+        with contextlib.suppress(Exception):
+            save_daemon_state(self.graph_root, checkpoint)
 
         remove_pid_file(self.graph_root)
         clear_page_write_locks()
         sweep_matryca_lock_sidecars(self.graph_root)
-        sys.exit(0)
 
     def _sync_runtime_config(self, state: DaemonState) -> DaemonState:
         """Align LLM client and persisted state with the active environment block."""
@@ -1893,6 +1956,7 @@ class MaintenanceDaemon:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        self._shutdown_event.set()
 
     def run_bootstrap_pipeline(self, state: DaemonState | None = None) -> None:
         """Phase 1 bootstrap harvest (read/append only) before Phase 2 polling."""
@@ -1959,12 +2023,19 @@ class MaintenanceDaemon:
             )
 
     def _prune_stale_catalog_entries(self) -> None:
-        """Drop ghost catalog rows for deleted or renamed markdown files."""
+        """Drop ghost catalog rows and purge warm alias cache entries after each scan."""
         try:
             catalog = load_master_catalog(self.graph_root)
             pruned = catalog.prune_missing_pages()
+            alias_purged = gc_generational_alias_cache(self.graph_root)
             if pruned > 0:
                 catalog.save()
+            if pruned > 0 or alias_purged > 0:
+                logger.debug(
+                    "Catalog GC pruned {} catalog row(s) and {} alias cache row(s)",
+                    pruned,
+                    alias_purged,
+                )
         except Exception as exc:  # noqa: BLE001 - never abort daemon cycle
             self.token_logger.log_structural_lint_warning(
                 target_file=self.graph_root,
@@ -2082,7 +2153,7 @@ class MaintenanceDaemon:
         except OSError:
             return False
 
-        state.last_file = key
+        state.last_file = sanitize_for_console(key)
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -2132,7 +2203,7 @@ class MaintenanceDaemon:
         key = str(path.resolve())
         mtime = path.stat().st_mtime
         title = _page_title_from_path(self.graph_root, path)
-        state.last_file = key
+        state.last_file = sanitize_for_console(key)
         self._sync_live_telemetry(
             state,
             cluster_id=cluster_id,
@@ -2143,6 +2214,7 @@ class MaintenanceDaemon:
         prompt_before = self.token_logger.session_prompt_tokens
         completion_before = self.token_logger.session_completion_tokens
         llm_called_from_usage = False
+        self._begin_phase2_write()
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
             cognitive_outcome: CognitiveLintOutcome | None = None
@@ -2172,6 +2244,7 @@ class MaintenanceDaemon:
             alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
             enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
             enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
+            baseline_mtime = occ_snapshot(path)
             result, usage = self.llm_client.index_page(
                 title,
                 content,
@@ -2192,6 +2265,7 @@ class MaintenanceDaemon:
                 backpropagate=enable_backprop,
                 alias_index=alias_index,
                 disable_semantic_corrections=lint_config.disable_semantic_corrections,
+                baseline_mtime=baseline_mtime,
             )
             record_daemon_impact(
                 state,
@@ -2210,6 +2284,18 @@ class MaintenanceDaemon:
                 status="processed",
             )
             self._sync_catalog_after_page_write(path, title)
+        except PageLockUnavailableError as exc:
+            self.token_logger.log_structural_lint_warning(
+                target_file=path,
+                message=f"Page lock unavailable after retries: {exc}",
+                malformed_refs=[],
+            )
+            state.files[key] = FileState(
+                mtime=mtime,
+                processed_at=datetime.now(tz=UTC).isoformat(),
+                status="skipped",
+                error=str(exc),
+            )
         except Exception as exc:  # noqa: BLE001 - quarantine per-file; never abort cycle
             if is_malformed_block_ref_error(exc):
                 protected_lines = compute_page_protected_line_indices(content)
@@ -2233,6 +2319,7 @@ class MaintenanceDaemon:
                     error=str(exc),
                 )
         finally:
+            self._end_phase2_write()
             if reset_history_after and isinstance(self.llm_client, InstructorLLMClient):
                 self.llm_client.reset_execution_history()
         llm_called_from_logger = (
@@ -2284,20 +2371,36 @@ class MaintenanceDaemon:
         state = self._sync_runtime_config(state or load_daemon_state(self.graph_root))
         self._hydrate_bootstrap_phase(state)
         self._hydrate_token_logger_from_state(state)
-        prune_stale_daemon_file_entries(state, self.graph_root)
+        try:
+            prune_stale_daemon_file_entries(state, self.graph_root)
+        except (OSError, FileNotFoundError) as exc:
+            logger.error("Graph root inaccessible during prune: {}", exc)
+            state.status = "error"
+            self._sync_live_telemetry(state)
+            save_daemon_state(self.graph_root, state)
+            return state
+
         state.status = "running"
         state.last_scan_at = datetime.now(tz=UTC).isoformat()
         self._sync_live_telemetry(state, mark_running=True)
         save_daemon_state(self.graph_root, state)
-        pending = list_pending_files(
-            self.graph_root,
-            state,
-            bootstrap_complete=self.bootstrap_complete,
-        )
+        try:
+            pending = list_pending_files(
+                self.graph_root,
+                state,
+                bootstrap_complete=self.bootstrap_complete,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            logger.error("Graph root inaccessible during pending scan: {}", exc)
+            state.status = "error"
+            self._sync_live_telemetry(state)
+            save_daemon_state(self.graph_root, state)
+            return state
 
         if not pending:
             self.refresh_catalog_if_stale()
             self._prune_stale_catalog_entries()
+            heal_daemon_state_ledger(self.graph_root, state)
             state.status = "idle"
             save_daemon_state(self.graph_root, state)
             return state
@@ -2365,6 +2468,7 @@ class MaintenanceDaemon:
                     llm_turns_this_cycle += 1
 
         self._prune_stale_catalog_entries()
+        heal_daemon_state_ledger(self.graph_root, state)
         self._sync_live_telemetry(state)
         if not self._stop_requested:
             state.status = "idle"
@@ -2388,12 +2492,10 @@ class MaintenanceDaemon:
                 state = load_daemon_state(self.graph_root)
                 if self._stop_requested:
                     break
-                time.sleep(self.poll_seconds)
+                if self._shutdown_event.wait(timeout=self.poll_seconds):
+                    break
         finally:
-            state = load_daemon_state(self.graph_root)
-            state.status = "stopped"
-            save_daemon_state(self.graph_root, state)
-            remove_pid_file(self.graph_root)
+            self._finalize_graceful_shutdown(state)
 
 
 def run_plumber_cluster(

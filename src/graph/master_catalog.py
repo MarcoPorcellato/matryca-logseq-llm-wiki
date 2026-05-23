@@ -178,7 +178,7 @@ class MasterCatalog:
             return int(mtime_ns // 1_000_000_000) != entry.last_mtime
 
     def prune_missing_pages(self) -> int:
-        """Drop catalog rows for deleted markdown files."""
+        """Drop catalog rows and alias mappings for deleted markdown files."""
         live_titles = {
             page_title_from_path(self.graph_root, path)
             for path in iter_alias_source_paths(self.graph_root)
@@ -187,7 +187,14 @@ class MasterCatalog:
             stale = [title for title in self.pages if title not in live_titles]
             for title in stale:
                 del self.pages[title]
-            return len(stale)
+            alias_purged = 0
+            orphan_keys = [
+                key for key, title in self.alias_to_page.items() if title not in live_titles
+            ]
+            for key in orphan_keys:
+                del self.alias_to_page[key]
+                alias_purged += 1
+            return len(stale) + alias_purged
 
 
 def load_master_catalog(graph_root: Path, *, force_reload: bool = False) -> MasterCatalog:

@@ -233,6 +233,20 @@ def remove_page_from_alias_index(idx: AliasIndex, page_title: str) -> None:
     idx.page_to_relpath.pop(page_title, None)
 
 
+def purge_stale_alias_entries(idx: AliasIndex, live_titles: set[str]) -> int:
+    """Drop alias rows whose canonical page no longer exists on disk."""
+    purged = 0
+    stale_titles = [title for title in list(idx.page_to_relpath) if title not in live_titles]
+    for title in stale_titles:
+        remove_page_from_alias_index(idx, title)
+        purged += 1
+    orphan_keys = [key for key, title in idx.alias_to_page.items() if title not in live_titles]
+    for key in orphan_keys:
+        del idx.alias_to_page[key]
+        purged += 1
+    return purged
+
+
 def index_aliases_from_file(idx: AliasIndex, graph_root: Path, path: Path) -> None:
     """Merge ``alias::`` lines from one markdown file into an existing index."""
     root = Path(graph_root).expanduser().resolve(strict=False)
@@ -358,6 +372,7 @@ __all__ = [
     "iter_alias_source_paths",
     "normalize_concept_key",
     "page_title_from_path",
+    "purge_stale_alias_entries",
     "remove_page_from_alias_index",
     "resolve_canonical_page_title",
 ]

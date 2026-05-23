@@ -27,7 +27,15 @@ from ..graph.journal_task_scan import (
     scan_journal_tasks,
 )
 from ..graph.link_tag_hop import format_hop_report_markdown
-from ..graph.markdown_blocks import atomic_write_bytes
+from ..graph.markdown_blocks import (
+    OCCConflictError,
+    OCCSnapshot,
+    atomic_write_bytes_if_unchanged,
+    canonical_line_suffix,
+    graph_safe_page_path,
+    read_file_mtime,
+    strip_line_endings,
+)
 from ..graph.page_write_lock import page_rmw_lock
 from ..graph.property_line_edit import edit_block_property_lines
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
@@ -55,6 +63,7 @@ from .graph_tool_helpers import (
     read_xray_page_markdown,
 )
 from .l1_memory import read_l1_memory_async
+from .llm_context_payload import cap_llm_payload_chars
 from .quality_gate import advanced_query_security_violations, markdown_append_bounds_violations
 from .routing_hint import (
     append_read_page_routing_hint,
@@ -116,12 +125,23 @@ def _resolve_chain_parent_uuid(
     raise ValueError(msg)
 
 
+def _occ_snapshot_for_block(graph_path: str | Path, block_uuid: str) -> OCCSnapshot | None:
+    """Phase-1 OCC snapshot for the page file hosting ``block_uuid``."""
+    graph_root = Path(graph_path).expanduser().resolve()
+    graph = LogseqGraph.load_directory(graph_root)
+    node = _resolve_graph_node(graph, block_uuid)
+    if node is None or not node.source_path:
+        return None
+    return OCCSnapshot.capture(node.source_path)
+
+
 def _headless_append_child(
     graph_path: str | Path,
     parent_uuid: str,
     content: str,
     *,
     properties: dict[str, str] | None = None,
+    occ: OCCSnapshot | None = None,
 ) -> str:
     """Append a child block on disk under ``parent_uuid``; return the new block UUID."""
     graph_root = Path(graph_path).expanduser().resolve()
@@ -141,7 +161,23 @@ def _headless_append_child(
     head = content_lines[0] if content_lines else ""
     tail = content_lines[1:]
 
+    page_path = Path(source_path)
+    if occ is None:
+        occ = OCCSnapshot.capture(page_path)
+    elif occ.drifted():
+        raise OCCConflictError(
+            page_path,
+            baseline_mtime=occ.baseline_mtime,
+            current_mtime=read_file_mtime(page_path),
+        )
+
     with page_rmw_lock(source_path):
+        if occ is not None and occ.drifted():
+            raise OCCConflictError(
+                page_path,
+                baseline_mtime=occ.baseline_mtime,
+                current_mtime=read_file_mtime(page_path),
+            )
         graph = LogseqGraph.load_directory(graph_root)
         parent = _resolve_graph_node(graph, parent_uuid)
         if parent is None:
@@ -162,15 +198,28 @@ def _headless_append_child(
         file_lines = raw_text.splitlines(keepends=True)
         insert_index = insert_after_line
 
-        new_lines = [f"{bullet_indent}- {head.rstrip()}\n"]
-        new_lines.extend(f"{body_indent}{line.rstrip()}\n" for line in tail)
+        new_lines = [f"{bullet_indent}- {strip_line_endings(head)}\n"]
+        new_lines.extend(f"{body_indent}{strip_line_endings(line)}\n" for line in tail)
         new_lines.extend(f"{body_indent}{line}\n" for line in props)
 
         for offset, line in enumerate(new_lines):
             file_lines.insert(insert_index + offset, line)
 
-        updated = "".join(file_lines)
-        atomic_write_bytes(path, updated.encode("utf-8"), graph_root=graph_root)
+        updated = "".join(strip_line_endings(ln) + canonical_line_suffix(ln) for ln in file_lines)
+        baseline_mtime = occ.baseline_mtime if occ is not None else read_file_mtime(path)
+        if baseline_mtime is None or not atomic_write_bytes_if_unchanged(
+            path,
+            updated.encode("utf-8"),
+            graph_root=graph_root,
+            baseline_mtime=baseline_mtime,
+        ):
+            raise OCCConflictError(
+                path,
+                baseline_mtime=baseline_mtime or 0.0,
+                current_mtime=read_file_mtime(path),
+            )
+        if occ is not None:
+            occ.refresh_after_own_write()
 
     return new_uuid
 
@@ -196,6 +245,13 @@ def _headless_write_outline(
             message="matryca: AI pre-edit snapshot",
         )
 
+    graph_root = Path(graph_path).expanduser().resolve()
+    graph = LogseqGraph.load_directory(graph_root)
+    parent_node = _resolve_graph_node(graph, parent_block_uuid)
+    occ: OCCSnapshot | None = None
+    if parent_node is not None and parent_node.source_path:
+        occ = OCCSnapshot.capture(parent_node.source_path)
+
     created_ids: list[str] = []
 
     def walk(node: OutlineNode, parent_uuid: str) -> None:
@@ -204,6 +260,7 @@ def _headless_write_outline(
             parent_uuid,
             node.text,
             properties=dict(node.properties),
+            occ=occ,
         )
         created_ids.append(new_uuid)
         chain_parent = _resolve_chain_parent_uuid(
@@ -247,7 +304,7 @@ async def dispatch_read(
                 "See `SYSTEM_PROMPT.md` for L1 vs L2 routing."
             )
         logger.bind(files=len(_labels)).info("read_graph_data(memory) loaded L1 context")
-        return body
+        return cap_llm_payload_chars(body)
 
     graph_path = graph_path_from_env()
     if not graph_path:
@@ -274,14 +331,14 @@ async def dispatch_read(
         except OSError as exc:
             logger.bind(page=page_name).exception("read_graph_data OS error")
             return f"Could not read the page file from disk: {exc}"
-        return append_read_page_routing_hint(markdown)
+        return append_read_page_routing_hint(cap_llm_payload_chars(markdown))
 
     if target_type == "xray_page":
         page_name = query.strip()
         if not page_name:
             return "For `target_type=xray_page`, set `query` to the Logseq page title."
         try:
-            return await asyncio.to_thread(read_xray_page_markdown, graph_path, page_name)
+            xray_md = await asyncio.to_thread(read_xray_page_markdown, graph_path, page_name)
         except FileNotFoundError:
             return "Page not found, you can create it."
         except ImportError as exc:
@@ -292,6 +349,7 @@ async def dispatch_read(
         except OSError as exc:
             logger.bind(page=page_name).exception("read_graph_data xray_page OS error")
             return f"Could not read the page file from disk: {exc}"
+        return cap_llm_payload_chars(xray_md)
 
     if target_type == "block_ast":
         block_query = query.strip()
@@ -300,7 +358,9 @@ async def dispatch_read(
                 "For `target_type=block_ast`, set `query` to `Page Title|block-uuid` "
                 "or `Page Title|[n]` after `xray_page`."
             )
-        return await asyncio.to_thread(read_block_ast_markdown, graph_path, block_query)
+        return cap_llm_payload_chars(
+            await asyncio.to_thread(read_block_ast_markdown, graph_path, block_query),
+        )
 
     if target_type == "structural_hops":
         hop_opts = parse_optional_json_query(query)
@@ -326,7 +386,7 @@ async def dispatch_read(
                 max_per_level=per,
             )
 
-        return await asyncio.to_thread(_hops)
+        return cap_llm_payload_chars(await asyncio.to_thread(_hops))
 
     dashboard_md: str = await asyncio.to_thread(
         build_dashboard_markdown,
@@ -334,7 +394,7 @@ async def dispatch_read(
         wiki_config,
     )
     logger.bind(graph=graph_path).info("read_graph_data(dashboard) completed")
-    return dashboard_md
+    return cap_llm_payload_chars(dashboard_md)
 
 
 async def dispatch_search(
@@ -476,7 +536,7 @@ async def dispatch_mutate(
                 parent_uuid,
                 outline,
             )
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, OCCConflictError) as exc:
             return _mutate_error(str(exc))
 
     if action == "edit_property":
@@ -507,6 +567,12 @@ async def dispatch_mutate(
         if not search:
             return {"ok": False, "error": "payload must include non-empty `search`."}
 
+        try:
+            page_path = graph_safe_page_path(graph_path, page_ref)
+        except ValueError as exc:
+            return _mutate_error(str(exc))
+        baseline_mtime = read_file_mtime(page_path) if page_path.is_file() else None
+
         def _edit() -> dict[str, object]:
             return edit_block_property_lines(
                 graph_path,
@@ -518,6 +584,7 @@ async def dispatch_mutate(
                 use_regex=bool(prop_opts.get("use_regex", False)),
                 replace_all=bool(prop_opts.get("replace_all", False)),
                 case_sensitive=bool(prop_opts.get("case_sensitive", True)),
+                baseline_mtime=baseline_mtime,
             ).as_dict()
 
         return cast(dict[str, Any], await asyncio.to_thread(_edit))
@@ -592,14 +659,16 @@ async def dispatch_mutate(
     if not graph_path:
         return graph_missing_dict()
 
+    occ = _occ_snapshot_for_block(graph_path, parent_block)
     try:
         new_uuid = await asyncio.to_thread(
             _headless_append_child,
             graph_path,
             parent_block,
             markdown,
+            occ=occ,
         )
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, OCCConflictError) as exc:
         return _mutate_error(str(exc))
 
     return {

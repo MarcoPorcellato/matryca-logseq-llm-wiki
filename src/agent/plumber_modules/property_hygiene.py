@@ -7,7 +7,11 @@ from pathlib import Path
 import yaml
 
 from ...agent.plumber_config import PlumberLintConfig, apply_thermal_pause_cognitive
-from ...graph.markdown_blocks import atomic_write_bytes_if_unchanged, read_file_mtime
+from ...graph.markdown_blocks import (
+    atomic_write_bytes_if_unchanged,
+    file_mtime_drifted,
+    occ_snapshot,
+)
 from ...graph.page_properties import inject_page_properties
 from ...graph.page_write_lock import page_rmw_lock
 from ._shared import ModuleOutcome, extract_inline_tags, is_blank_page_content, page_property_keys
@@ -78,6 +82,8 @@ def run_property_hygiene(
     if not missing_by_tag:
         return outcome
 
+    baseline_mtime = occ_snapshot(page_path) if page_path.is_file() else None
+
     llm_body = llm_context if llm_context is not None else content
 
     inferred: dict[str, str] = {}
@@ -106,7 +112,10 @@ def run_property_hygiene(
         text = page_path.read_text(encoding="utf-8", errors="replace")
         if is_blank_page_content(text):
             return outcome
-        baseline_mtime = read_file_mtime(page_path)
+        if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+            return outcome
+        if baseline_mtime is None:
+            baseline_mtime = occ_snapshot(page_path)
         if baseline_mtime is None:
             return outcome
         new_text = inject_page_properties(text, inferred)

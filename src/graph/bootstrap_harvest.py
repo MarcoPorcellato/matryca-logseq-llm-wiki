@@ -13,7 +13,12 @@ from ..agent.plumber_modules.marpa_framework import detect_marpa_namespace
 from .alias_index import iter_alias_source_paths, page_title_from_path
 from .generational_cache import patch_generational_caches_for_paths
 from .hierarchical_summarization import mapreduce_harvest_page_summary
-from .markdown_blocks import atomic_write_bytes, atomic_write_bytes_if_unchanged, read_file_mtime
+from .markdown_blocks import (
+    atomic_write_bytes,
+    atomic_write_bytes_if_unchanged,
+    file_mtime_drifted,
+    read_file_mtime,
+)
 from .master_catalog import (
     MASTER_INDEX_PAGE_TITLE,
     SEMANTIC_INDEX_HEADER,
@@ -137,11 +142,18 @@ def _append_minimal_semantic_index(
     graph_root: Path,
     page_path: Path,
     summary: BootstrapSummaryResult,
+    *,
+    baseline_mtime: float | None = None,
 ) -> None:
+    if baseline_mtime is None and page_path.is_file():
+        baseline_mtime = read_file_mtime(page_path)
+    if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+        return
     with page_rmw_lock(page_path):
+        if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+            return
         if page_path.is_file():
             prev = page_path.read_text(encoding="utf-8", errors="replace")
-            baseline_mtime = read_file_mtime(page_path)
         else:
             prev = ""
             baseline_mtime = None
@@ -220,6 +232,7 @@ def harvest_page_into_catalog(
 
     lint_config = config or load_plumber_lint_config()
     domain = _infer_domain_from_content(title, content)
+    baseline_mtime = read_file_mtime(page_path)
     summary_result = mapreduce_harvest_page_summary(
         llm,
         page_title=title,
@@ -234,7 +247,12 @@ def harvest_page_into_catalog(
     if not domain and summary_result.domain:
         domain = _normalize_domain(summary_result.domain)
 
-    _append_minimal_semantic_index(graph_root, page_path, summary_result)
+    _append_minimal_semantic_index(
+        graph_root,
+        page_path,
+        summary_result,
+        baseline_mtime=baseline_mtime,
+    )
     entry = _catalog_entry_from_harvest(
         summary=summary_result.summary,
         tags=summary_result.suggested_tags,

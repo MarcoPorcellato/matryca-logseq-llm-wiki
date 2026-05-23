@@ -61,7 +61,7 @@ def _sanitize_frontmatter_list_value(norm_key: str, value: str) -> str:
 
 
 def _strip_lines(lines: list[str]) -> list[str]:
-    return [ln.rstrip("\n") for ln in lines]
+    return [ln.rstrip("\r\n") for ln in lines]
 
 
 def _frontmatter_span(stripped: list[str]) -> tuple[int, int]:
@@ -153,7 +153,7 @@ def inject_page_property(markdown_text: str, key: str, value: str) -> str:
         parsed = parse_logseq_property_line(stripped[line_idx])
         if parsed is None:
             return markdown_text
-        newline = "\n" if lines[line_idx].endswith("\n") else ""
+        newline = "\n" if lines[line_idx].endswith(("\n", "\r\n", "\r")) else ""
         lines[line_idx] = f"{parsed.key_raw}::{parsed.sep_after_colons}{merged}{newline}"
         return "".join(lines)
 
@@ -200,7 +200,7 @@ def stamp_plumber_authored_page(markdown_text: str) -> str:
 
 def page_property_keys(markdown_text: str) -> dict[str, str]:
     """Return ``key -> value`` for page-level frontmatter properties."""
-    stripped = [ln.rstrip("\n") for ln in markdown_text.splitlines()]
+    stripped = [ln.rstrip("\r\n") for ln in markdown_text.splitlines()]
     return _page_property_keys_in_frontmatter(stripped)
 
 

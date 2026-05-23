@@ -103,6 +103,7 @@ def test_get_state_survives_analytics_failure(
     analytics = response.json()["graph_analytics"]
     assert analytics["total_pages"] == 0
     assert analytics["context_acceleration"] == 94.2
+    assert analytics["status"] == "offline"
 
 
 def test_get_state_loads_graph_root_from_repo_dotenv(

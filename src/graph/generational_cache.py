@@ -13,6 +13,8 @@ from .alias_index import (
     build_alias_index,
     index_aliases_from_file,
     iter_alias_source_paths,
+    page_title_from_path,
+    purge_stale_alias_entries,
     remove_page_from_alias_index,
 )
 from .page_path import page_title_from_graph_relpath
@@ -183,6 +185,22 @@ def patch_generational_caches_for_paths(
     return patched
 
 
+def gc_generational_alias_cache(graph_root: str | Path) -> int:
+    """Purge deleted pages from the warm alias cache without a full rebuild."""
+    root = Path(graph_root).expanduser().resolve(strict=False)
+    key = str(root)
+    with _lock:
+        hit = _alias_cache.get(key)
+        if hit is None:
+            return 0
+        _sig, idx = hit
+        live_titles = {page_title_from_path(root, path) for path in iter_alias_source_paths(root)}
+        purged = purge_stale_alias_entries(idx, live_titles)
+        new_sig = _signature(iter_alias_source_paths(root), root)
+        _alias_cache[key] = (new_sig, idx)
+        return purged
+
+
 def cached_build_alias_index(graph_root: str | Path) -> AliasIndex:
     """Return :class:`AliasIndex`, reusing memory when source mtimes are unchanged."""
     root = Path(graph_root).expanduser().resolve(strict=False)
@@ -309,6 +327,7 @@ __all__ = [
     "Bm25Corpus",
     "cached_build_alias_index",
     "clear_generational_caches",
+    "gc_generational_alias_cache",
     "get_cached_bm25_corpus",
     "patch_generational_caches_for_paths",
     "score_bm25_query",

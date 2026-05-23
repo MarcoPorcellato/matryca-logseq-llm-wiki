@@ -46,6 +46,7 @@ def test_compute_graph_analytics_counts_topology(tmp_path: Path) -> None:
     assert metrics.semantic_links == 1
     assert metrics.semantic_cache_mb > 0.0
     assert metrics.context_acceleration == 94.2
+    assert metrics.status == "online"
 
 
 def test_compute_graph_analytics_subtracts_agent_ledger(tmp_path: Path) -> None:

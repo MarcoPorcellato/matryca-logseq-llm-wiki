@@ -23,10 +23,12 @@ from pydantic import BaseModel, Field
 
 from ..agent.maintenance_daemon import (
     DaemonState,
+    heal_daemon_state_ledger,
     is_process_alive,
     load_daemon_state,
     read_pid_file,
     resolve_graph_root,
+    save_daemon_state,
     start_daemon_detached,
     stop_daemon,
 )
@@ -36,6 +38,7 @@ from ..agent.plumber_config import (
     reload_plumber_dotenv,
 )
 from ..graph.graph_analytics import compute_graph_analytics
+from ..utils.console_sanitize import sanitize_for_console
 from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
 
 FileStatus = Literal["processed", "skipped", "error", "pending"]
@@ -79,6 +82,7 @@ class GraphAnalyticsResponse(BaseModel):
     semantic_links: int = 0
     semantic_cache_mb: float = 0.0
     context_acceleration: float = 94.2
+    status: Literal["online", "offline"] = "online"
 
 
 class DaemonStateResponse(BaseModel):
@@ -110,6 +114,8 @@ class DaemonStateResponse(BaseModel):
         *,
         graph_root: Path | None = None,
     ) -> DaemonStateResponse:
+        if graph_root is not None and heal_daemon_state_ledger(graph_root, state):
+            save_daemon_state(graph_root, state)
         payload = state.to_json()
         if graph_root is not None:
             payload["graph_analytics"] = _safe_graph_analytics(
@@ -117,6 +123,8 @@ class DaemonStateResponse(BaseModel):
                 ai_links_injected=state.ai_links_injected,
                 ai_blocks_healed=state.ai_blocks_healed,
             ).model_dump()
+        if payload.get("last_file"):
+            payload["last_file"] = sanitize_for_console(str(payload["last_file"]))
         return cls.model_validate(payload)
 
 
@@ -313,7 +321,7 @@ def _safe_graph_analytics(
             graph_root,
             exc,
         )
-        return GraphAnalyticsResponse()
+        return GraphAnalyticsResponse(status="offline")
 
 
 @app.get("/api/graph-analytics", response_model=GraphAnalyticsResponse)
@@ -321,6 +329,8 @@ def get_graph_analytics() -> GraphAnalyticsResponse:
     """Return live graph topology telemetry for the configured ``LOGSEQ_GRAPH_PATH``."""
     graph_root = _resolve_graph_root_or_raise()
     state = load_daemon_state(graph_root)
+    if heal_daemon_state_ledger(graph_root, state):
+        save_daemon_state(graph_root, state)
     return _safe_graph_analytics(
         graph_root,
         ai_links_injected=state.ai_links_injected,
@@ -339,8 +349,8 @@ def get_state() -> DaemonStateResponse:
 @app.get("/api/logs", response_model=list[str])
 def get_logs() -> list[str]:
     """Return the latest 50 non-empty operational log lines."""
-    logger = TokenLogger(log_path=resolve_plumber_log_path())
-    return logger.tail_lines(50)
+    token_logger = TokenLogger(log_path=resolve_plumber_log_path())
+    return [sanitize_for_console(line) for line in token_logger.tail_lines(50)]
 
 
 @app.get("/api/config", response_model=PlumberConfigResponse)

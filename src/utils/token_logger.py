@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from ..utils.console_sanitize import sanitize_for_console
+
 OperationType = Literal[
     "Concept Indexing",
     "Semantic Linting",
@@ -59,17 +61,19 @@ def format_activity_summary(payload: dict[str, Any]) -> str:
         if message.startswith(_LOG_TAG_PREFIXES):
             target = payload.get("target_file")
             if target:
-                target_name = Path(str(target)).name
-                return f"{message[:96]} · {target_name}"
-            return message[:120]
-        return message[:120]
+                target_name = sanitize_for_console(Path(str(target)).name)
+                return sanitize_for_console(f"{message[:96]} · {target_name}")
+            return sanitize_for_console(message[:120])
+        return sanitize_for_console(message[:120])
 
     op = str(payload.get("operation", "?"))
-    target = Path(str(payload.get("target_file", "?"))).name
+    target = sanitize_for_console(Path(str(payload.get("target_file", "?"))).name)
     prompt_tokens = int(payload.get("prompt_tokens", 0) or 0)
     completion_tokens = int(payload.get("completion_tokens", 0) or 0)
     latency = payload.get("latency_seconds", 0)
-    return f"{op} · {target} · p={prompt_tokens} c={completion_tokens} · {latency}s"
+    return sanitize_for_console(
+        f"{op} · {target} · p={prompt_tokens} c={completion_tokens} · {latency}s"
+    )
 
 
 @dataclass
@@ -130,16 +134,16 @@ class TokenLogger:
         """Persist one LLM turn and update session token totals."""
         entry = TokenLogEntry(
             timestamp=datetime.now(tz=UTC).isoformat(),
-            target_file=str(target_file),
+            target_file=sanitize_for_console(str(target_file)),
             operation=operation,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            prompt=_truncate(prompt, _MAX_PROMPT_CHARS),
-            response=_truncate(response, _MAX_RESPONSE_CHARS),
+            prompt=_truncate(sanitize_for_console(prompt), _MAX_PROMPT_CHARS),
+            response=_truncate(sanitize_for_console(response), _MAX_RESPONSE_CHARS),
             latency_seconds=latency_seconds,
             model=model,
             ok=ok,
-            error=error,
+            error=sanitize_for_console(error) if error else None,
         )
         self.session_prompt_tokens += prompt_tokens
         self.session_completion_tokens += completion_tokens
@@ -210,10 +214,10 @@ class TokenLogger:
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                summaries.append(raw[:120])
+                summaries.append(sanitize_for_console(raw[:120]))
                 continue
             if not isinstance(payload, dict):
-                summaries.append(raw[:120])
+                summaries.append(sanitize_for_console(raw[:120]))
                 continue
             summaries.append(format_activity_summary(payload))
         return summaries
@@ -229,10 +233,10 @@ class TokenLogger:
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                line = raw[:120]
+                line = sanitize_for_console(raw[:120])
             else:
                 if not isinstance(payload, dict):
-                    line = raw[:120]
+                    line = sanitize_for_console(raw[:120])
                 else:
                     line = format_activity_summary(payload)
             if any(tag in line for tag in _lifecycle_noise):

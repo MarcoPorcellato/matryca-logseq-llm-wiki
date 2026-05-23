@@ -5,12 +5,20 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from .io_retry import (
+    IO_RETRY_ATTEMPTS,
+    IO_RETRY_INITIAL_DELAY_S,
+    IO_RETRY_MAX_DELAY_S,
+    PageLockUnavailableError,
+)
 
 _fcntl: Any
 try:
@@ -42,6 +50,35 @@ def _lock_for_key(key: str) -> threading.Lock:
         return lock
 
 
+def _acquire_cross_process_flock(fd: int, lock_path: Path) -> bool:
+    """Acquire exclusive flock with backoff; return False when flock is unsupported."""
+    delay = IO_RETRY_INITIAL_DELAY_S
+    for attempt in range(IO_RETRY_ATTEMPTS):
+        try:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if attempt >= IO_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    "Page lock sidecar still held after {} retries: {}",
+                    IO_RETRY_ATTEMPTS - 1,
+                    lock_path,
+                )
+                raise PageLockUnavailableError(
+                    f"Could not acquire page lock for {lock_path} after retries",
+                ) from None
+            time.sleep(min(IO_RETRY_MAX_DELAY_S, delay))
+            delay = min(IO_RETRY_MAX_DELAY_S, delay * 2)
+        except OSError as exc:
+            logger.info(
+                "[LOCK FILE SYSTEM DEGRADATION] Shared process lock not supported by "
+                "filesystem ({}), falling back to pure in-process thread locking.",
+                exc,
+            )
+            return False
+    return False
+
+
 @contextmanager
 def _cross_process_file_lock(page_path: str | Path) -> Iterator[None]:
     """Exclusive ``fcntl.flock`` on a sidecar lock file (no-op when ``fcntl`` is unavailable)."""
@@ -53,13 +90,8 @@ def _cross_process_file_lock(page_path: str | Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        try:
-            _fcntl.flock(fd, _fcntl.LOCK_EX)
-        except OSError:
-            logger.info(
-                "[LOCK FILE SYSTEM DEGRADATION] Shared process lock not supported by "
-                "filesystem, falling back to pure in-process thread locking."
-            )
+        acquired = _acquire_cross_process_flock(fd, lock_path)
+        if not acquired:
             yield
             return
         try:
@@ -76,7 +108,21 @@ def page_rmw_lock(page_path: str | Path) -> Iterator[None]:
     """Hold an exclusive lock for one file's full RMW lifecycle (thread- and process-safe)."""
     key = normalize_page_lock_key(page_path)
     thread_lock = _lock_for_key(key)
-    thread_lock.acquire()
+    delay = IO_RETRY_INITIAL_DELAY_S
+    for attempt in range(IO_RETRY_ATTEMPTS):
+        if thread_lock.acquire(blocking=False):
+            break
+        if attempt >= IO_RETRY_ATTEMPTS - 1:
+            logger.warning(
+                "In-process page lock still held after {} retries: {}",
+                IO_RETRY_ATTEMPTS - 1,
+                page_path,
+            )
+            raise PageLockUnavailableError(
+                f"Could not acquire in-process page lock for {page_path} after retries",
+            )
+        time.sleep(min(IO_RETRY_MAX_DELAY_S, delay))
+        delay = min(IO_RETRY_MAX_DELAY_S, delay * 2)
     try:
         with _cross_process_file_lock(page_path):
             yield
@@ -114,6 +160,7 @@ __all__ = [
     "clear_page_write_locks",
     "cross_process_lock_available",
     "normalize_page_lock_key",
+    "PageLockUnavailableError",
     "page_rmw_lock",
     "sweep_matryca_lock_sidecars",
 ]

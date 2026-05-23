@@ -6,6 +6,9 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+from loguru import logger
 
 from .alias_index import (
     is_scannable_graph_markdown,
@@ -19,6 +22,17 @@ from .page_properties import is_plumber_authored_page
 _CACHE_DIRNAME = ".matryca_semantic_cache"
 _DEFAULT_CONTEXT_ACCELERATION = 94.2
 _ANALYTICS_TTL_SECONDS = 2.0
+GraphAnalyticsStatus = Literal["online", "offline"]
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryLedgerSnapshot:
+    """Reconciled daemon ledger counters after a live graph scan."""
+
+    ai_links_injected: int
+    ai_blocks_healed: int
+    ai_pages_created: int
+    healed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +51,9 @@ class GraphAnalytics:
     semantic_links: int = 0
     semantic_cache_mb: float = 0.0
     context_acceleration: float = _DEFAULT_CONTEXT_ACCELERATION
+    status: GraphAnalyticsStatus = "online"
 
-    def to_dict(self) -> dict[str, float | int]:
+    def to_dict(self) -> dict[str, float | int | str]:
         return {
             "total_pages": self.total_pages,
             "total_journals": self.total_journals,
@@ -52,7 +67,21 @@ class GraphAnalytics:
             "semantic_links": self.semantic_links,
             "semantic_cache_mb": self.semantic_cache_mb,
             "context_acceleration": self.context_acceleration,
+            "status": self.status,
         }
+
+
+def offline_graph_analytics(
+    *,
+    ai_links_injected: int = 0,
+    ai_blocks_healed: int = 0,
+) -> GraphAnalytics:
+    """Safe zeroed telemetry when the graph root is temporarily inaccessible."""
+    return GraphAnalytics(
+        ai_links=ai_links_injected,
+        ai_blocks_healed=ai_blocks_healed,
+        status="offline",
+    )
 
 
 _analytics_cache: dict[str, tuple[float, GraphAnalytics]] = {}
@@ -126,6 +155,55 @@ def _context_acceleration_rate(graph_root: Path, total_pages: int) -> float:
     return round(rate, 1)
 
 
+def _count_blocks_scanned(graph_root: Path) -> int:
+    total = 0
+    for path in iter_alias_source_paths(graph_root):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.lstrip().startswith("- "):
+                total += 1
+    return total
+
+
+def reconcile_telemetry_ledger(
+    graph_root: Path,
+    *,
+    ai_links_injected: int,
+    ai_blocks_healed: int,
+    ai_pages_created: int = 0,
+) -> TelemetryLedgerSnapshot:
+    """Clamp ledger counters when mass-deletions drop absolute graph totals below them."""
+    root = graph_root.expanduser().resolve(strict=False)
+    total_pages = len(iter_scannable_pages_markdown(root))
+    total_links = _count_links_scanned(root)
+    total_blocks = _count_blocks_scanned(root)
+
+    healed = False
+    links = ai_links_injected
+    blocks = ai_blocks_healed
+    pages = ai_pages_created
+
+    if links > total_links:
+        links = total_links
+        healed = True
+    if blocks > total_blocks:
+        blocks = total_blocks
+        healed = True
+    if pages > total_pages:
+        pages = total_pages
+        healed = True
+
+    return TelemetryLedgerSnapshot(
+        ai_links_injected=links,
+        ai_blocks_healed=blocks,
+        ai_pages_created=pages,
+        healed=healed,
+    )
+
+
 def _count_current_ai_pages(graph_root: Path) -> int:
     total = 0
     for path in iter_scannable_pages_markdown(graph_root):
@@ -193,20 +271,50 @@ def compute_graph_analytics(
 ) -> GraphAnalytics:
     """Return graph telemetry, reusing a short-lived in-process cache for UI polling."""
     root = graph_root.expanduser().resolve(strict=False)
-    page_count, revision_ns = _topology_revision(root)
+    if not root.exists():
+        logger.error("Graph analytics offline: graph root does not exist: {}", root)
+        return offline_graph_analytics(
+            ai_links_injected=ai_links_injected,
+            ai_blocks_healed=ai_blocks_healed,
+        )
+
+    try:
+        page_count, revision_ns = _topology_revision(root)
+    except (OSError, FileNotFoundError) as exc:
+        logger.error("Graph analytics offline during topology scan of {}: {}", root, exc)
+        return offline_graph_analytics(
+            ai_links_injected=ai_links_injected,
+            ai_blocks_healed=ai_blocks_healed,
+        )
+
     key = f"{root}|{page_count}|{revision_ns}|{ai_links_injected}|{ai_blocks_healed}"
     now = time.monotonic()
     cached = _analytics_cache.get(key)
     if cached is not None and now - cached[0] < _ANALYTICS_TTL_SECONDS:
         return cached[1]
 
-    result = _compute_graph_analytics_uncached(
-        root,
-        ai_links_injected=ai_links_injected,
-        ai_blocks_healed=ai_blocks_healed,
-    )
+    try:
+        result = _compute_graph_analytics_uncached(
+            root,
+            ai_links_injected=ai_links_injected,
+            ai_blocks_healed=ai_blocks_healed,
+        )
+    except (OSError, FileNotFoundError) as exc:
+        logger.error("Graph analytics offline during scan of {}: {}", root, exc)
+        return offline_graph_analytics(
+            ai_links_injected=ai_links_injected,
+            ai_blocks_healed=ai_blocks_healed,
+        )
+
     _analytics_cache[key] = (now, result)
     return result
 
 
-__all__ = ["GraphAnalytics", "compute_graph_analytics"]
+__all__ = [
+    "GraphAnalytics",
+    "GraphAnalyticsStatus",
+    "TelemetryLedgerSnapshot",
+    "compute_graph_analytics",
+    "offline_graph_analytics",
+    "reconcile_telemetry_ledger",
+]

@@ -11,7 +11,8 @@ from ...graph.generational_cache import patch_generational_caches_for_paths
 from ...graph.markdown_blocks import (
     atomic_write_bytes,
     atomic_write_bytes_if_unchanged,
-    read_file_mtime,
+    file_mtime_drifted,
+    occ_snapshot,
 )
 from ...graph.page_properties import inject_page_properties, page_property_keys
 from ...graph.page_write_lock import page_rmw_lock
@@ -203,6 +204,7 @@ def run_marpa_framework(
     namespace = detect_marpa_namespace(page_title)
     ssot_flags = _scan_ssot_duplication(graph_root, page_path, content)
     has_type = _has_top_level_type(content)
+    baseline_mtime = occ_snapshot(page_path) if page_path.is_file() else None
 
     if has_type:
         domain: MarpaDomain = "risorsa"
@@ -226,10 +228,10 @@ def run_marpa_framework(
     with page_rmw_lock(page_path):
         if page_path.is_file():
             text = page_path.read_text(encoding="utf-8", errors="replace")
-            baseline_mtime = read_file_mtime(page_path)
         else:
             text = content
-            baseline_mtime = None
+        if baseline_mtime is not None and file_mtime_drifted(page_path, baseline_mtime):
+            return outcome
         if is_blank_page_content(text):
             return outcome
         lines = text.splitlines(keepends=True)

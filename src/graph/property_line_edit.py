@@ -12,44 +12,22 @@ from pathlib import Path
 
 from .alias_index import normalize_concept_key
 from .global_fence_scanner import compute_page_protected_line_indices
-from .markdown_blocks import atomic_write_bytes, graph_safe_page_path
+from .markdown_blocks import (
+    atomic_write_bytes_if_unchanged,
+    block_bullet_index,
+    block_subtree_end,
+    canonical_line_suffix,
+    file_mtime_drifted,
+    find_id_line_index,
+    graph_safe_page_path,
+    occ_snapshot,
+    read_file_mtime,
+    strip_line_endings,
+    strip_lines_for_match,
+)
 from .mldoc_properties import is_logseq_block_property_line, split_logseq_property_list_values
 from .page_properties import inject_page_property
 from .page_write_lock import page_rmw_lock
-
-_BULLET = re.compile(r"^(\s*)[-*+]\s+")
-
-
-def _find_id_line_index(lines: list[str], block_uuid: str) -> int | None:
-    """Return 0-based line index of ``id:: <uuid>`` (case-insensitive UUID)."""
-    u = block_uuid.strip().lower()
-    pat = re.compile(rf"^\s*id::\s*{re.escape(u)}\s*$", re.IGNORECASE)
-    for i, line in enumerate(lines):
-        if pat.match(line):
-            return i
-    return None
-
-
-def _block_bullet_index(lines: list[str], id_line_idx: int) -> int | None:
-    """Walk upward from ``id_line_idx`` to the owning list bullet line."""
-    for j in range(id_line_idx - 1, -1, -1):
-        m = _BULLET.match(lines[j])
-        if m:
-            return j
-    return None
-
-
-def _property_span_end(lines: list[str], id_line_idx: int, bullet_idx: int) -> int:
-    """First line index *after* the block body (exclusive), using bullet indent."""
-    bm = _BULLET.match(lines[bullet_idx])
-    if not bm:
-        return len(lines)
-    base = len(bm.group(1))
-    for k in range(id_line_idx + 1, len(lines)):
-        m = _BULLET.match(lines[k])
-        if m and len(m.group(1)) <= base:
-            return k
-    return len(lines)
 
 
 def _property_line_indices(lines: list[str], start: int, end: int) -> list[int]:
@@ -159,6 +137,7 @@ def edit_block_property_lines(
     use_regex: bool = False,
     replace_all: bool = False,
     case_sensitive: bool = True,
+    baseline_mtime: float | None = None,
 ) -> PropertyLineEditOutcome:
     """Edit only ``key::`` property lines for the block identified by ``id::``."""
     root = Path(graph_root).expanduser().resolve(strict=False)
@@ -181,6 +160,21 @@ def edit_block_property_lines(
             ok=False,
             code="page_not_found",
             hint=f"No file at `{path}` under graph root.",
+            dry_run=dry_run,
+            match_count=0,
+            previews=[],
+            previous_size_bytes=0,
+            current_size_bytes=0,
+            lines_changed=0,
+        )
+
+    if baseline_mtime is None:
+        baseline_mtime = occ_snapshot(path)
+    if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
+        return PropertyLineEditOutcome(
+            ok=False,
+            code="occ_conflict",
+            hint="File modified since the mutation was requested; write aborted.",
             dry_run=dry_run,
             match_count=0,
             previews=[],
@@ -216,7 +210,8 @@ def edit_block_property_lines(
 
         protected = compute_page_protected_line_indices(text)
 
-        id_idx = _find_id_line_index([ln.rstrip("\n") for ln in lines], block_uuid)
+        stripped = strip_lines_for_match(lines)
+        id_idx = find_id_line_index(stripped, block_uuid)
         if id_idx is None:
             return PropertyLineEditOutcome(
                 ok=False,
@@ -230,8 +225,7 @@ def edit_block_property_lines(
                 lines_changed=0,
             )
 
-        stripped = [ln.rstrip("\n") for ln in lines]
-        bullet_idx = _block_bullet_index(stripped, id_idx)
+        bullet_idx = block_bullet_index(stripped, id_idx)
         if bullet_idx is None:
             return PropertyLineEditOutcome(
                 ok=False,
@@ -245,8 +239,8 @@ def edit_block_property_lines(
                 lines_changed=0,
             )
 
-        end = _property_span_end(stripped, id_idx, bullet_idx)
-        prop_indices = _property_line_indices(stripped, id_idx, end)
+        end = block_subtree_end(stripped, id_idx, bullet_idx)
+        prop_indices = _property_line_indices(stripped, bullet_idx + 1, end)
         if not prop_indices:
             return PropertyLineEditOutcome(
                 ok=False,
@@ -285,8 +279,7 @@ def edit_block_property_lines(
 
         for li in prop_indices:
             original = new_lines[li]
-            core = original.rstrip("\n\r")
-            newline = original[len(core) :]
+            core = strip_line_endings(original)
             new_core, mc = _apply_pattern(
                 core,
                 search,
@@ -299,7 +292,7 @@ def edit_block_property_lines(
             if mc and new_core != core:
                 lines_changed += 1
                 previews.append(f"L{li + 1}: `{core[:120]}` → `{new_core[:120]}`")
-            new_lines[li] = new_core + newline
+            new_lines[li] = new_core + canonical_line_suffix(original)
 
         if total_matches == 0:
             return PropertyLineEditOutcome(
@@ -330,7 +323,7 @@ def edit_block_property_lines(
                 lines_changed=0,
             )
 
-        new_text = "".join(new_lines)
+        new_text = "".join(strip_line_endings(ln) + canonical_line_suffix(ln) for ln in new_lines)
         new_bytes = new_text.encode("utf-8")
 
         if dry_run:
@@ -348,7 +341,24 @@ def edit_block_property_lines(
 
         bak = path.with_suffix(path.suffix + ".bak")
         shutil.copy2(path, bak)
-        atomic_write_bytes(path, new_bytes, graph_root=root)
+        write_mtime = baseline_mtime if baseline_mtime is not None else read_file_mtime(path)
+        if write_mtime is None or not atomic_write_bytes_if_unchanged(
+            path,
+            new_bytes,
+            graph_root=root,
+            baseline_mtime=write_mtime,
+        ):
+            return PropertyLineEditOutcome(
+                ok=False,
+                code="occ_conflict",
+                hint="File modified since the mutation was requested; write aborted.",
+                dry_run=False,
+                match_count=total_matches,
+                previews=previews[:20],
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+                lines_changed=0,
+            )
 
         final_size = path.stat().st_size
         return PropertyLineEditOutcome(
@@ -419,6 +429,7 @@ def append_page_alias_line(
     alias: str,
     *,
     dry_run: bool = True,
+    baseline_mtime: float | None = None,
 ) -> PageAliasAppendResult:
     """Append ``alias`` to the first ``alias::`` line, or add a new line at EOF (idempotent).
 
@@ -454,12 +465,14 @@ def append_page_alias_line(
 
     raw = path.read_bytes()
     previous_size = len(raw)
+    if baseline_mtime is None:
+        baseline_mtime = occ_snapshot(path)
     text = raw.decode("utf-8")
     lines = text.splitlines(keepends=True)
     if not lines:
         lines = [""]
 
-    stripped = [ln.rstrip("\n") for ln in lines]
+    stripped = strip_lines_for_match(lines)
     protected = compute_page_protected_line_indices(text)
     target_idx: int | None = None
     for i, line in enumerate(stripped):
@@ -527,7 +540,7 @@ def append_page_alias_line(
         new_tok = _format_alias_token(alias, use_wikilink=use_wiki)
         new_payload = f"{payload.rstrip()}, {new_tok}"
         new_core = f"{indent}alias::{mid_space}{new_payload}"
-        new_line = new_core + lines[target_idx][len(stripped[target_idx]) :]
+        new_line = new_core + canonical_line_suffix(lines[target_idx])
         new_lines = list(lines)
         new_lines[target_idx] = new_line
     else:
@@ -547,9 +560,39 @@ def append_page_alias_line(
                 previous_size_bytes=previous_size,
                 current_size_bytes=len(new_bytes_preview),
             )
-        bak = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, bak)
-        atomic_write_bytes(path, new_bytes_preview, graph_root=root)
+        with page_rmw_lock(path):
+            if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
+                return PageAliasAppendResult(
+                    ok=False,
+                    code="occ_conflict",
+                    hint="File modified since the mutation was requested; write aborted.",
+                    dry_run=False,
+                    added=False,
+                    line_before=None,
+                    line_after=None,
+                    previous_size_bytes=previous_size,
+                    current_size_bytes=previous_size,
+                )
+            bak = path.with_suffix(path.suffix + ".bak")
+            shutil.copy2(path, bak)
+            write_mtime = baseline_mtime if baseline_mtime is not None else read_file_mtime(path)
+            if write_mtime is None or not atomic_write_bytes_if_unchanged(
+                path,
+                new_bytes_preview,
+                graph_root=root,
+                baseline_mtime=write_mtime,
+            ):
+                return PageAliasAppendResult(
+                    ok=False,
+                    code="occ_conflict",
+                    hint="File modified since the mutation was requested; write aborted.",
+                    dry_run=False,
+                    added=False,
+                    line_before=None,
+                    line_after=None,
+                    previous_size_bytes=previous_size,
+                    current_size_bytes=previous_size,
+                )
         final = path.stat().st_size
         return PageAliasAppendResult(
             ok=True,
@@ -563,7 +606,7 @@ def append_page_alias_line(
             current_size_bytes=final,
         )
 
-    new_text = "".join(new_lines)
+    new_text = "".join(strip_line_endings(ln) + canonical_line_suffix(ln) for ln in new_lines)
     new_bytes = new_text.encode("utf-8")
     if dry_run:
         return PageAliasAppendResult(
@@ -579,8 +622,38 @@ def append_page_alias_line(
         )
 
     bak = path.with_suffix(path.suffix + ".bak")
-    shutil.copy2(path, bak)
-    atomic_write_bytes(path, new_bytes, graph_root=root)
+    with page_rmw_lock(path):
+        if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
+            return PageAliasAppendResult(
+                ok=False,
+                code="occ_conflict",
+                hint="File modified since the mutation was requested; write aborted.",
+                dry_run=False,
+                added=False,
+                line_before=stripped[target_idx],
+                line_after=new_core,
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+            )
+        shutil.copy2(path, bak)
+        write_mtime = baseline_mtime if baseline_mtime is not None else read_file_mtime(path)
+        if write_mtime is None or not atomic_write_bytes_if_unchanged(
+            path,
+            new_bytes,
+            graph_root=root,
+            baseline_mtime=write_mtime,
+        ):
+            return PageAliasAppendResult(
+                ok=False,
+                code="occ_conflict",
+                hint="File modified since the mutation was requested; write aborted.",
+                dry_run=False,
+                added=False,
+                line_before=stripped[target_idx],
+                line_after=new_core,
+                previous_size_bytes=previous_size,
+                current_size_bytes=previous_size,
+            )
 
     final_size = path.stat().st_size
     return PageAliasAppendResult(
