@@ -144,25 +144,25 @@ Shipped. Operators tune delays independently per phase without touching code.
 
 ---
 
-## [2026-05-21] Phase 14: Consolidamento Ingegneristico e Architettura GraphRAG Locale
+## [2026-05-21] Phase 14: Engineering Consolidation and Native GraphRAG Architecture
 
-### Contesto e Problema Rilevato
+### Context and Problem Discovered
 
-Durante i primi stress test su larga scala con una copia fresca del grafo di test, il sistema ha sperimentato due anomalie sistemiche:
+During the first large-scale stress tests on a fresh copy of the test graph, the system exhibited two systemic anomalies:
 
-1. La Fase 1 accumulava la memoria rolling dei 48 messaggi precedenti, causando un enorme overhead di Prompt Prefill sulla GPU locale (fino a 25 secondi per file) e introducendo rischi di contaminazione semantica inter-pagina (*context bleeding*).
-2. I moduli di cross-reference attivi in Fase 1, non avendo ancora una mappa globale consolidata del grafo, allucinavano la creazione compulsiva di nuove pagine di concetti, portando la coda del demone in un loop di elaborazione teoricamente infinito.
+1. Phase 1 accumulated rolling memory from the previous 48 messages, causing enormous local GPU Prompt Prefill overhead (up to 25 seconds per file) and introducing inter-page semantic contamination risks (*context bleeding*).
+2. Cross-reference modules active in Phase 1, lacking a consolidated global graph map, compulsively hallucinated new concept pages — driving the daemon queue into a theoretically infinite processing loop.
 
-### Decisioni Architetturali Imposte
+### Architectural Decisions Imposed
 
-1. **Separazione Rigorosa delle Fasi (Strict Phase Separation):** Riscritto il ciclo vitale del demone blindando la Phase 1 in modalità puramente passiva (Read/Append-Index). Introdotta la flag atomica `bootstrap_complete` che inibisce qualsiasi mutazione o creazione di file markdown fino alla completa stesura del catalogo e del Master Index.
-2. **Ottimizzazione Stateless di Ingestione:** Forzato l'azzeramento totale del buffer di conversazione dell'Instructor LLM Client durante la Phase 1. Il tempo di elaborazione per singola pagina è crollato verticalmente da 25 secondi a meno di 2 secondi per file, riducendo drasticamente l'impronta termica della GPU Mac.
-3. **Iniezione del Motore GraphRAG Louvain-Nativo:** Introdotto il modulo `semantic_clustering.py` ispirato alle comunità gerarchiche di Microsoft GraphRAG. Python calcola localmente a costo token zero una matrice ibrida TF-IDF + Jaccard Tags ed esegue il partizionamento di Louvain con un loop guard di 20 iterazioni massime. La Phase 2 ora opera esclusivamente confinando la memoria rolling all'interno di questi isolati "quartieri semantici" (5-35 pagine), guidata da un nodo hub centrale (*Cluster Hub Anchor Node*).
-4. **Hardening Totale Operativo:** Chiusi gli ultimi varchi di instabilità legati ai file system virtuali (iCloud, Dropbox) intercettando i fallimenti di `flock`, implementato il self-healing automatico in caso di file JSON di stato azzerati da blackout, ed Error Backoff per evitare loop infiniti di CPU su file corrotti non modificati.
+1. **Strict Phase Separation:** Rewrote the daemon lifecycle, locking Phase 1 in purely passive mode (Read/Append-Index). Introduced the atomic `bootstrap_complete` flag that inhibits any Markdown file mutation or creation until the catalog and Master Index are fully written to disk.
+2. **Stateless Ingestion Optimization:** Forced total reset of the Instructor LLM Client conversation buffer during Phase 1. Per-page processing time collapsed from 25 seconds to under 2 seconds per file, drastically reducing Mac GPU thermal footprint.
+3. **Native Louvain GraphRAG Engine Injection:** Introduced `semantic_clustering.py`, inspired by Microsoft GraphRAG hierarchical communities. Python computes locally at zero token cost a hybrid TF-IDF + Jaccard Tags matrix and executes Louvain partitioning with a 20-iteration loop guard. Phase 2 now operates exclusively by confining rolling memory within these isolated semantic neighborhoods (5–35 pages), guided by a central hub node (*Cluster Hub Anchor Node*).
+4. **Total Operational Hardening:** Closed the last instability gaps from virtual filesystems (iCloud, Dropbox) by intercepting `flock` failures, implemented automatic self-healing when blackout events zero out JSON state files, and Error Backoff to prevent infinite CPU loops on unchanged corrupted files.
 
-### Stato della Suite di Test
+### Test Suite Status
 
-La validazione finale ha portato il contatore globale a **317 test unitari e di integrazione completamente superati (100% verdi)**, superando brillantemente i vincoli di MyPy Strict e Ruff linting. Il sistema è formalmente dichiarato stabile, resiliente ed ermetico per carichi di produzione su grafi reali complessi.
+Final validation brought the global counter to **317 unit and integration tests fully passed (100% green)**, brilliantly exceeding MyPy Strict and Ruff linting constraints. The system is formally declared stable, resilient, and hermetic for production loads on complex real-world graphs.
 
 ---
 

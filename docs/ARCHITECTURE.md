@@ -961,17 +961,17 @@ Principle 15 makes runtime parameters **dynamic within live background threads**
 
 ---
 
-## Architettura del Ciclo di Vita e della Tolleranza ai Guasti
+## Lifecycle Architecture and Fault Tolerance
 
-### 1. Pipeline a Separazione Rigorosa di Fase (Strict Phase Separation)
+### 1. Strict Phase Separation Pipeline
 
-Per prevenire loop infiniti di allucinazione concettuale (in cui l'LLM crea pagine orfane durante il censimento iniziale che allungano ricorsivamente la coda di scansione), Matryca Plumber impone un muro di separazione invalicabile tra la raccolta dei dati e l'evoluzione logica del grafo.
+To prevent infinite conceptual hallucination loops (where the LLM creates orphan pages during initial census that recursively extend the scan queue), Matryca Plumber enforces an impassable wall between data collection and logical graph evolution.
 
 ```
-[ Grafo Logseq ] ──► PHASE 1 (Stateless Ingestion) ──► Genera Master Index & Catalogo
+[ Logseq Graph ] ──► PHASE 1 (Stateless Ingestion) ──► Generate Master Index & Catalog
 │
 ▼
-[ MODULO DI LOUVAIN ] ──► Raggruppamento in Quartieri Semantici (5-35 pag)
+[ LOUVAIN MODULE ] ──► Group into Semantic Neighborhoods (5–35 pages)
 │
 ▼
 PHASE 2 (Cognitive Loop) ──► Alias-First Semantics & Link Backpropagation
@@ -979,36 +979,36 @@ PHASE 2 (Cognitive Loop) ──► Alias-First Semantics & Link Backpropagation
 
 #### Phase 1: Pure Bootstrap Harvesting (Read/Append Only)
 
-Durante questa fase, tutti i moduli mutativi e generativi (`Semantic Routing`, `Link Backpropagation`) sono forzatamente disattivati via codice.
+During this phase, all mutative and generative modules (`Semantic Routing`, `Link Backpropagation`) are forcibly disabled in code.
 
-- L'esecuzione è **Stateless**: la cronologia dell'Instructor LLM Client viene azzerata dopo ogni singola pagina scritta.
-- Viene popolata la mappa piatta `master_catalog.json` e compilato il file strutturato `pages/Matryca Master Index.md` impostando la proprietà nativa Logseq `collapsed:: true` sulle macro-sezioni MARPA per preservare le prestazioni del DOM visivo.
-- Non è permessa la creazione di alcun file markdown aggiuntivo.
+- Execution is **Stateless**: the Instructor LLM Client history is reset after every single page write.
+- The flat `master_catalog.json` map is populated and the structured `pages/Matryca Master Index.md` file is compiled, setting the native Logseq `collapsed:: true` property on MARPA macro-sections to preserve visual DOM performance.
+- No additional Markdown file creation is permitted.
 
 #### Phase 2: Neighborhood-Contextualized Cognitive Engine
 
-Lo stato `bootstrap_complete` viene commutato a `True` solo quando il backlog pendente è a zero e l'indice principale è su disco.
+The `bootstrap_complete` flag flips to `True` only when the pending backlog reaches zero and the master index is on disk.
 
-- Al subentrare di modifiche sui file, il demone attiva l'analisi cognitiva.
-- Invece di scorrere le pagine in modo piatto, il sistema le elabora blocco per blocco in base al cluster di appartenenza.
-- All'ingresso di un cluster, viene eseguito un `reset_execution_history()` e iniettata una mappa di quartiere contestuale, forzando la memoria rolling di Ermes (48 messaggi) a rimanere confinata nello stesso perimetro concettuale.
+- When file modifications arrive, the daemon activates cognitive analysis.
+- Instead of scanning pages in flat order, the system processes them cluster-by-cluster based on membership.
+- On cluster entry, `reset_execution_history()` runs and a neighborhood context map is injected, forcing Ermes rolling memory (48 messages) to remain confined within the same conceptual perimeter.
 
-### 2. Il Motore di Clustering Semantico Deterministico
+### 2. Deterministic Semantic Clustering Engine
 
-Sviluppato in Python puro per escludere dipendenze C pesanti o database vettoriali esterni, il modulo `semantic_clustering.py` esegue il partizionamento gerarchico delle comunità ispirandosi al paradigma Microsoft GraphRAG.
+Implemented in pure Python to exclude heavy C dependencies or external vector databases, the `semantic_clustering.py` module performs hierarchical community partitioning inspired by the Microsoft GraphRAG paradigm.
 
-1. **Tokenizzazione e Filtro Stopwords:** Il testo dei riassunti viene ripulito tramite un set statico di stop-words italiane e inglesi, impedendo alla prosa strutturale di inquinare i calcoli.
-2. **Matrice di Somiglianza Ibrida:** Viene costruita una rete pesata dove la vicinanza tra due nodi $A$ e $B$ è definita dalla combinazione lineare:
+1. **Tokenization and Stopword Filtering:** Summary text is cleaned via a static set of Italian and English stopwords, preventing structural prose from polluting similarity calculations.
+2. **Hybrid Similarity Matrix:** A weighted network is built where proximity between two nodes $A$ and $B$ is defined by the linear combination:
    $$\text{Similarity}(A, B) = (0.55 \times \text{CosineSimilarity}_{\text{TF-IDF}}) + (0.45 \times \text{JaccardIndex}_{\text{Tags}})$$
-3. **Algoritmo di Louvain Bilanciato con Loop Guard:** L'ottimizzazione della modularità in RAM è protetta da una costante `LOUVAIN_MAX_ITERATIONS = 20` per prevenire oscillazioni infinite su grafi degeneri. I cluster risultanti vengono bilanciati rigidamente tra un minimo di 5 e un massimo di 35 pagine per preservare i limiti di contesto dei modelli locali.
-4. **Cluster Hub Anchor:** Per ogni quartiere, viene calcolato matematicamente il nodo con il massimo grado pesato (l'epicentro strutturale). Questo nodo viene marcato esplicitamente nel prompt come ancora cognitiva (`[CLUSTER FOCUS ANCHOR NODE]`), migliorando drasticamente la precisione del recupero associativo.
+3. **Balanced Louvain Algorithm with Loop Guard:** In-RAM modularity optimization is protected by `LOUVAIN_MAX_ITERATIONS = 20` to prevent infinite oscillation on degenerate graphs. Resulting clusters are rigidly balanced between a minimum of 5 and a maximum of 35 pages to preserve local model context limits.
+4. **Cluster Hub Anchor:** For each neighborhood, the node with maximum weighted degree (the structural epicenter) is computed mathematically. This node is explicitly marked in the prompt as the cognitive anchor (`[CLUSTER FOCUS ANCHOR NODE]`), dramatically improving associative retrieval precision.
 
-### 3. Meccanismi di Hardening del Sistema Operativo
+### 3. Operating System Hardening Mechanisms
 
-- **Universal Unicode Resilience:** Ogni operazione di decodifica/codifica I/O impone il flag `errors="replace"` per digerire frammenti web corrotti senza mai sollevare un `UnicodeDecodeError`.
-- **Graceful Signal Evacuation (`SIGTERM`/`SIGINT`):** All'intercettazione dei segnali di spegnimento, un hook atomico scrive lo stato corrente, persiste il catalogo in RAM, svuota tutti i descrittori di lock di processo (`*.matryca.lock`) e disalloca il file PID prima del `sys.exit(0)`.
+- **Universal Unicode Resilience:** Every decode/encode I/O operation applies `errors="replace"` to digest corrupted web fragments without ever raising `UnicodeDecodeError`.
+- **Graceful Signal Evacuation (`SIGTERM`/`SIGINT`):** On shutdown signal interception, an atomic hook writes current state, persists the in-RAM catalog, releases all process lock descriptors (`*.matryca.lock`), and deallocates the PID file before `sys.exit(0)`.
 - **Live cockpit telemetry:** The React control room polls `/api/state` and `/api/logs` at 1 Hz; ops log tailing uses bounded line reads — constant RAM regardless of multi-megabyte JSONL history.
-- **Error Backoff:** Le pagine che falliscono l'indicizzazione per cause esterne (es. timeout VRAM di LM Studio) vengono marcate come `"error"`. Il demone le esclude dai cicli di scansione successivi finché il loro `st_mtime` sul disco non subisce una modifica fisica da parte dell'utente, azzerando lo spreco di cicli CPU.
+- **Error Backoff:** Pages that fail indexing due to external causes (e.g. LM Studio VRAM timeout) are marked `"error"`. The daemon excludes them from subsequent scan cycles until their on-disk `st_mtime` receives a physical modification from the user, zeroing wasted CPU cycles.
 
 ---
 

@@ -1,6 +1,6 @@
 # Matryca Logseq LLM Wiki (v1.5 — Plumber Edition)
 
-> Agentic Knowledge Management for Logseq OG. An MCP server and **enterprise-grade, local-first background AI daemon** that turns your favorite AI into a spatial Knowledge Architect — heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). It treats your vault as a tree of blocks, not a flat document store. **100% native Logseq compatibility**, optimistic concurrency safety, and zero auxiliary databases.
+> Agentic Knowledge Management for Logseq OG. A CLI interface and MCP server and **enterprise-grade, local-first background AI daemon** that turns your favorite AI into a spatial Knowledge Architect — heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). It treats your vault as a tree of blocks, not a flat document store. **100% native Logseq compatibility**, optimistic concurrency safety, and zero auxiliary databases.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-349%2B%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-logseq-llm-wiki/actions/workflows/ci.yml)
@@ -9,7 +9,7 @@
 
 ![Matryca Logseq LLM Wiki — Agentic Knowledge Management for Logseq OG](images/20260519%20Logseq%20Matryca%20LLM%20Wiki%20copertina%20github.jpg)
 
-Matryca is a **100% headless, sandboxed** MCP server and CLI that turns your local Logseq graph into a high token-density agentic workspace — **no network APIs and no background desktop app required**.
+Matryca is a **100% headless, sandboxed** MCP server and CLI that turns your local Logseq graph into a high token-density agentic workspace — **no network APIs and no background desktop app (Logseq OG) required**.
 
 **Matryca Plumber** is not a one-shot script — it is an **enterprise-grade, local-first background AI daemon for Logseq**. It polls your graph on a duty cycle, calls a local LLM (LM Studio), appends semantic indexes, runs optional cognitive lint modules, and logs every token transaction — **while you edit the same `.md` files in Logseq or via MCP**. Every write path mirrors Logseq's on-disk AST contract: page frontmatter at line 0, block properties contiguous to their parent bullet, namespace filenames encoded exactly like Logseq's Clojure Datalog layer, and **optimistic concurrency control** that aborts stale writes when you type during inference.
 
@@ -55,17 +55,17 @@ Why Matryca Plumber over generic Markdown LLM tools:
 
 ---
 
-## 🪠 Matryca Plumber: L'Infrastruttura Semantica Locale
+## 🪠 Matryca Plumber: Local Semantic Infrastructure
 
-Matryca Plumber è un motore di manutenzione asincrono, deterministico e ad alte prestazioni progettato per indicizzare, connettere e ottimizzare grandi grafi di conoscenza Logseq (3.000+ pagine) in locale. Sfruttando un'architettura a separazione rigorosa di fase e un motore GraphRAG nativo a costo token zero, il sistema elimina il lag di rendering della UI e previene la saturazione della memoria dei modelli linguistici (KV-Cache) su macchine consumer.
+Matryca Plumber is a high-performance, deterministic, asynchronous maintenance engine designed to index, connect, and optimize large local Logseq knowledge graphs (3,000+ pages). Powered by strict phase separation and a zero-token-cost native GraphRAG engine, the system eliminates UI rendering lag and prevents LLM KV-cache saturation on consumer hardware.
 
-### 🌟 Funzionalità Chiave di Grado Industriale
+### 🌟 Enterprise-Grade Key Capabilities
 
-- **Ingestione Stateless ad Alta Velocità (Phase 1):** Scansione iniziale parallela dei file Markdown. Calcola i blocchi di codice protetti (fences) per evitare falsi positivi, estrae riassunti sintetici via LLM locale (Gemma 4) azzerando la memoria rolling tra una pagina e l'altra per abbattere i tempi di Prompt Prefill da 25 a meno di 2 secondi per file.
-- **Motore GraphRAG Nativo (Phase 2 Clustering):** Partizionamento deterministico delle pagine in "quartieri semantici" isolati (5-35 pagine) tramite l'algoritmo di modularità di Louvain, calcolato in RAM in meno di un secondo tramite matrici ibride TF-IDF (con filtri Stopwords) e somiglianza di Jaccard sui tag.
-- **Isolamento del Contesto (Scudo Termico Ermes):** Durante l'analisi cognitiva di Phase 2, la cronologia dei messaggi viene confinata rigorosamente all'interno del singolo cluster geografico, iniettando un nodo ancora centrale (*Cluster Hub Anchor*), massimizzando la coerenza e azzerando le allucinazioni generative.
+- **High-Velocity Stateless Ingestion (Phase 1):** Parallel initial scan of Markdown files. Computes protected code-block fences to avoid false positives, extracts synthetic summaries via local LLM (Gemma 4), and resets rolling memory between pages — cutting Prompt Prefill latency from ~25 s to under 2 s per file.
+- **Native GraphRAG Engine (Phase 2 Clustering):** Deterministic partitioning of pages into isolated semantic neighborhoods (5–35 pages) via the Louvain modularity algorithm, computed in RAM in under one second using hybrid TF-IDF matrices (with stopword filters) and Jaccard tag similarity.
+- **Context Isolation (Ermes Thermal Shield):** During Phase 2 cognitive analysis, message history is rigorously confined to the single geographic cluster, injecting a central anchor node (*Cluster Hub Anchor*), maximizing coherence and zeroing generative hallucinations.
 - **Context Acceleration Shield (Phase 2 KV-cache hardening):** For pages exceeding `mapreduce_trigger_chars`, Phase 2 cognitive lint substitutes pre-computed Phase 1 hierarchical summaries (or a regex semantic skeleton) instead of raw megabyte-class outliner text. All LLM prompts follow a cache-aligned layout — stable page content first, dynamic task instructions last — so consecutive operations on the same file hit LM Studio / llama.cpp prompt caching and drop sequential prefill to near zero.
-- **Tolleranza ai Guasti e Self-Healing:** Immunità Unicode universale (`errors="replace"`), resilienza ai blocchi dei driver cloud (iCloud, Dropbox) tramite degradazione elegante di `flock`, auto-riparazione da corruzione dei file di stato, ed Error Backoff per evitare loop infiniti di CPU su file corrotti non modificati.
+- **Fault Tolerance and Self-Healing:** Universal Unicode resilience (`errors="replace"`), graceful degradation when cloud sync drivers (iCloud, Dropbox) block `flock`, automatic recovery from corrupted state files, and Error Backoff to prevent infinite CPU loops on unchanged corrupted files.
 
 **Prerequisites:** LM Studio (or any OpenAI-compatible local server) at `MATRYCA_LM_BASE_URL`, model loaded matching `MATRYCA_LM_MODEL`.
 
@@ -84,25 +84,25 @@ matryca plumber start                         # background daemon
 matryca plumber status                        # opens the control room in your browser
 ```
 
-### 🛠️ Interfaccia a Riga di Comando (CLI)
+### 🛠️ Command-Line Interface (CLI)
 
 ```bash
-# Avvia il demone Plumber in background (produzione notturna)
+# Start the Plumber daemon in background (overnight production runs)
 matryca plumber start
 
-# Avvia l'ingestione in primo piano (ideale per il monitoraggio iniziale)
+# Start ingestion in foreground (ideal for initial monitoring)
 matryca plumber start --foreground
 
-# Apre la control room web (FastAPI + React SPA su :8000)
+# Open the web control room (FastAPI + React SPA on :8000)
 matryca plumber status
 
-# Forza l'arresto sincronizzato e controllato del demone (Graceful Evacuation)
+# Force synchronized, controlled daemon shutdown (Graceful Evacuation)
 matryca plumber stop
 
-# Esegue una radiografia analitica del grafo spuando metriche in formato JSON
+# Run an analytical graph X-ray and emit metrics as JSON
 matryca plumber audit
 
-# Calcola e ispeziona manualmente i quartieri semantici del grafo
+# Compute and inspect semantic graph neighborhoods manually
 matryca plumber cluster
 ```
 
