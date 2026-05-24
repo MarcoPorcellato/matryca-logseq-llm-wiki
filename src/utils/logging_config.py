@@ -28,6 +28,9 @@ def configure_loguru(*, level: str = "INFO", stderr: bool = True) -> None:
         return
 
     logger.remove()
+    from ..agent.mcp_telemetry import clear_mcp_loguru_bridge
+
+    clear_mcp_loguru_bridge()
     if stderr:
         logger.add(
             sys.stderr,
@@ -56,6 +59,9 @@ def reset_loguru_configuration() -> None:
     """Drop all Loguru sinks so a forked/subprocess daemon can reconfigure logging."""
     global _CONFIGURED
     logger.remove()
+    from ..agent.mcp_telemetry import clear_mcp_loguru_bridge
+
+    clear_mcp_loguru_bridge()
     _CONFIGURED = False
 
 

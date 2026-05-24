@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from src.plumber_entry import _normalize_cli_argv
 
 

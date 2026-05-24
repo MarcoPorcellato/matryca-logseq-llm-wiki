@@ -6,11 +6,14 @@ import asyncio
 import os
 import re
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from loguru import Record
 
 _UUID_PATTERN = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
@@ -85,7 +88,7 @@ def _schedule_mcp_info(loop: asyncio.AbstractEventLoop, ctx: Any, text: str) -> 
     task.add_done_callback(_log_bridge_task_done)
 
 
-def _capture_mcp_bridge_context(record: dict[str, Any]) -> None:
+def _capture_mcp_bridge_context(record: Record) -> None:
     """Stamp a picklable session key on the record while still on the emitting thread."""
     ctx = _mcp_ctx.get()
     if ctx is None:
@@ -111,23 +114,32 @@ def _loguru_mcp_sink(message: Any) -> None:
     loop.call_soon_threadsafe(_schedule_mcp_info, loop, ctx, text)
 
 
+def _mcp_bridge_patcher(record: Record) -> None:
+    _capture_mcp_bridge_context(record)
+
+
+def clear_mcp_loguru_bridge() -> None:
+    """Drop the MCP bridge sink after ``logger.remove()`` (e.g. test loguru resets)."""
+    global _sink_id
+    if _sink_id is None:
+        return
+    with suppress(ValueError):
+        logger.remove(_sink_id)
+    _sink_id = None
+
+
 def install_loguru_mcp_bridge() -> None:
     """Register the loguru sink once (idempotent)."""
     global _sink_id
-    if _sink_id is not None:
+    logger.configure(patcher=_mcp_bridge_patcher)
+    core = getattr(logger, "_core", None)
+    if _sink_id is not None and core is not None and _sink_id in core.handlers:
         return
-    previous_patcher = logger._core.patcher
-
-    def _combined_patcher(record: dict[str, Any]) -> None:
-        _capture_mcp_bridge_context(record)
-        if previous_patcher is not None:
-            previous_patcher(record)
-
-    logger.configure(patcher=_combined_patcher)
     _sink_id = logger.add(_loguru_mcp_sink, level="INFO", enqueue=True)
 
 
 __all__ = [
+    "clear_mcp_loguru_bridge",
     "install_loguru_mcp_bridge",
     "mcp_tool_info",
     "mcp_tool_session",
