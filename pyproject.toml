@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "matryca-plumber"
-version = "1.5.4"
+version = "1.5.5"
 description = "Enterprise-grade, local-first autonomous background AI daemon and headless mutation plane for Logseq OG."
 readme = "README.md"
 requires-python = ">=3.12"
