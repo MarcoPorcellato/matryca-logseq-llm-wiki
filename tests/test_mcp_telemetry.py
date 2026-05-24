@@ -16,16 +16,6 @@ from src.agent.mcp_telemetry import (
 )
 
 
-async def _await_mcp_log_bridge(ctx: AsyncMock, *, timeout: float = 2.0) -> None:
-    """Wait until the loguru→MCP ``create_task`` bridge has invoked ``ctx.info``."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while ctx.info.await_count == 0:
-        if loop.time() >= deadline:
-            pytest.fail("timed out waiting for MCP log bridge to forward loguru record")
-        await asyncio.sleep(0.01)
-
-
 @pytest.mark.asyncio
 async def test_mcp_tool_info_forwards_to_context() -> None:
     ctx = AsyncMock()
@@ -40,7 +30,8 @@ async def test_mcp_tool_session_binds_context_for_loguru_bridge() -> None:
     async with mcp_tool_session(ctx):
         assert mcp_telemetry._mcp_ctx.get() is ctx
         logger.info("bridged message")
-        await _await_mcp_log_bridge(ctx)
+        await logger.complete()
+        await asyncio.sleep(0.01)
     assert mcp_telemetry._mcp_ctx.get() is None
     ctx.info.assert_awaited()
     assert "bridged message" in ctx.info.await_args.args[0]
@@ -80,7 +71,8 @@ async def test_mcp_tool_session_censors_bridged_logs(
     uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
     async with mcp_tool_session(ctx):
         logger.info("payload: top secret {}", uuid)
-        await _await_mcp_log_bridge(ctx)
+        await logger.complete()
+        await asyncio.sleep(0.01)
     forwarded = ctx.info.await_args.args[0]
     assert forwarded == "payload: [REDACTED_CONTENT]"
     assert uuid not in forwarded

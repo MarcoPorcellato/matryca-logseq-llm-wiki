@@ -20,6 +20,12 @@ _CONTENT_MARKER_PATTERN = re.compile(
 )
 
 _mcp_ctx: ContextVar[Any | None] = ContextVar("matryca_mcp_context", default=None)
+_mcp_loop: ContextVar[asyncio.AbstractEventLoop | None] = ContextVar(
+    "matryca_mcp_event_loop",
+    default=None,
+)
+# Enqueued loguru records are pickled across threads; keep live handles here keyed by id.
+_mcp_sessions: dict[int, tuple[Any, asyncio.AbstractEventLoop | None]] = {}
 _sink_id: int | None = None
 
 
@@ -31,11 +37,17 @@ async def mcp_tool_info(ctx: Any, message: str) -> None:
 @asynccontextmanager
 async def mcp_tool_session(ctx: Any) -> AsyncIterator[Any]:
     """Bind ``ctx`` for the loguru→MCP bridge for the duration of a tool call."""
-    token = _mcp_ctx.set(ctx)
+    session_key = id(ctx)
+    loop = asyncio.get_running_loop()
+    _mcp_sessions[session_key] = (ctx, loop)
+    ctx_token = _mcp_ctx.set(ctx)
+    loop_token = _mcp_loop.set(loop)
     try:
         yield ctx
     finally:
-        _mcp_ctx.reset(token)
+        _mcp_loop.reset(loop_token)
+        _mcp_ctx.reset(ctx_token)
+        _mcp_sessions.pop(session_key, None)
 
 
 async def run_in_thread_with_mcp_context[R](
@@ -68,21 +80,35 @@ def _log_bridge_task_done(task: asyncio.Task[object]) -> None:
         logger.debug("MCP log bridge task failed during shutdown: {}", exc)
 
 
+def _schedule_mcp_info(loop: asyncio.AbstractEventLoop, ctx: Any, text: str) -> None:
+    task = loop.create_task(ctx.info(text), name="matryca-mcp-log-bridge")
+    task.add_done_callback(_log_bridge_task_done)
+
+
+def _capture_mcp_bridge_context(record: dict[str, Any]) -> None:
+    """Stamp a picklable session key on the record while still on the emitting thread."""
+    ctx = _mcp_ctx.get()
+    if ctx is None:
+        return
+    record["extra"]["matryca_mcp_session"] = id(ctx)
+
+
 def _loguru_mcp_sink(message: Any) -> None:
     """Forward INFO+ loguru records to ``Context.info`` when a tool session is active."""
     record = message.record
     if record["level"].no < 20:
         return
-    ctx = _mcp_ctx.get()
-    if ctx is None:
+    session_key = record["extra"].get("matryca_mcp_session")
+    if session_key is None:
+        return
+    session = _mcp_sessions.get(session_key)
+    if session is None:
+        return
+    ctx, loop = session
+    if loop is None or not loop.is_running():
         return
     text = sanitize_log_message(str(record["message"]))
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    task = loop.create_task(ctx.info(text), name="matryca-mcp-log-bridge")
-    task.add_done_callback(_log_bridge_task_done)
+    loop.call_soon_threadsafe(_schedule_mcp_info, loop, ctx, text)
 
 
 def install_loguru_mcp_bridge() -> None:
@@ -90,7 +116,15 @@ def install_loguru_mcp_bridge() -> None:
     global _sink_id
     if _sink_id is not None:
         return
-    _sink_id = logger.add(_loguru_mcp_sink, level="INFO")
+    previous_patcher = logger._core.patcher
+
+    def _combined_patcher(record: dict[str, Any]) -> None:
+        _capture_mcp_bridge_context(record)
+        if previous_patcher is not None:
+            previous_patcher(record)
+
+    logger.configure(patcher=_combined_patcher)
+    _sink_id = logger.add(_loguru_mcp_sink, level="INFO", enqueue=True)
 
 
 __all__ = [
