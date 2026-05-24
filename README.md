@@ -158,3 +158,5 @@ make check
 
 ## License
 Apache-2.0 — see [LICENSE](LICENSE).
+
+![Matryca Plumber Cover](images/20260519-Logseq-Matryca-LLM-Wiki-copertina-github.jpg)
