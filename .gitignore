@@ -34,6 +34,7 @@ MANIFEST
 # ========================================
 .env
 .env.*
+!.env.example
 .venv/
 venv/
 ENV/
