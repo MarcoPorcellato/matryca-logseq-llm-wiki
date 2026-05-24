@@ -37,7 +37,11 @@ from ..graph.markdown_blocks import (
     strip_line_endings,
 )
 from ..graph.page_write_lock import page_rmw_lock
-from ..graph.path_sandbox import assert_path_within_graph, read_graph_file_text
+from ..graph.path_sandbox import (
+    PathTraversalSecurityError,
+    assert_path_within_graph,
+    read_graph_file_text,
+)
 from ..graph.property_line_edit import edit_block_property_lines
 from ..graph.reparent_blocks import refactor_logseq_blocks as run_reparent_logseq_blocks
 from ..graph.split_large_blocks import refactor_large_blocks as run_refactor_large_blocks
@@ -571,6 +575,8 @@ async def dispatch_mutate(
 
         try:
             page_path = graph_safe_page_path(graph_path, page_ref)
+        except PathTraversalSecurityError as exc:
+            return {"ok": False, "code": "security_violation", "error": str(exc)}
         except ValueError as exc:
             return _mutate_error(str(exc))
         baseline_mtime = read_file_mtime(page_path) if page_path.is_file() else None

@@ -15,10 +15,9 @@ _DEFAULT_LOG_FILE = _DEFAULT_LOG_DIR / "matryca_plumber.log"
 
 def resolve_loguru_log_path() -> Path:
     """Resolve the rotating Loguru file sink path from env or the default location."""
-    override = os.environ.get("MATRYCA_LOGURU_LOG_PATH", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return _DEFAULT_LOG_FILE
+    from .config_paths import resolve_loguru_log_path as _resolve
+
+    return _resolve()
 
 
 def configure_loguru(*, level: str = "INFO", stderr: bool = True) -> None:

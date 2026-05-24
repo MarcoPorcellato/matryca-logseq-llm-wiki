@@ -52,13 +52,24 @@ class MatrycaWikiConfig(BaseModel):
 
 def resolve_matryca_wiki_config_path() -> Path | None:
     """Pick ``matryca-wiki.yml`` path: ``MATRYCA_WIKI_CONFIG`` else graph root file."""
+    from .utils.config_paths import resolve_optional_path_under_allowed_roots
+
+    graph = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
+    graph_root = Path(graph).expanduser().resolve(strict=False) if graph else None
     explicit = os.environ.get("MATRYCA_WIKI_CONFIG", "").strip()
     if explicit:
-        return Path(explicit).expanduser().resolve(strict=False)
-    graph = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
-    if graph:
-        candidate = Path(graph).expanduser().resolve(strict=False) / "matryca-wiki.yml"
-        return candidate
+        allowed = resolve_optional_path_under_allowed_roots(
+            explicit,
+            graph_root=graph_root,
+        )
+        if allowed is None:
+            logger.warning(
+                "MATRYCA_WIKI_CONFIG path is outside allowed roots; ignoring explicit override",
+            )
+        else:
+            return allowed
+    if graph_root is not None:
+        return graph_root / "matryca-wiki.yml"
     return None
 
 

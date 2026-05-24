@@ -11,8 +11,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from ..utils.config_paths import resolve_plumber_log_path as _resolve_plumber_log_path
 from ..utils.console_sanitize import sanitize_for_console
 from ..utils.rotating_file import rotate_file_if_oversized
+from ..utils.secret_redaction import redact_for_log
 
 OperationType = Literal[
     "Concept Indexing",
@@ -45,10 +47,7 @@ def _truncate(text: str, limit: int) -> str:
 
 def resolve_plumber_log_path() -> Path:
     """Resolve the Matryca Plumber ops log path from env or the default JSONL location."""
-    override = os.environ.get("MATRYCA_PLUMBER_LOG_PATH", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return DEFAULT_LOG_PATH
+    return _resolve_plumber_log_path()
 
 
 def _default_log_path() -> Path:
@@ -139,8 +138,14 @@ class TokenLogger:
             operation=operation,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            prompt=_truncate(sanitize_for_console(prompt), _MAX_PROMPT_CHARS),
-            response=_truncate(sanitize_for_console(response), _MAX_RESPONSE_CHARS),
+            prompt=_truncate(
+                redact_for_log(sanitize_for_console(prompt)),
+                _MAX_PROMPT_CHARS,
+            ),
+            response=_truncate(
+                redact_for_log(sanitize_for_console(response)),
+                _MAX_RESPONSE_CHARS,
+            ),
             latency_seconds=latency_seconds,
             model=model,
             ok=ok,

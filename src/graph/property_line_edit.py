@@ -28,6 +28,7 @@ from .markdown_blocks import (
 from .mldoc_properties import is_logseq_block_property_line, split_logseq_property_list_values
 from .page_properties import inject_page_property
 from .page_write_lock import page_rmw_lock
+from ..utils.regex_policy import validate_regex_pattern
 
 
 def _property_line_indices(lines: list[str], start: int, end: int) -> list[int]:
@@ -58,7 +59,10 @@ def _apply_pattern(
     flags = 0 if case_sensitive else re.IGNORECASE
     if use_regex:
         repl_py = _translate_js_style_replacement(replacement)
-        rx = re.compile(search, flags)
+        try:
+            rx = validate_regex_pattern(search, flags)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
         if replace_all:
             new_text, n = rx.subn(repl_py, text)
             return new_text, n

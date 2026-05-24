@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -22,6 +23,8 @@ from dotenv import dotenv_values, load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -419,8 +422,7 @@ def _is_loopback_client_host(host: str | None) -> bool:
 
 
 def _require_loopback_client(request: Request) -> None:
-    if _ui_allow_lan():
-        return
+    """Bearer bootstrap is loopback-only even when ``MATRYCA_UI_ALLOW_LAN`` is set."""
     client = request.client
     if client is not None and _is_loopback_client_host(client.host):
         return
@@ -428,6 +430,48 @@ def _require_loopback_client(request: Request) -> None:
         status_code=403,
         detail="Auth session is only available to loopback clients",
     )
+
+
+def _ui_docs_enabled() -> bool:
+    raw = os.environ.get("MATRYCA_UI_ENABLE_DOCS", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _ui_rate_limit_per_minute() -> int:
+    raw = os.environ.get("MATRYCA_UI_RATE_LIMIT_PER_MINUTE", "120").strip()
+    try:
+        return max(10, int(raw))
+    except ValueError:
+        return 120
+
+
+class _UiRateLimitMiddleware(BaseHTTPMiddleware):
+    """Simple per-client IP cap for authenticated API routes."""
+
+    def __init__(self, app: Any, *, max_per_minute: int) -> None:
+        super().__init__(app)
+        self._max_per_minute = max_per_minute
+        self._guard = threading.Lock()
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        path = request.url.path
+        if not path.startswith("/api/") or path == "/api/health":
+            return await call_next(request)
+        client = request.client
+        key = client.host if client is not None else "unknown"
+        now = time.monotonic()
+        with self._guard:
+            bucket = self._hits[key]
+            while bucket and now - bucket[0] > 60.0:
+                bucket.popleft()
+            if len(bucket) >= self._max_per_minute:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Rate limit exceeded; retry shortly."},
+                )
+            bucket.append(now)
+        return await call_next(request)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -524,7 +568,12 @@ def _ensure_graph_root_env_loaded() -> None:
     reload_plumber_dotenv()
 
 
-app = FastAPI(title="Matryca Plumber API")
+app = FastAPI(
+    title="Matryca Plumber API",
+    docs_url="/docs" if _ui_docs_enabled() else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if _ui_docs_enabled() else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -533,6 +582,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(_UiRateLimitMiddleware, max_per_minute=_ui_rate_limit_per_minute())
 
 
 def _resolve_graph_root_or_raise() -> Path:
@@ -579,9 +629,15 @@ def _safe_graph_analytics(
         return GraphAnalyticsResponse(status="offline")
 
 
+@app.get("/api/health")
+def get_health() -> dict[str, str]:
+    """Minimal liveness probe (no auth, no schema disclosure)."""
+    return {"status": "ok"}
+
+
 @app.get("/api/auth/session", response_model=AuthSessionResponse)
 def get_auth_session(request: Request) -> AuthSessionResponse:
-    """Return the local UI bearer token for loopback clients."""
+    """Return the local UI bearer token for loopback clients only."""
     _require_loopback_client(request)
     return AuthSessionResponse(token=resolve_ui_token())
 
@@ -851,7 +907,7 @@ def _schedule_browser_open(
     """Open the dashboard after the API responds on ``/openapi.json``."""
 
     def _open_when_ready() -> None:
-        health_url = f"http://{host}:{port}/openapi.json"
+        health_url = f"http://{host}:{port}/api/health"
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
@@ -873,12 +929,12 @@ def run_ui_server(*, host: str = "127.0.0.1", port: int = 8000) -> None:
     if host == "0.0.0.0" and not _ui_allow_lan():
         raise ValueError(
             "Refusing to bind UI server to 0.0.0.0 without MATRYCA_UI_ALLOW_LAN=1 "
-            "(the /api/auth/session endpoint exposes the bearer token)."
+            "(LAN clients could reach authenticated API routes if they obtain a token)."
         )
     if host == "0.0.0.0":
         logger.warning(
-            "WARNING: Binding to 0.0.0.0 exposes the unauthenticated /api/auth/session "
-            "endpoint to the local network (MATRYCA_UI_ALLOW_LAN is enabled)."
+            "WARNING: Binding to 0.0.0.0 exposes authenticated API routes on the LAN. "
+            "/api/auth/session remains loopback-only; set a strong MATRYCA_UI_TOKEN."
         )
 
     reload_plumber_dotenv()
@@ -886,10 +942,10 @@ def run_ui_server(*, host: str = "127.0.0.1", port: int = 8000) -> None:
     _mount_frontend_assets()
 
     dashboard_url = f"http://{host}:{port}/"
-    docs_url = f"http://{host}:{port}/docs"
     sys.stdout.write(f"Matryca Plumber API listening on http://{host}:{port}\n")
     sys.stdout.write(f"Control room: {dashboard_url}\n")
-    sys.stdout.write(f"Interactive docs: {docs_url}\n")
+    if _ui_docs_enabled():
+        sys.stdout.write(f"Interactive docs: http://{host}:{port}/docs\n")
     sys.stdout.flush()
     _schedule_browser_open(dashboard_url, host=host, port=port)
     uvicorn.run("src.cli.ui_server:app", host=host, port=port, log_level="info")

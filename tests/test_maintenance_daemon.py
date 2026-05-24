@@ -503,7 +503,10 @@ def test_resolve_plumber_log_path_defaults_to_plumber_ops_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("MATRYCA_PLUMBER_LOG_PATH", raising=False)
-    assert resolve_plumber_log_path() == Path("logs") / "matryca_plumber_ops.log"
+    resolved = resolve_plumber_log_path()
+    assert resolved.name == "matryca_plumber_ops.log"
+    assert resolved.parent.name == "logs"
+    assert resolved.is_absolute()
 
 
 @pytest.mark.parametrize(

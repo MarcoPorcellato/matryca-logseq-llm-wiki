@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
+
+from ..utils.secret_redaction import secret_violations_in_text
 
 # Payload bounds — reject oversized agent inputs before parsing / allocation.
 MAX_OUTLINE_NODES = 500
@@ -11,11 +12,6 @@ MAX_OUTLINE_DEPTH = 32
 MAX_BLOCK_TEXT_BYTES = 16_384
 MAX_ADVANCED_QUERY_BYTES = 32_768
 MAX_MARKDOWN_APPEND_BYTES = 262_144
-
-_CRED_PROP = re.compile(
-    r"(?i)\b(token::|password::|secret::|api-key::|api\.key::)\s*\S+",
-)
-_SK_OPENAI = re.compile(r"\bsk-[a-zA-Z0-9]{20,}\b")
 
 
 def _iter_outline_dict_texts(node: dict[str, Any]) -> list[str]:
@@ -106,22 +102,16 @@ def markdown_append_bounds_violations(body: str) -> list[str]:
 
 def outline_security_violations(outline: dict[str, Any]) -> list[str]:
     """Return human-readable violations for unsafe outline payloads."""
-    issues: list[str] = []
     blob = "\n".join(_iter_outline_dict_texts(outline))
-    if _CRED_PROP.search(blob):
-        issues.append("credential-like property (token/password/secret/api-key) in outline")
-    if _SK_OPENAI.search(blob):
-        issues.append("possible OpenAI-style API key material in outline")
-    return issues
+    issues = secret_violations_in_text(blob)
+    return [issue.replace("payload", "outline") for issue in issues]
 
 
 def advanced_query_security_violations(query_edn: str) -> list[str]:
     """Lightweight secret scan for raw advanced-query EDN strings."""
     issues: list[str] = list(advanced_query_bounds_violations(query_edn))
-    if _CRED_PROP.search(query_edn):
-        issues.append("credential-like token in advanced query body")
-    if _SK_OPENAI.search(query_edn):
-        issues.append("possible OpenAI-style API key material in advanced query body")
+    for item in secret_violations_in_text(query_edn):
+        issues.append(item.replace("in payload", "in advanced query body"))
     return issues
 
 

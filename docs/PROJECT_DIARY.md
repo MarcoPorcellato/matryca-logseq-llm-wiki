@@ -224,7 +224,7 @@ Logseq OG as single system of record; FastMCP + Pydantic `OutlineNode`; external
 | Capability | OSS (**Matryca Plumber**) | Commercial (**Matryca Brain**) |
 |------------|---------------------------|--------------------------------|
 | MARPA taxonomy, dangling healer, property hygiene, semantic routing | ✅ env-gated | ✅ |
-| Pavlyshyn bipartite validation, Twin Ingestion, Epistemic Guardian | ❌ | ✅ proprietary |
+| Twin Ingestion, Epistemic Guardian | ❌ | ✅ proprietary |
 
 Enterprise placeholders in `.env.example` for Brain-only features are **not** loaded by `plumber_config.py` in OSS.
 

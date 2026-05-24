@@ -28,7 +28,10 @@ def assert_path_within_graph(path: Path | str, graph_root: str | Path) -> Path:
         PathTraversalSecurityError: When the resolved path escapes the graph root.
     """
     root = resolved_graph_root(graph_root)
-    resolved = Path(path).expanduser().resolve(strict=False)
+    raw = Path(path).expanduser()
+    if raw.is_symlink():
+        raise PathTraversalSecurityError(SECURITY_VIOLATION_MSG)
+    resolved = raw.resolve(strict=False)
     if not resolved.is_relative_to(root):
         raise PathTraversalSecurityError(SECURITY_VIOLATION_MSG)
     return resolved

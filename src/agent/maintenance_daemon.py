@@ -471,12 +471,14 @@ def heal_daemon_state_ledger(graph_root: Path, state: DaemonState) -> bool:
 
 
 def resolve_graph_root() -> Path:
-    """Return ``LOGSEQ_GRAPH_PATH`` or raise when unset."""
+    """Return validated ``LOGSEQ_GRAPH_PATH`` (must contain ``pages/``)."""
+    from ..graph.graph_path_validate import validate_logseq_graph_path
+
     raw = os.environ.get("LOGSEQ_GRAPH_PATH", "").strip()
     if not raw:
         msg = "LOGSEQ_GRAPH_PATH must be set for the Matryca Plumber daemon"
         raise ValueError(msg)
-    return Path(raw).expanduser().resolve(strict=False)
+    return validate_logseq_graph_path(raw)
 
 
 def state_path(graph_root: Path) -> Path:

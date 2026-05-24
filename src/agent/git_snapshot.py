@@ -9,6 +9,24 @@ import os
 import subprocess
 from pathlib import Path
 
+_SENSITIVE_GIT_PATH_MARKERS = (
+    ".env",
+    "credentials",
+    "secrets",
+    ".pem",
+    "id_rsa",
+    "private_key",
+)
+
+
+def _status_includes_sensitive_paths(porcelain: str) -> bool:
+    for line in porcelain.splitlines():
+        path_part = line[3:].strip() if len(line) > 3 else line.strip()
+        lowered = path_part.lower()
+        if any(marker in lowered for marker in _SENSITIVE_GIT_PATH_MARKERS):
+            return True
+    return False
+
 
 def git_snapshot_enabled() -> bool:
     """True when ``MATRYCA_GIT_SNAPSHOT_ON_WRITE`` is a truthy flag."""
@@ -82,6 +100,14 @@ def snapshot_git_working_tree(
             "enabled": True,
             "skipped": True,
             "reason": "clean working tree; nothing to commit",
+            "committed": False,
+        }
+
+    if _status_includes_sensitive_paths(st.stdout):
+        return {
+            "enabled": True,
+            "skipped": True,
+            "reason": "refusing snapshot: working tree includes sensitive paths (.env, keys, etc.)",
             "committed": False,
         }
 

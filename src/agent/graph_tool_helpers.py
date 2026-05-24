@@ -11,13 +11,10 @@ from typing import Any, Literal, cast
 
 from ..graph.markdown_blocks import locate_block_by_uuid
 from ..graph.path_sandbox import graph_safe_page_path
+from ..utils.regex_policy import validate_regex_pattern
 
-MAX_REGEX_PATTERN_LEN = 256
 MAX_REGEX_SCAN_BYTES = 5_000_000
 _REGEX_SCAN_TIMEOUT_SECONDS = 5.0
-_CATASTROPHIC_REGEX = re.compile(
-    r"(\(\?\:|\(\+\)|\(\*\)|\{,\}|\(\.\+\)\+|\(\.\*\)\+|\(\[[^\]]+\]\)\+)",
-)
 
 ReadGraphTarget = Literal[
     "page",
@@ -188,20 +185,6 @@ def read_block_ast_markdown(graph_path: str, query: str) -> str:
     )
 
 
-def _validate_regex_pattern(pattern: str) -> re.Pattern[str]:
-    if len(pattern) > MAX_REGEX_PATTERN_LEN:
-        msg = f"regex pattern exceeds max length ({MAX_REGEX_PATTERN_LEN})"
-        raise ValueError(msg)
-    if _CATASTROPHIC_REGEX.search(pattern):
-        msg = "regex pattern rejected (catastrophic backtracking risk)"
-        raise ValueError(msg)
-    try:
-        return re.compile(pattern)
-    except re.error as exc:
-        msg = f"Invalid regex in `query`: {exc}"
-        raise ValueError(msg) from exc
-
-
 def _scan_pages_for_regex(
     graph_path: str,
     compiled: re.Pattern[str],
@@ -240,7 +223,10 @@ def _scan_pages_for_regex(
 
 def format_regex_search_markdown(graph_path: str, pattern: str, *, limit: int = 50) -> str:
     """Vault-wide ``pages/**/*.md`` line scan (orchestration; not the spatial parser)."""
-    compiled = _validate_regex_pattern(pattern)
+    try:
+        compiled = validate_regex_pattern(pattern)
+    except ValueError as exc:
+        raise ValueError(f"Invalid regex in `query`: {exc}") from exc
 
     root = Path(graph_path).expanduser().resolve(strict=False)
     pages = root / "pages"

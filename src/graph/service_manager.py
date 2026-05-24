@@ -78,7 +78,8 @@ def _build_linux_unit(executable: str, env: dict[str, str]) -> str:
         f"StandardError=append:{log_dir / 'matryca.stderr.log'}",
     ]
     for key, value in env.items():
-        lines.append(f"Environment={key}={value}")
+        safe_value = value.replace("\n", "").replace("\r", "")
+        lines.append(f"Environment={key}={safe_value}")
     lines.extend(
         [
             "",

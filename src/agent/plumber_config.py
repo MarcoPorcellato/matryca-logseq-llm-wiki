@@ -267,14 +267,20 @@ def _resolve_llm_api_key_from_env(env: Mapping[str, str]) -> str:
 
 def load_plumber_lint_config_from_environ(env: Mapping[str, str]) -> PlumberLintConfig:
     """Build :class:`PlumberLintConfig` from a string environment mapping (thread-safe reads)."""
+    from ..utils.config_paths import resolve_optional_path_under_allowed_roots
+
     rules_raw = (env.get("MATRYCA_LINT_PROPERTY_RULES") or "").strip()
-    rules_path = Path(rules_raw).expanduser() if rules_raw else None
-    if rules_path is None:
-        graph = (env.get("LOGSEQ_GRAPH_PATH") or "").strip()
-        if graph:
-            candidate = Path(graph).expanduser() / "matryca-plumber-rules.yml"
-            if candidate.is_file():
-                rules_path = candidate
+    graph = (env.get("LOGSEQ_GRAPH_PATH") or "").strip()
+    graph_root = Path(graph).expanduser().resolve(strict=False) if graph else None
+    rules_path = (
+        resolve_optional_path_under_allowed_roots(rules_raw, graph_root=graph_root)
+        if rules_raw
+        else None
+    )
+    if rules_path is None and graph_root is not None:
+        candidate = graph_root / "matryca-plumber-rules.yml"
+        if candidate.is_file():
+            rules_path = candidate
 
     return PlumberLintConfig(
         lm_model=_resolve_llm_model_name_from_env(env),
