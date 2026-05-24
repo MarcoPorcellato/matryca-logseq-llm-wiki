@@ -1,0 +1,5 @@
+include LICENSE
+include NOTICE
+graft src
+graft frontend/dist
+prune frontend/node_modules
