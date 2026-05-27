@@ -145,6 +145,36 @@ def test_get_state_reports_idle_when_live_plumber_pid(
     assert response.json()["status"] == "idle"
 
 
+def test_get_state_includes_phase2_progress_fields(
+    graph_root: Path,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DaemonState(
+        status="running",
+        bootstrap_complete=True,
+        current_cluster="cluster-9",
+        current_cluster_files_total=4,
+        current_cluster_files_done=2,
+        phase2_cognitive_total=10,
+        phase2_cognitive_done=3,
+    )
+    save_daemon_state(graph_root, state)
+    monkeypatch.setattr("src.cli.ui_server.read_pid_file", lambda _root: 4242)
+    monkeypatch.setattr("src.cli.ui_server.is_plumber_process", lambda _pid: True)
+
+    with TestClient(app) as client:
+        response = client.get("/api/state", headers=auth_headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["progress_mode"] == "phase2_cluster"
+    assert payload["progress_done"] == 2
+    assert payload["progress_total"] == 4
+    assert payload["progress_percent"] == 50.0
+    assert "cluster-9" in payload["progress_title"]
+
+
 def test_get_graph_analytics_survives_scan_failure(
     graph_root: Path,
     monkeypatch: pytest.MonkeyPatch,

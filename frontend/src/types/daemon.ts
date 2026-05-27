@@ -68,7 +68,7 @@ export const DEFAULT_IMPACT_COUNTERS: DaemonImpactCounters = {
   hygiene_corrections: 0,
 }
 
-function readNumber(source: Record<string, unknown>, snakeKey: string, camelKey: string): number {
+export function readNumber(source: Record<string, unknown>, snakeKey: string, camelKey: string): number {
   const value = source[snakeKey] ?? source[camelKey]
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value
@@ -82,8 +82,17 @@ function readNumber(source: Record<string, unknown>, snakeKey: string, camelKey:
   return 0
 }
 
-function hasExplicitField(source: Record<string, unknown>, snakeKey: string, camelKey: string): boolean {
+export function hasExplicitField(
+  source: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string,
+): boolean {
   return snakeKey in source || camelKey in source
+}
+
+export function readString(source: Record<string, unknown>, snakeKey: string, camelKey: string): string {
+  const value = source[snakeKey] ?? source[camelKey]
+  return typeof value === 'string' ? value : ''
 }
 
 function readGraphAnalyticsStatus(source: Record<string, unknown>): GraphAnalytics['status'] {
@@ -219,10 +228,25 @@ export function normalizeDaemonState(raw: DaemonStateResponse): DaemonStateRespo
     ? normalizeGraphAnalytics(raw.graph_analytics)
     : undefined
 
+  const source = raw as unknown as Record<string, unknown>
+
   return {
     ...raw,
     files,
     ...impact,
+    phase2_cognitive_total: readNumber(source, 'phase2_cognitive_total', 'phase2CognitiveTotal'),
+    phase2_cognitive_done: readNumber(source, 'phase2_cognitive_done', 'phase2CognitiveDone'),
+    phase2_cluster_file_in_flight: Boolean(
+      source.phase2_cluster_file_in_flight ?? source.phase2ClusterFileInFlight ?? false,
+    ),
+    progress_mode: (source.progress_mode ?? source.progressMode) as
+      | DaemonStateResponse['progress_mode']
+      | undefined,
+    progress_title: readString(source, 'progress_title', 'progressTitle') || undefined,
+    progress_subtitle: readString(source, 'progress_subtitle', 'progressSubtitle') || undefined,
+    progress_done: readNumber(source, 'progress_done', 'progressDone'),
+    progress_total: readNumber(source, 'progress_total', 'progressTotal'),
+    progress_percent: readNumber(source, 'progress_percent', 'progressPercent'),
     bootstrap_recent: normalizeBootstrapRecent(
       (raw as unknown as Record<string, unknown>).bootstrap_recent
         ?? (raw as unknown as Record<string, unknown>).bootstrapRecent,
@@ -250,6 +274,15 @@ export interface DaemonStateResponse {
   current_cluster: string | null
   current_cluster_files_total: number
   current_cluster_files_done: number
+  phase2_cognitive_total?: number
+  phase2_cognitive_done?: number
+  phase2_cluster_file_in_flight?: boolean
+  progress_mode?: 'phase1_catalog' | 'phase2_cluster' | 'phase2_vault'
+  progress_title?: string
+  progress_subtitle?: string
+  progress_done?: number
+  progress_total?: number
+  progress_percent?: number
   phase2_llm_turns: number
   last_scan_at: string | null
   last_file: string | null

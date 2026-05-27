@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Phase 2 progress bar (Sovereign UI)** — vault-wide and per-cluster progress now share one resolver with the TUI and daemon checkpoints (`progress_*` on `GET /api/state`); persisted `phase2_cognitive_*` counters and in-flight cluster file subtitles so the bar no longer stays at 0% while the engine works.
+
 ## [1.7.0] - 2026-05-27
 
 ### Added

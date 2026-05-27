@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from ..agent.control_room_progress import resolve_control_room_progress
 from ..agent.l1_memory import default_matryca_l1_directory_for_graph
 from ..agent.maintenance_daemon import (
     DEFAULT_STOP_GRACE_SECONDS,
@@ -143,12 +144,22 @@ class DaemonStateResponse(BaseModel):
     hygiene_corrections: int = 0
     page_summaries_created: int = 0
     bootstrap_recent: dict[str, BootstrapRecentEntryResponse] = Field(default_factory=dict)
+    phase2_cognitive_total: int = 0
+    phase2_cognitive_done: int = 0
+    phase2_cluster_file_in_flight: bool = False
+    progress_mode: Literal["phase1_catalog", "phase2_cluster", "phase2_vault"] = "phase1_catalog"
+    progress_title: str = "Phase 1: Cataloging Graph"
+    progress_subtitle: str = "—"
+    progress_done: int = 0
+    progress_total: int = 0
+    progress_percent: float = 0.0
 
     @classmethod
     def from_daemon_state(cls, state: DaemonState) -> DaemonStateResponse:
         payload = state.to_json()
         if payload.get("last_file"):
             payload["last_file"] = sanitize_for_console(str(payload["last_file"]))
+        payload.update(resolve_control_room_progress(state).to_api_fields())
         return cls.model_validate(payload)
 
 
@@ -715,7 +726,13 @@ def get_state(_: None = Depends(_require_ui_token)) -> DaemonStateResponse:
     graph_root = _resolve_graph_root_or_raise()
     state = load_daemon_state(graph_root)
     response = DaemonStateResponse.from_daemon_state(state)
-    return response.model_copy(update={"status": _daemon_status_for_api(graph_root, state)})
+    progress = resolve_control_room_progress(state)
+    return response.model_copy(
+        update={
+            "status": _daemon_status_for_api(graph_root, state),
+            **progress.to_api_fields(),
+        }
+    )
 
 
 @app.get("/api/logs", response_model=list[str])

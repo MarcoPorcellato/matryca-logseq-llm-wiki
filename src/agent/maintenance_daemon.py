@@ -97,6 +97,7 @@ from .context_compressor import (
     condense_messages,
     extract_persisted_history,
 )
+from .control_room_progress import refresh_phase2_cognitive_totals
 from .llm_context_payload import prepare_llm_context_payload
 from .plumber_config import (
     DEFAULT_LLM_MODEL_NAME,
@@ -333,6 +334,9 @@ class DaemonState:
     current_cluster: str | None = None
     current_cluster_files_total: int = 0
     current_cluster_files_done: int = 0
+    phase2_cognitive_total: int = 0
+    phase2_cognitive_done: int = 0
+    phase2_cluster_file_in_flight: bool = False
     phase2_llm_turns: int = 0
     last_scan_at: str | None = None
     last_file: str | None = None
@@ -356,6 +360,9 @@ class DaemonState:
             "current_cluster": self.current_cluster,
             "current_cluster_files_total": self.current_cluster_files_total,
             "current_cluster_files_done": self.current_cluster_files_done,
+            "phase2_cognitive_total": self.phase2_cognitive_total,
+            "phase2_cognitive_done": self.phase2_cognitive_done,
+            "phase2_cluster_file_in_flight": self.phase2_cluster_file_in_flight,
             "phase2_llm_turns": self.phase2_llm_turns,
             "last_scan_at": self.last_scan_at,
             "last_file": self.last_file,
@@ -413,6 +420,11 @@ class DaemonState:
             ),
             current_cluster_files_total=int(payload.get("current_cluster_files_total", 0)),
             current_cluster_files_done=int(payload.get("current_cluster_files_done", 0)),
+            phase2_cognitive_total=int(payload.get("phase2_cognitive_total", 0)),
+            phase2_cognitive_done=int(payload.get("phase2_cognitive_done", 0)),
+            phase2_cluster_file_in_flight=bool(
+                payload.get("phase2_cluster_file_in_flight", False)
+            ),
             phase2_llm_turns=int(payload.get("phase2_llm_turns", 0)),
             last_scan_at=payload.get("last_scan_at"),
             last_file=payload.get("last_file"),
@@ -2294,6 +2306,10 @@ class MaintenanceDaemon:
         state.bootstrap_scanned = 0
         state.bootstrap_total = 0
         state.bootstrap_recent = {}
+        try:
+            refresh_phase2_cognitive_totals(self.graph_root, state)
+        except OSError as exc:
+            logger.warning("Phase 2 progress totals skipped after bootstrap: {}", exc)
         self._sync_live_telemetry(state)
         save_daemon_state(self.graph_root, state)
 
@@ -2693,6 +2709,8 @@ class MaintenanceDaemon:
         mtime = path.stat().st_mtime
         title = _page_title_from_path(self.graph_root, path)
         state.last_file = sanitize_for_console(key)
+        if cluster_id is not None:
+            state.phase2_cluster_file_in_flight = True
         self._sync_live_telemetry(
             state,
             cluster_id=cluster_id,
@@ -2816,6 +2834,8 @@ class MaintenanceDaemon:
                 )
         finally:
             self._end_phase2_write()
+            if cluster_id is not None:
+                state.phase2_cluster_file_in_flight = False
             if reset_history_after and isinstance(self.llm_client, InstructorLLMClient):
                 self.llm_client.reset_execution_history()
         llm_called_from_logger = (
@@ -2882,6 +2902,11 @@ class MaintenanceDaemon:
 
         state.status = "running"
         state.last_scan_at = datetime.now(tz=UTC).isoformat()
+        if self.bootstrap_complete:
+            try:
+                refresh_phase2_cognitive_totals(self.graph_root, state)
+            except OSError as exc:
+                logger.warning("Phase 2 progress totals skipped at cycle start: {}", exc)
         self._sync_live_telemetry(state, mark_running=True)
         save_daemon_state(self.graph_root, state)
         try:
@@ -2946,11 +2971,14 @@ class MaintenanceDaemon:
                 self._begin_cluster_context(cluster_id, cluster_paths)
                 state.current_cluster_files_total = len(cluster_paths)
                 state.current_cluster_files_done = 0
+                state.phase2_cluster_file_in_flight = False
                 self._sync_live_telemetry(state, cluster_id=cluster_id, mark_running=True)
                 self._save_cycle_checkpoint(state)
             else:
+                state.current_cluster = None
                 state.current_cluster_files_total = 0
                 state.current_cluster_files_done = 0
+                state.phase2_cluster_file_in_flight = False
             for path in cluster_paths:
                 if self._stop_requested:
                     state.status = "stopped"
@@ -2973,6 +3001,10 @@ class MaintenanceDaemon:
 
         self._prune_stale_catalog_entries()
         heal_daemon_state_ledger(self.graph_root, state)
+        state.phase2_cluster_file_in_flight = False
+        if self.bootstrap_complete:
+            with contextlib.suppress(OSError):
+                refresh_phase2_cognitive_totals(self.graph_root, state)
         self._sync_live_telemetry(state)
         if not self._stop_requested:
             state.status = "idle"

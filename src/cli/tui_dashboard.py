@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..agent.control_room_progress import resolve_control_room_progress
 from ..agent.maintenance_daemon import (
     DEFAULT_MODEL,
     PID_FILENAME,
@@ -179,17 +180,7 @@ def collect_snapshot(
     with contextlib.suppress(Exception):
         activity_lines = logger.tail_activity_summaries(5)
 
-    if state.bootstrap_complete and state.current_cluster_files_total > 0:
-        phase2_progress_total = state.current_cluster_files_total
-        phase2_done = min(state.current_cluster_files_done, phase2_progress_total)
-        phase2_percent = round(100.0 * phase2_done / phase2_progress_total, 1)
-    elif state.bootstrap_complete:
-        phase2_progress_total = max(processed_pages + pending_backlog, 1)
-        phase2_done = processed_pages
-        phase2_percent = round(100.0 * phase2_done / phase2_progress_total, 1)
-    else:
-        phase2_progress_total = max(state.phase2_llm_turns + pending_backlog, 1)
-        phase2_percent = round(100.0 * state.phase2_llm_turns / phase2_progress_total, 1)
+    control_room = resolve_control_room_progress(state)
 
     return DashboardSnapshot(
         status=status,
@@ -200,7 +191,7 @@ def collect_snapshot(
         skipped_pages=skipped,
         error_pages=errors,
         pending_backlog=pending_backlog,
-        percent_complete=phase2_percent if state.bootstrap_complete else percent_complete,
+        percent_complete=control_room.percent if state.bootstrap_complete else percent_complete,
         activity_lines=activity_lines,
         session_prompt_tokens=session_prompt_tokens,
         session_completion_tokens=session_completion_tokens,

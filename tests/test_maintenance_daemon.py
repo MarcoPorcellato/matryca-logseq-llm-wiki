@@ -1359,11 +1359,21 @@ def test_daemon_state_serializes_phase2_telemetry_fields(graph_root: Path) -> No
         session_prompt_tokens=120,
         session_completion_tokens=45,
         current_cluster="cluster-7",
+        current_cluster_files_total=5,
+        current_cluster_files_done=2,
+        phase2_cognitive_total=20,
+        phase2_cognitive_done=4,
+        phase2_cluster_file_in_flight=True,
         phase2_llm_turns=3,
     )
     save_daemon_state(graph_root, state)
     loaded = load_daemon_state(graph_root)
     assert loaded.current_cluster == "cluster-7"
+    assert loaded.current_cluster_files_total == 5
+    assert loaded.current_cluster_files_done == 2
+    assert loaded.phase2_cognitive_total == 20
+    assert loaded.phase2_cognitive_done == 4
+    assert loaded.phase2_cluster_file_in_flight is True
     assert loaded.phase2_llm_turns == 3
     assert loaded.session_prompt_tokens == 120
     assert loaded.session_completion_tokens == 45
@@ -1480,6 +1490,48 @@ def test_run_cycle_increments_phase2_turns_and_persists_tokens(
     assert loaded.phase2_llm_turns >= 1
     assert loaded.last_file is not None
     assert loaded.last_file.endswith("PhaseTwo.md")
+
+
+def test_run_cycle_persists_cluster_file_progress(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.agent.control_room_progress import resolve_control_room_progress
+
+    monkeypatch.setenv("MATRYCA_THERMAL_DELAY_COGNITIVE", "0")
+    monkeypatch.setenv("MATRYCA_LINT_SEMANTIC_ROUTING", "true")
+
+    run_bootstrap_harvest(graph_root, llm=StubLLM(), incremental=False, phase1_strict=True)
+    _write_page(graph_root, "ClusterA", "- cluster a\n")
+    _write_page(graph_root, "ClusterB", "- cluster b\n")
+
+    def _single_cluster(
+        _self: MaintenanceDaemon,
+        pending: list[Path],
+    ) -> list[tuple[str, list[Path]]]:
+        return [("cluster-test", list(pending))]
+
+    monkeypatch.setattr(
+        MaintenanceDaemon,
+        "_group_pending_by_cluster",
+        _single_cluster,
+    )
+
+    phase2_state = load_daemon_state(graph_root)
+    phase2_state.bootstrap_complete = True
+    save_daemon_state(graph_root, phase2_state)
+    daemon = MaintenanceDaemon(graph_root, llm_client=StubLLM(), max_files_per_cycle=2)
+    daemon.bootstrap_complete = True
+    daemon.run_cycle()
+
+    loaded = load_daemon_state(graph_root)
+    assert loaded.current_cluster == "cluster-test"
+    assert loaded.current_cluster_files_total >= 1
+    assert loaded.current_cluster_files_done >= 1
+    progress = resolve_control_room_progress(loaded)
+    assert progress.mode == "phase2_cluster"
+    assert progress.total == loaded.current_cluster_files_total
+    assert progress.percent > 0.0
 
 
 def test_structured_completion_logs_tokens_to_shared_logger(
