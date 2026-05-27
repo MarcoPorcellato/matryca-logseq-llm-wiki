@@ -19,7 +19,12 @@ typecheck: ## Run mypy for strict type checking
 test: ## Run the pytest suite
 	uv run pytest -q
 
-check: format lint typecheck test ## Run all formatting, linting, typechecking, and tests
+format-check: ## Verify formatting without modifying files
+	uv run ruff format --check .
+
+check: lint typecheck test ## Run linting, typechecking, and tests (no auto-format)
+
+ci: format-check lint typecheck test ## CI gate: format check + lint + types + tests
 
 clean: ## Remove python caches, virtual envs, and build artifacts
 	rm -rf .venv/

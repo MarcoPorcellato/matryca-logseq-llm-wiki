@@ -73,9 +73,10 @@ def test_iter_changelog_versions_skips_unreleased() -> None:
 def test_real_changelog_has_recent_releases() -> None:
     text = _CHANGELOG.read_text(encoding="utf-8")
     versions = iter_changelog_versions(text)
-    assert "1.6.1" in versions
-    section = extract_changelog_section(text, "v1.6.0")
-    assert "SSRF" in section or "1.6.0" in section
+    assert versions, "CHANGELOG should contain at least one release section"
+    latest = versions[0]
+    section = extract_changelog_section(text, f"v{latest}")
+    assert section.strip(), f"Latest release section v{latest} should not be empty"
 
 
 def test_cli_writes_stdout(tmp_path: Path) -> None:

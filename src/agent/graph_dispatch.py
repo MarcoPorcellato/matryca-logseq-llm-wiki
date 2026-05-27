@@ -58,6 +58,7 @@ from .graph_tool_helpers import (
     RefactorBlocksAction,
     RunLinterName,
     SearchGraphMethod,
+    bounded_int_from_options,
     format_regex_search_markdown,
     graph_missing_dict,
     graph_missing_text,
@@ -236,9 +237,9 @@ def _headless_write_outline(
     outline: dict[str, Any],
 ) -> dict[str, Any]:
     """Depth-first headless outline write using the parser's atomic splice engine."""
-    from .mcp_server import OutlineNode, _validate_outline_for_write, outline_block_count
+    from .outline_models import OutlineNode, outline_block_count, validate_outline_for_write
 
-    root = _validate_outline_for_write(outline)
+    root = validate_outline_for_write(outline)
     git_snap: dict[str, object] = {
         "enabled": False,
         "skipped": True,
@@ -379,10 +380,28 @@ async def dispatch_read(
             )
         depth = wiki_config.max_depth
         if hop_opts.get("max_depth") is not None:
-            depth = max(1, min(int(hop_opts["max_depth"]), 10))
+            depth_raw = bounded_int_from_options(
+                hop_opts,
+                "max_depth",
+                default=depth,
+                minimum=1,
+                maximum=10,
+            )
+            if isinstance(depth_raw, str):
+                return depth_raw
+            depth = depth_raw
         per = wiki_config.structural_hop_max_per_level
         if hop_opts.get("max_per_level") is not None:
-            per = max(1, min(int(hop_opts["max_per_level"]), 500))
+            per_raw = bounded_int_from_options(
+                hop_opts,
+                "max_per_level",
+                default=per,
+                minimum=1,
+                maximum=500,
+            )
+            if isinstance(per_raw, str):
+                return per_raw
+            per = per_raw
 
         def _hops() -> str:
             return format_hop_report_markdown(
@@ -426,7 +445,16 @@ async def dispatch_search(
         keyword = str(bm_opts.get("keyword", query)).strip()
         if not keyword:
             return "For `method=bm25`, set `query` to search keywords or JSON with `keyword`."
-        limit = max(1, min(int(bm_opts.get("limit", 15)), 100))
+        limit_raw = bounded_int_from_options(
+            bm_opts,
+            "limit",
+            default=15,
+            minimum=1,
+            maximum=100,
+        )
+        if isinstance(limit_raw, str):
+            return limit_raw
+        limit = limit_raw
         return await asyncio.to_thread(
             format_keyword_query_markdown,
             graph_path,
@@ -440,7 +468,16 @@ async def dispatch_search(
         pattern = str(rx_opts.get("pattern", query)).strip()
         if not pattern:
             return "For `method=regex`, set `query` to a regex pattern or JSON with `pattern`."
-        rx_limit = max(1, min(int(rx_opts.get("limit", 50)), 200))
+        rx_limit_raw = bounded_int_from_options(
+            rx_opts,
+            "limit",
+            default=50,
+            minimum=1,
+            maximum=200,
+        )
+        if isinstance(rx_limit_raw, str):
+            return rx_limit_raw
+        rx_limit = rx_limit_raw
         return await asyncio.to_thread(
             format_regex_search_markdown,
             graph_path,
@@ -450,8 +487,26 @@ async def dispatch_search(
 
     if method == "unlinked_mentions":
         um_opts = parse_optional_json_query(query)
-        max_hits = max(1, min(int(um_opts.get("max_hits_per_file", 80)), 500))
-        max_titles = max(1, min(int(um_opts.get("max_titles", 500)), 2000))
+        max_hits_raw = bounded_int_from_options(
+            um_opts,
+            "max_hits_per_file",
+            default=80,
+            minimum=1,
+            maximum=500,
+        )
+        if isinstance(max_hits_raw, str):
+            return max_hits_raw
+        max_hits = max_hits_raw
+        max_titles_raw = bounded_int_from_options(
+            um_opts,
+            "max_titles",
+            default=500,
+            minimum=1,
+            maximum=2000,
+        )
+        if isinstance(max_titles_raw, str):
+            return max_titles_raw
+        max_titles = max_titles_raw
 
         def _unlinked() -> dict[str, Any]:
             return scan_unlinked_mentions(
@@ -477,8 +532,17 @@ async def dispatch_search(
         return await asyncio.to_thread(_resolve_entity)
 
     j_opts = parse_optional_json_query(query)
-    days_raw = j_opts.get("days", query.strip() or 7)
-    days = max(1, min(int(days_raw), 90))
+    days_default_raw = j_opts.get("days", query.strip() or 7)
+    days_raw = bounded_int_from_options(
+        {"days": days_default_raw},
+        "days",
+        default=7,
+        minimum=1,
+        maximum=90,
+    )
+    if isinstance(days_raw, str):
+        return days_raw
+    days = days_raw
 
     def _journal() -> dict[str, Any]:
         report = scan_journal_tasks(graph_path, days=days)

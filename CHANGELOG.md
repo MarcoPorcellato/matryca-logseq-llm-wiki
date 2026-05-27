@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Concurrency preflight** — `probe_concurrency_capability()` and a Sovereign UI checklist row for cross-process `flock` vs in-process-only mode; daemon logs the active contract at startup.
+- **`outline_models.py`** — shared `OutlineNode` validation for MCP and `graph_dispatch` (breaks circular import).
+- **Tests** — `json_flock`, semantic cache router, page lock probe, bounded JSON ints, LAN UI token policy, in-root symlink sandbox cases.
+
+### Changed
+
+- **Lock-before-LLM** — daemon probes `page_rmw_lock` before paid inference; `lock_backoff` ledger status with exponential retry instead of infinite re-inference.
+- **Page lock registry** — refuses growth past 4096 entries (`PageLockUnavailableError`).
+- **Semantic cache** — disk read/write wrapped in `cross_process_json_flock`.
+- **Path sandbox** — symlinks allowed when resolved target stays under the graph root; `read_graph_file_text` defaults to strict UTF-8.
+- **Graph markdown I/O** — `markdown_blocks` reads/writes use strict UTF-8 for vault content.
+- **Sovereign UI API** — blocking routes offloaded with `asyncio.to_thread`; daemon start/stop no longer block the event loop; `MATRYCA_UI_ALLOW_LAN` requires an explicit `MATRYCA_UI_TOKEN`.
+- **CI** — single `ci.yml` workflow with `make ci` (`ruff format --check` without mutating the tree); Ruff `ASYNC`/`S`/`PERF`/`RUF`; pytest coverage gate (70% on `src`).
+
 ### Fixed
 
+- **`graph_dispatch`** — safe integer parsing for JSON tool options (no bare `ValueError` escapes).
 - **Phase 2 progress bar (Sovereign UI)** — vault-wide and per-cluster progress now share one resolver with the TUI and daemon checkpoints (`progress_*` on `GET /api/state`); persisted `phase2_cognitive_*` counters and in-flight cluster file subtitles so the bar no longer stays at 0% while the engine works.
 
 ## [1.7.0] - 2026-05-27

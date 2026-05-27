@@ -76,6 +76,25 @@ def parse_optional_json_query(query: str) -> dict[str, Any]:
     return {}
 
 
+def bounded_int_from_options(
+    opts: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int | str:
+    """Return a clamped integer or a human-readable validation error string."""
+    if key not in opts or opts[key] is None:
+        return max(minimum, min(default, maximum))
+    raw = opts[key]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return f"Invalid integer for `{key}`: {raw!r}"
+    return max(minimum, min(value, maximum))
+
+
 def _persistable_block_uuid(node: object) -> str:
     """Prefer on-disk ``id::`` (``source_uuid``) over parser session ``uuid``."""
     source_uuid = getattr(node, "source_uuid", None)

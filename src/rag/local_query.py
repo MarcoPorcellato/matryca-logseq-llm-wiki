@@ -9,7 +9,7 @@ _TOKEN = re.compile(r"[0-9a-z]+", re.IGNORECASE)
 
 
 def _iter_page_files(graph_root: Path) -> list[Path]:
-    from src.graph.alias_index import iter_scannable_pages_markdown
+    from ..graph.alias_index import iter_scannable_pages_markdown
 
     return iter_scannable_pages_markdown(graph_root)
 

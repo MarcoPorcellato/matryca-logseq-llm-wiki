@@ -24,13 +24,13 @@ def resolved_graph_root(graph_root: str | Path) -> Path:
 def assert_path_within_graph(path: Path | str, graph_root: str | Path) -> Path:
     """Resolve ``path`` (following symlinks) and ensure it lies under ``graph_root``.
 
+    Symlinks are allowed when their resolved target remains inside the graph root.
+
     Raises:
         PathTraversalSecurityError: When the resolved path escapes the graph root.
     """
     root = resolved_graph_root(graph_root)
     raw = Path(path).expanduser()
-    if raw.is_symlink():
-        raise PathTraversalSecurityError(SECURITY_VIOLATION_MSG)
     resolved = raw.resolve(strict=False)
     if not resolved.is_relative_to(root):
         raise PathTraversalSecurityError(SECURITY_VIOLATION_MSG)
@@ -51,10 +51,11 @@ def read_graph_file_text(
     graph_root: str | Path,
     *,
     encoding: str = "utf-8",
+    errors: str = "strict",
 ) -> str:
     """Read UTF-8 text only after the resolved path passes the graph sandbox."""
     safe = assert_path_within_graph(path, graph_root)
-    return safe.read_text(encoding=encoding, errors="replace")
+    return safe.read_text(encoding=encoding, errors=errors)
 
 
 def graph_relative_path_key(path: Path | str, graph_root: str | Path) -> str:

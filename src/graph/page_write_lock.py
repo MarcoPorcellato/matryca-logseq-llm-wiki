@@ -63,7 +63,10 @@ def _lock_for_key(key: str) -> threading.Lock:
                     evicted = True
                     break
             if not evicted:
-                break
+                raise PageLockUnavailableError(
+                    f"In-process page lock registry full ({_MAX_PAGE_LOCK_REGISTRY}); "
+                    f"cannot register lock for {key}",
+                )
         lock = threading.Lock()
         _page_locks[key] = lock
         return lock
@@ -130,6 +133,45 @@ def _cross_process_file_lock(page_path: str | Path) -> Iterator[None]:
         os.close(fd)
 
 
+def probe_page_rmw_lock(page_path: str | Path) -> None:
+    """Verify the page lock can be acquired without holding it through long work.
+
+    Raises:
+        PageLockUnavailableError: When thread or cross-process locks are contended.
+    """
+    key = normalize_page_lock_key(page_path)
+    thread_lock = _lock_for_key(key)
+    if not thread_lock.acquire(blocking=False):
+        raise PageLockUnavailableError(
+            f"Could not probe in-process page lock for {page_path}",
+        )
+    try:
+        if _fcntl is None:
+            return
+        lock_path = _sidecar_lock_path(page_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            try:
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise PageLockUnavailableError(
+                    f"Could not probe cross-process page lock for {lock_path}",
+                ) from exc
+            except OSError as exc:
+                if not _flock_degradation_allowed():
+                    raise PageLockUnavailableError(
+                        f"Cross-process page lock unavailable for {lock_path}: {exc}",
+                    ) from exc
+                return
+            with suppress(OSError):
+                _fcntl.flock(fd, _fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    finally:
+        thread_lock.release()
+
+
 @contextmanager
 def page_rmw_lock(page_path: str | Path) -> Iterator[None]:
     """Hold an exclusive lock for one file's full RMW lifecycle (thread- and process-safe)."""
@@ -189,5 +231,6 @@ __all__ = [
     "normalize_page_lock_key",
     "PageLockUnavailableError",
     "page_rmw_lock",
+    "probe_page_rmw_lock",
     "sweep_matryca_lock_sidecars",
 ]

@@ -112,7 +112,7 @@ def read_page_lines(
         return None, None, "path_escapes_graph"
     if not path.is_file():
         return None, None, "page_not_found"
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = path.read_text(encoding="utf-8")
     return path, text.splitlines(keepends=True), None
 
 
@@ -267,7 +267,7 @@ def atomic_write_bytes(
     """
     is_markdown = Path(file_path).suffix.lower() == ".md"
     if validate_block_refs and is_markdown and b"((" in data:
-        text = data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8")
         assert_valid_block_refs_in_markdown(text)
 
     path = assert_path_within_graph(file_path, graph_root)
@@ -352,7 +352,7 @@ def atomic_write_file(
     else:
         atomic_write_bytes(
             file_path,
-            contents.encode(encoding, errors="replace"),
+            contents.encode(encoding),
             graph_root=graph_root,
             validate_block_refs=validate_block_refs,
         )

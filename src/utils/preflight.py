@@ -21,6 +21,7 @@ from ..agent.plumber_config import (
     resolve_llm_base_url,
 )
 from ..config import load_matryca_wiki_config
+from ..graph.concurrency_probe import probe_concurrency_capability
 from ..graph.graph_path_validate import validate_logseq_graph_path_for_config
 from .llm_url_policy import UnsafeLlmProxyUrlError, validate_llm_proxy_url
 from .runtime_bootstrap import ensure_repo_dotenv_from_example, prepare_matryca_runtime
@@ -269,6 +270,34 @@ def _check_llm_endpoint() -> PreflightCheck:
     )
 
 
+def _check_concurrency() -> PreflightCheck:
+    capability = probe_concurrency_capability()
+    if capability.mode == "full":
+        return PreflightCheck(
+            id="concurrency",
+            title="Cross-process file locks",
+            status="pass",
+            message=capability.message,
+        )
+    if capability.degradation_allowed:
+        return PreflightCheck(
+            id="concurrency",
+            title="Cross-process file locks",
+            status="warn",
+            message=capability.message,
+            detail=(
+                "Set MATRYCA_ALLOW_FLOCK_DEGRADATION only when you accept single-writer semantics."
+            ),
+        )
+    return PreflightCheck(
+        id="concurrency",
+        title="Cross-process file locks",
+        status="warn",
+        message=capability.message,
+        detail="Enable MATRYCA_ALLOW_FLOCK_DEGRADATION or run only one writer process.",
+    )
+
+
 def run_preflight_checks(*, repo_root: Path | None = None) -> PreflightReport:
     """Run all pre-flight checks after ensuring ``.env`` exists and is loaded."""
     root = repo_root or Path(__file__).resolve().parents[2]
@@ -281,6 +310,7 @@ def run_preflight_checks(*, repo_root: Path | None = None) -> PreflightReport:
     graph_check, graph_root = _check_logseq_graph()
     checks.append(graph_check)
     checks.append(_check_l1_memory(graph_root))
+    checks.append(_check_concurrency())
     checks.append(_check_llm_endpoint())
 
     ready = all(check.status == "pass" for check in checks)

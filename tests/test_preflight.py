@@ -62,12 +62,12 @@ def test_run_preflight_all_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert report.env_created_from_example is True
     assert (tmp_path / ".env").is_file()
     assert report.ready is True
-    assert {check.id: check.status for check in report.checks} == {
-        "environment": "pass",
-        "logseq_graph": "pass",
-        "l1_memory": "pass",
-        "llm_endpoint": "pass",
-    }
+    statuses = {check.id: check.status for check in report.checks}
+    assert statuses["environment"] == "pass"
+    assert statuses["logseq_graph"] == "pass"
+    assert statuses["l1_memory"] == "pass"
+    assert statuses["concurrency"] in {"pass", "warn"}
+    assert statuses["llm_endpoint"] == "pass"
     l1_check = next(check for check in report.checks if check.id == "l1_memory")
     assert l1_check.detail is not None
     assert Path(l1_check.detail) == tmp_path / "matryca-l1"
@@ -116,7 +116,7 @@ def test_get_preflight_endpoint(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ready"] is True
-    assert len(payload["checks"]) == 4
+    assert len(payload["checks"]) == 5
 
 
 def test_run_preflight_l1_passes_when_matryca_l1_path_is_template(

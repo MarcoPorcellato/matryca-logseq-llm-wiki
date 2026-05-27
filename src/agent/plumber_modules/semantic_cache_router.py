@@ -14,6 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ...graph.json_flock import cross_process_json_flock
+
 _CACHE_DIRNAME = ".matryca_semantic_cache"
 _DEFAULT_TTL_SECONDS = 86_400
 _lock = threading.Lock()
@@ -72,7 +74,8 @@ def cache_get(graph_root: Path, namespace: str, cache_key: str) -> dict[str, Any
     if not path.is_file():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        with cross_process_json_flock(path):
+            raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
@@ -80,7 +83,8 @@ def cache_get(graph_root: Path, namespace: str, cache_key: str) -> dict[str, Any
     created = float(raw.get("created_at", 0.0))
     node_ttl = int(raw.get("ttl_seconds", ttl))
     if now - created > node_ttl:
-        path.unlink(missing_ok=True)
+        with cross_process_json_flock(path):
+            path.unlink(missing_ok=True)
         return None
     raw_payload = raw.get("payload")
     if not isinstance(raw_payload, dict):
@@ -114,8 +118,9 @@ def cache_put(
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{digest}.json"
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    with cross_process_json_flock(path):
+        tmp.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
     with _lock:
         _memory[digest] = (now + ttl, payload)
     return CacheNode(

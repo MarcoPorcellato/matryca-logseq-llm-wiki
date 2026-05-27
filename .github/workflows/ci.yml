@@ -47,5 +47,5 @@ jobs:
           npm ci
           npm run build
 
-      - name: Run make check (Ruff, Mypy, Pytest)
-        run: make check
+      - name: Run CI gate (format check, Ruff, Mypy, Pytest)
+        run: make ci

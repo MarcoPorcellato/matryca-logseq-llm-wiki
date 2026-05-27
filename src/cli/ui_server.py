@@ -62,7 +62,7 @@ from ..utils.provision_l1 import provision_matryca_l1_sibling
 from ..utils.runtime_bootstrap import prepare_matryca_runtime, try_prepare_matryca_runtime_from_env
 from ..utils.token_logger import TokenLogger, resolve_plumber_log_path
 from ..utils.updater import UpdateCheckResult, check_for_updates, update_check_to_dict
-from .ui_auth import resolve_ui_token, verify_ui_token
+from .ui_auth import require_explicit_ui_token_for_lan, resolve_ui_token, verify_ui_token
 
 FileStatus = Literal["processed", "skipped", "error", "pending"]
 DaemonStatusValue = Literal["running", "idle", "stopped", "error"]
@@ -419,6 +419,9 @@ def _ui_rate_limit_unauthenticated_per_minute() -> int:
         return 30
 
 
+_MAX_RATE_LIMIT_TRACKED_IPS = 512
+
+
 class _UiRateLimitMiddleware(BaseHTTPMiddleware):
     """Per-client IP cap; authenticated callers get a higher budget than anonymous."""
 
@@ -435,6 +438,11 @@ class _UiRateLimitMiddleware(BaseHTTPMiddleware):
         self._guard = threading.Lock()
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
+    def _evict_rate_limit_keys_if_needed(self) -> None:
+        while len(self._hits) > _MAX_RATE_LIMIT_TRACKED_IPS:
+            oldest_key = next(iter(self._hits))
+            del self._hits[oldest_key]
+
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         path = request.url.path
         if not path.startswith("/api/") or path in {
@@ -450,6 +458,7 @@ class _UiRateLimitMiddleware(BaseHTTPMiddleware):
         key = client.host if client is not None else "unknown"
         now = time.monotonic()
         with self._guard:
+            self._evict_rate_limit_keys_if_needed()
             bucket = self._hits[key]
             while bucket and now - bucket[0] > 60.0:
                 bucket.popleft()
@@ -650,9 +659,9 @@ def get_health() -> dict[str, str]:
 
 
 @app.get("/api/preflight", response_model=PreflightResponse)
-def get_preflight(_: None = Depends(_require_ui_token)) -> PreflightResponse:
+async def get_preflight(_: None = Depends(_require_ui_token)) -> PreflightResponse:
     """Validate graph, L1, and local LLM readiness before starting the daemon."""
-    report = run_preflight_checks(repo_root=_REPO_ROOT)
+    report = await asyncio.to_thread(run_preflight_checks, repo_root=_REPO_ROOT)
     return PreflightResponse.model_validate(report.to_dict())
 
 
@@ -720,10 +729,7 @@ async def get_graph_analytics(_: None = Depends(_require_ui_token)) -> GraphAnal
     return await asyncio.to_thread(_graph_analytics_for_graph, graph_root)
 
 
-@app.get("/api/state", response_model=DaemonStateResponse)
-def get_state(_: None = Depends(_require_ui_token)) -> DaemonStateResponse:
-    """Return the current daemon checkpoint from ``.matryca_daemon_state.json`` (no graph scan)."""
-    graph_root = _resolve_graph_root_or_raise()
+def _build_daemon_state_response(graph_root: Path) -> DaemonStateResponse:
     state = load_daemon_state(graph_root)
     response = DaemonStateResponse.from_daemon_state(state)
     progress = resolve_control_room_progress(state)
@@ -735,16 +741,31 @@ def get_state(_: None = Depends(_require_ui_token)) -> DaemonStateResponse:
     )
 
 
+@app.get("/api/state", response_model=DaemonStateResponse)
+async def get_state(_: None = Depends(_require_ui_token)) -> DaemonStateResponse:
+    """Return the current daemon checkpoint from ``.matryca_daemon_state.json`` (no graph scan)."""
+    graph_root = _resolve_graph_root_or_raise()
+    return await asyncio.to_thread(_build_daemon_state_response, graph_root)
+
+
 @app.get("/api/logs", response_model=list[str])
-def get_logs(_: None = Depends(_require_ui_token)) -> list[str]:
+async def get_logs(_: None = Depends(_require_ui_token)) -> list[str]:
     """Return the latest 50 non-empty operational log lines (prompt/response redacted)."""
+    return await asyncio.to_thread(_tail_redacted_log_lines, 50)
+
+
+def _tail_redacted_log_lines(limit: int) -> list[str]:
     token_logger = TokenLogger(log_path=resolve_plumber_log_path())
-    return [_redact_log_line(line) for line in token_logger.tail_lines(50)]
+    return [_redact_log_line(line) for line in token_logger.tail_lines(limit)]
 
 
 @app.get("/api/config", response_model=PlumberConfigResponse)
-def get_config(_: None = Depends(_require_ui_token)) -> PlumberConfigResponse:
+async def get_config(_: None = Depends(_require_ui_token)) -> PlumberConfigResponse:
     """Return Plumber settings as persisted in the repo ``.env`` file (no global env mutation)."""
+    return await asyncio.to_thread(_load_config_response)
+
+
+def _load_config_response() -> PlumberConfigResponse:
     env_path = _resolve_dotenv_path()
     if env_path.is_file():
         file_vars = dotenv_values(env_path, interpolate=True)
@@ -768,7 +789,7 @@ async def get_update_check(
 
 
 @app.get("/api/lm-models", response_model=LmModelsResponse)
-def get_lm_models(
+async def get_lm_models(
     _: None = Depends(_require_ui_token),
     base_url: str | None = None,
 ) -> LmModelsResponse:
@@ -777,7 +798,7 @@ def get_lm_models(
     if resolved is None:
         resolved = load_plumber_lint_config().lm_base_url
     safe_base_url = _validate_lm_models_base_url(resolved)
-    return _fetch_lm_studio_models(safe_base_url)
+    return await asyncio.to_thread(_fetch_lm_studio_models, safe_base_url)
 
 
 @app.post("/api/config/graph-path", response_model=PlumberConfigResponse)
@@ -891,10 +912,7 @@ def _verify_daemon_launch(
     return False, "Daemon did not publish a live PID after launch"
 
 
-@app.post("/api/daemon/start", response_model=DaemonControlResponse)
-def start_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
-    """Launch the maintenance daemon without blocking the FastAPI event loop."""
-    graph_root = _resolve_graph_root_or_raise()
+def _start_daemon_blocking(graph_root: Path) -> DaemonControlResponse:
     prepare_matryca_runtime(graph_root=graph_root, wiki_config=load_matryca_wiki_config())
     existing = read_pid_file(graph_root)
     if existing is not None and is_plumber_process(existing):
@@ -904,7 +922,6 @@ def start_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControl
             message=f"Matryca Plumber daemon already running (pid {existing})",
             pid=existing,
         )
-
     proc = _spawn_plumber_daemon_cli(graph_root)
     ok, failure_message = _verify_daemon_launch(graph_root, proc)
     if not ok:
@@ -922,26 +939,22 @@ def start_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControl
     )
 
 
+@app.post("/api/daemon/start", response_model=DaemonControlResponse)
+async def start_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
+    """Launch the maintenance daemon without blocking the FastAPI event loop."""
+    graph_root = _resolve_graph_root_or_raise()
+    return await asyncio.to_thread(_start_daemon_blocking, graph_root)
+
+
 @app.post("/api/daemon/stop", response_model=DaemonControlResponse)
-def stop_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
+async def stop_daemon_endpoint(_: None = Depends(_require_ui_token)) -> DaemonControlResponse:
     """Signal the maintenance daemon to shut down gracefully."""
     graph_root = _resolve_graph_root_or_raise()
-    result: dict[str, Any] = {}
-
-    def _shutdown() -> None:
-        result.update(
-            stop_daemon(graph_root, grace_seconds=DEFAULT_STOP_GRACE_SECONDS + 5.0),
-        )
-
-    thread = threading.Thread(target=_shutdown, daemon=True, name="plumber-daemon-stop")
-    thread.start()
-    thread.join(timeout=DEFAULT_STOP_GRACE_SECONDS + 10.0)
-    if not result:
-        return DaemonControlResponse(
-            ok=False,
-            code="timeout",
-            message="Stop request timed out",
-        )
+    result = await asyncio.to_thread(
+        stop_daemon,
+        graph_root,
+        grace_seconds=DEFAULT_STOP_GRACE_SECONDS + 5.0,
+    )
     return _daemon_control_response(result)
 
 
@@ -1038,13 +1051,13 @@ def run_ui_server(*, host: str = "127.0.0.1", port: int = DEFAULT_UI_PORT) -> No
             "Refusing to bind UI server to 0.0.0.0 without MATRYCA_UI_ALLOW_LAN=1 "
             "(LAN clients could reach authenticated API routes if they obtain a token)."
         )
+    reload_plumber_dotenv()
+    require_explicit_ui_token_for_lan()
     if host == "0.0.0.0":
         logger.warning(
             "WARNING: Binding to 0.0.0.0 exposes authenticated API routes on the LAN. "
-            "/api/auth/session remains loopback-only; set a strong MATRYCA_UI_TOKEN."
+            "/api/auth/session remains loopback-only; MATRYCA_UI_TOKEN is required."
         )
-
-    reload_plumber_dotenv()
     _ensure_frontend_built()
     _mount_frontend_assets()
 

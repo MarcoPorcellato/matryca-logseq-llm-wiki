@@ -31,4 +31,22 @@ def reset_ui_token_for_tests() -> None:
     _resolved_token = None
 
 
-__all__ = ["reset_ui_token_for_tests", "resolve_ui_token", "verify_ui_token"]
+def require_explicit_ui_token_for_lan() -> None:
+    """Refuse LAN exposure unless the operator set a non-empty ``MATRYCA_UI_TOKEN``."""
+    allow_lan = os.environ.get("MATRYCA_UI_ALLOW_LAN", "").strip().lower()
+    if allow_lan not in {"1", "true", "yes", "on"}:
+        return
+    if os.environ.get("MATRYCA_UI_TOKEN", "").strip():
+        return
+    msg = (
+        "MATRYCA_UI_TOKEN must be set to a strong random value when MATRYCA_UI_ALLOW_LAN is enabled"
+    )
+    raise ValueError(msg)
+
+
+__all__ = [
+    "require_explicit_ui_token_for_lan",
+    "reset_ui_token_for_tests",
+    "resolve_ui_token",
+    "verify_ui_token",
+]

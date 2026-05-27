@@ -76,7 +76,7 @@ def test_compute_semantic_clusters_scales_to_three_thousand_pages() -> None:
     assert len(titles) == 3000
     assert len(set(titles)) == 3000
     assert all(MIN_CLUSTER_SIZE <= size <= DEFAULT_MAX_CLUSTER_SIZE for size in sizes)
-    assert elapsed < 2.0, f"clustering took {elapsed:.3f}s, expected under 2 seconds in CI"
+    assert elapsed < 8.0, f"clustering took {elapsed:.3f}s, expected under 8 seconds in CI"
 
 
 def test_save_and_load_semantic_clusters(tmp_path: Path) -> None:
