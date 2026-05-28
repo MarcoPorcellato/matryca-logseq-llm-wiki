@@ -22,7 +22,7 @@ This is non-negotiable for both MCP agents and the Plumber daemon. Patience beat
 **Authorship protocol:** Pages created by Matryca Plumber (seed pages, auto-split children, backlink contexts) are automatically stamped at the top of the file:
 
 ```text
-made-by:: matryca plumber v1.5.1
+made-by:: matryca plumber v1.8.0
 ```
 
 The version resolves from installed package metadata (`get_plumber_version()` in `page_properties.py`). Do **not** remove or duplicate this line — it is the on-disk provenance anchor for telemetry and audit. When you create pages via MCP, prefer letting Plumber modules stamp authorship; for manual new pages you may omit `made-by::` unless you intentionally mark agent output.
@@ -51,7 +51,7 @@ All graph work routes through these polymorphic tools. Each tool selects behavio
 
 - **Atomic unit:** the bullet (`- `), not the page paragraph.
 - **Hierarchy:** indentation = parent/child semantics.
-- **Page properties (frontmatter):** `key:: value` lines at the **absolute top of the file (line 0 region)** — **without** a leading bullet dash. Blank line before the first outliner bullet. Examples: `tags::`, `alias::`, `made-by:: matryca plumber v1.5.1`.
+- **Page properties (frontmatter):** `key:: value` lines at the **absolute top of the file (line 0 region)** — **without** a leading bullet dash. Blank line before the first outliner bullet. Examples: `tags::`, `alias::`, `made-by:: matryca plumber v1.8.0`.
 - **Block properties:** `key:: value` **immediately after the parent bullet text**, indented **exactly +2 spaces** relative to the bullet, **before** continuation lines or child bullets. Examples: `id::`, `source::`, `matryca-plumber:: true`.
 - **Multiline blocks (Shift+Enter):** continuation body lines inside one logical bullet must be padded to **`bullet_indent + 2 spaces`**. Only the first line has `- `. Never insert child bullets or orphan properties between continuation lines — this breaks Datalog indexing.
 - **Targetability:** durable anchors need `id:: <uuid>` on disk.

@@ -44,8 +44,9 @@ class StubHarvestLLM:
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        task_instruction: str | None = None,
     ) -> BootstrapSummaryResult:
-        _ = (page_path, graph_root, content)
+        _ = (page_path, graph_root, content, task_instruction)
         return BootstrapSummaryResult(
             summary=f"Harvested summary for {page_title}",
             suggested_tags=["harvest", "test"],
@@ -200,7 +201,8 @@ def test_bootstrap_harvest_thermal_delay_only_after_llm(
 
     _write_page(graph_root, "Indexed", _indexed_body(summary="Already indexed."))
     run_bootstrap_harvest(graph_root, llm=StubHarvestLLM(), incremental=False, phase1_strict=True)
-    assert sleeps == []
+    thermal_sleeps = [s for s in sleeps if s >= 1.0]
+    assert thermal_sleeps == []
 
     _write_page(graph_root, "Needs Index", "- type:: risorsa\n- Body content\n")
     sleeps.clear()
@@ -210,9 +212,10 @@ def test_bootstrap_harvest_thermal_delay_only_after_llm(
         incremental=True,
         phase1_strict=True,
     )
+    thermal_sleeps = [s for s in sleeps if s >= 1.0]
     assert metrics.llm_harvested >= 1
-    assert metrics.llm_harvested == len(sleeps)
-    assert all(delay == 2.0 for delay in sleeps)
+    assert metrics.llm_harvested == len(thermal_sleeps)
+    assert all(delay == 2.0 for delay in thermal_sleeps)
 
 
 def test_bootstrap_harvest_stops_when_requested(

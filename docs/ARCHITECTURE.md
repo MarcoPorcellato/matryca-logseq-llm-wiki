@@ -1,6 +1,6 @@
 # Matryca Plumber — System Architecture
 
-**Version:** 1.5.17 (Ironclad)  
+**Version:** 1.8.0 (Ironclad + edge-performance layer)  
 **Package:** `matryca-plumber` on PyPI  
 **Audience:** maintainers, contributors, and operators integrating Logseq OG with local LLMs
 
@@ -22,7 +22,9 @@ Matryca Plumber evolved from an MCP-first bridge into a **three-surface runtime*
 
 **FastMCP is auxiliary.** The product’s center of gravity is `matryca plumber start` plus the Sovereign UI. MCP attaches the identical read/write path when an external host spawns `matryca-plumber` without CLI-shaped arguments.
 
-**Quality bar (v1.5.17):** **453** pytest targets passing, **Mypy strict** on `src` and `tests`, Ruff lint/format clean via `make check`.
+**Quality bar:** **550+** pytest targets passing (70% coverage gate on `src`), **Mypy strict** on `src` and `tests`, Ruff lint/format clean via `make check`; slow perf tests via `make perf` (`pytest -m slow`).
+
+**v1.8 focus:** Run indefinitely on a **16 GB CPU-only laptop** with **≤10k pages** — KV-cache-aligned prompts, bounded RAM, cooperative bootstrap I/O. No new semantic features. See [Edge computing & performance (v1.8)](#edge-computing--performance-v18).
 
 ---
 
@@ -248,7 +250,7 @@ Every Matryca Plumber surface (daemon, MCP lifespan, CLI, Sovereign UI) calls **
 |------------------------|----------|------------|
 | Ops + app log parent dirs | `MATRYCA_*_LOG_PATH` or repo `logs/` | First JSONL / Loguru write must not fail on missing folders |
 | L1 memory | Default: `<parent-of-vault>/matryca-l1/` | Session rules outside L2 wiki index; shareable across vaults ([`docs/openspec/l1-l2-routing.md`](openspec/l1-l2-routing.md)) |
-| Semantic cache dir | `<vault>/.matryca_semantic_cache/` | Catalog / cluster JSON; excluded from `pages/` scans |
+| Semantic cache dir | `<vault>/.matryca_semantic_cache/` | `master_catalog.json`, `backlink_counts.json`, `semantic_clusters.json`, per-inference `*.json`; excluded from `pages/` scans |
 | Templates dir | `<vault>/templates/` (or YAML `templates_subdir`) | `read_logseq_template` |
 | Wiki orchestration | `<vault>/matryca-wiki.yml` | Seeded from `matryca-wiki.example.yml` when missing |
 
@@ -323,6 +325,74 @@ No telemetry database — the vault **is** the audit trail.
 
 ---
 
+## Edge computing & performance (v1.8)
+
+**Goal:** The maintenance daemon must remain **responsive to the host OS** while harvesting and linting vaults up to **~10,000** pages on **16 GB RAM** without a discrete GPU.
+
+**Non-goal:** New cognitive capabilities, clustering algorithms, or Logseq semantic changes.
+
+### Prompt stack (Zero-Prefill)
+
+```mermaid
+sequenceDiagram
+  participant D as MaintenanceDaemon
+  participant S as PagePromptSession
+  participant L as Local_LLM
+  D->>S: build once per page cycle
+  Note over S: stable_page_block + capped AliasIndex footer
+  D->>L: system = build_semantic_lint_system_prompt
+  D->>L: user = stable block + task_index
+  D->>L: user = same stable block + task_marpa
+  Note over L: llama.cpp reuses KV prefix on stable block
+```
+
+| Layer | Module | Contract |
+|-------|--------|----------|
+| System (stable) | `semantic_lint_prompts.py` | Compiler rules only — **no** per-page alias map |
+| Stable user prefix | `page_prompt_session.py` | One block per file from `prepare_llm_context_payload` + optional alias footer |
+| Task tail | `prompt_layout.py` | `build_cache_aligned_prompt` — content first, task last |
+| Stateless turns | `InstructorLLMClient` | Per-page calls use `stateless=True`; cluster history optional via `MATRYCA_LLM_CLUSTER_HISTORY` |
+
+Bootstrap **Phase 1** and **MapReduce** harvest paths use the same layout (fixing the pre-v1.8 bootstrap prompt that placed page text after the task).
+
+### Memory governance
+
+| Structure | v1.8 policy |
+|-----------|-------------|
+| **BM25 corpus** | Postings-lite `doc_term_freqs` (not full token lists); `release_bm25_corpus()` after Phase 1; `MATRYCA_BM25_MODE=ondemand` optional |
+| **Semantic cache RAM** | LRU cap (`MATRYCA_SEMANTIC_CACHE_MEMORY_ENTRIES`); TTL purge **skips** `master_catalog.json`, `backlink_counts.json`, `semantic_clusters.json` |
+| **Master catalog** | `unload_master_catalog()` during `release_phase1_memory()` |
+| **Telemetry** | `memory_budget.snapshot()` — RSS vs `MATRYCA_RAM_BUDGET_MB` |
+
+After Phase 1 completes, `run_bootstrap_pipeline` calls `release_phase1_memory()` (generational cache clear, BM25 release, semantic RAM trim, catalog unload, `gc.collect()`), precomputes semantic clusters, then Phase 2 polling continues.
+
+### Software edge (KV integrity, adaptive LLM, mmap)
+
+| Mechanism | Module | Contract |
+|-----------|--------|----------|
+| **Frozen KV prefix** | `page_prompt_session.py`, `prompt_layout.py` | `FrozenPromptPrefix` + SHA-256 `verify_unchanged()`; ops JSONL `kv_prefix_hash` |
+| **Adaptive structured output** | `llm_client.py` | `probe_backend()` → Path A (strict `json_schema`) or Path B (3-try self-correction); `StructuredOutputExhaustedError` on failure |
+| **mmap Phase 1 reads** | `markdown_io.py`, `master_catalog.py` | `mmap_graph_page()` + `extract_catalog_fields_from_mmap()` when `MATRYCA_GRAPH_READ_MMAP=true` |
+| **CPU sandbox** | `process_priority.py` | `apply_cpu_sandbox()` — affinity + idle I/O when `MATRYCA_CPU_SANDBOX=true` and `psutil` installed (`[edge]` extra) |
+
+Detail: [`v1.8-SOFTWARE-EDGE-PLAN.md`](v1.8-SOFTWARE-EDGE-PLAN.md).
+
+### Cooperative I/O
+
+| Mechanism | When | Typical sleep |
+|-----------|------|----------------|
+| `cooperative_yield.yield_host()` | Every `MATRYCA_BOOTSTRAP_YIELD_EVERY` files during `run_bootstrap_harvest` | `MATRYCA_YIELD_SLEEP_MS` (often 0) |
+| `io_batch_pause_seconds()` | Non-LLM harvest steps | ~2 ms (`MATRYCA_BOOTSTRAP_IO_BATCH_PAUSE_MS`) — **not** thermal |
+| `load_incoming_backlinks()` | Bootstrap / cache patch | Disk read of `backlink_counts.json` |
+| `apply_cpu_sandbox()` / `apply_plumber_priority()` | Daemon foreground start | `nice(19)` + optional ionice |
+| **Thermal pauses** | After each bootstrap / cognitive **LLM** turn | ≥ 1 s (`MATRYCA_THERMAL_DELAY_*`) |
+
+Tests that assert thermal behavior filter `time.sleep` with `s >= 1.0` so micro-yields are not false positives.
+
+Full operator and env reference: [`openspec/llm-performance.md`](openspec/llm-performance.md), [`v1.8-OPTIMIZATION-PLAN.md`](v1.8-OPTIMIZATION-PLAN.md).
+
+---
+
 ## Distribution and entry points
 
 ### Zero-install and global install
@@ -348,6 +418,14 @@ Background service: `matryca service install` → LaunchAgent / systemd user uni
 |------|------|
 | `src/plumber_entry.py` | CLI vs MCP stdio disambiguation |
 | `src/agent/maintenance_daemon.py` | Autonomous poll loop, ledger, detached spawn |
+| `src/agent/page_prompt_session.py` | Per-page stable LLM prefix (v1.8 KV reuse) |
+| `src/agent/semantic_lint_prompts.py` | Stable semantic-index system prompt |
+| `src/agent/memory_budget.py` | RSS snapshots, Phase 1 memory teardown |
+| `src/agent/cooperative_yield.py` | Bootstrap / scan cooperative scheduling |
+| `src/agent/llm_client.py` | Adaptive structured output, `InstructorLLMClient`, backend probe |
+| `src/agent/process_priority.py` | `apply_cpu_sandbox()`, `nice` / optional ionice |
+| `src/graph/backlink_index.py` | Persisted incoming wikilink counts |
+| `src/graph/markdown_io.py` | mmap graph page reads (Phase 1 catalog path) |
 | `src/cli/ui_server.py` | FastAPI monolith + static SPA + daemon control |
 | `src/cli/ui_auth.py` | Bearer token resolution and verification |
 | `src/agent/graph_dispatch.py` | Headless writes, OCC-aware block resolution |
@@ -376,12 +454,17 @@ Background service: `matryca service install` → LaunchAgent / systemd user uni
 | **16** | Enterprise Ironclad | Zero-Trust UI, subprocess daemon, SSRF guards, cross-platform lock |
 | **1.5.15** | Ironclad consolidation | `plumber_entry` routing, MCP log bridge pickling fix, OCC ordering, atomic `.env`, UI launch validation, LRU page locks |
 | **1.5.17** | Security depth pass | Shared LLM SSRF, graph path allowlist, MCP gate, split UI rate limits, **453** tests |
+| **1.7.x** | Zero-Touch onboarding | Sovereign UI pre-flight, decoupled UI state, lock-before-LLM |
+| **1.8** | Edge computing & performance | PagePromptSession, adaptive `llm_client`, mmap reads, CPU sandbox, backlink index, BM25 slimming, cooperative harvest, memory teardown |
 
 ---
 
 ## Related reading
 
 - [`PROJECT_DIARY.md`](PROJECT_DIARY.md) — chronological decisions and release notes
+- [`v1.8-OPTIMIZATION-PLAN.md`](v1.8-OPTIMIZATION-PLAN.md) — v1.8 scope, env vars, verification
+- [`v1.8-SOFTWARE-EDGE-PLAN.md`](v1.8-SOFTWARE-EDGE-PLAN.md) — CPU sandbox, frozen prefix, adaptive LLM, mmap
+- [`openspec/llm-performance.md`](openspec/llm-performance.md) — LLM performance engineering contract
 - [`SYSTEM_PROMPT.md`](../SYSTEM_PROMPT.md) — agent OCC and persist-first `id::` policy
 - [`../README.md`](../README.md) — operator quick start
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — `make check`, dev setup

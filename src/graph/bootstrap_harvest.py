@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from ..agent.cooperative_yield import io_batch_pause_seconds, yield_host
 from ..agent.plumber_config import PlumberLintConfig, load_plumber_lint_config
 from ..agent.plumber_llm import BootstrapSummaryResult, HarvestLLM
 from ..agent.plumber_modules.marpa_framework import detect_marpa_namespace
 from .alias_index import iter_alias_source_paths, page_title_from_path
+from .backlink_index import load_incoming_backlinks
 from .bootstrap_stop import BootstrapHarvestStopped
 from .generational_cache import patch_generational_caches_for_paths
 from .hierarchical_summarization import mapreduce_harvest_page_summary
@@ -23,12 +26,14 @@ from .markdown_blocks import (
     file_mtime_drifted,
     read_file_mtime,
 )
+from .markdown_io import mmap_graph_page, read_graph_page_text
 from .master_catalog import (
     MASTER_INDEX_PAGE_TITLE,
     SEMANTIC_INDEX_HEADER,
     CatalogEntry,
     MasterCatalog,
     extract_catalog_fields_from_content,
+    extract_catalog_fields_from_mmap,
     list_stale_page_paths,
     load_master_catalog,
     master_index_page_path,
@@ -102,40 +107,8 @@ def _infer_domain_from_content(page_title: str, content: str) -> str:
     return ""
 
 
-def _compute_incoming_backlinks(graph_root: Path) -> dict[str, int]:
-    """Count incoming wikilink references per page title."""
-    wikilink = re.compile(r"\[\[([^\]#|]+)(?:\|[^\]]+)?\]\]")
-    incoming: dict[str, int] = {}
-    from .alias_index import iter_scannable_pages_markdown
-
-    pages_dir = graph_root / "pages"
-    title_to_stem: dict[str, str] = {}
-    if pages_dir.is_dir():
-        for path in iter_scannable_pages_markdown(graph_root):
-            title = page_title_from_path(graph_root, path)
-            title_to_stem[title.casefold()] = path.stem
-
-    for path in iter_alias_source_paths(graph_root):
-        title = page_title_from_path(graph_root, path)
-        incoming.setdefault(title, 0)
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for match in wikilink.finditer(text):
-            target = match.group(1).strip()
-            key = target.casefold()
-            if key in title_to_stem:
-                canonical = page_title_from_path(
-                    graph_root,
-                    pages_dir / f"{title_to_stem[key]}.md",
-                )
-                incoming[canonical] = incoming.get(canonical, 0) + 1
-    return incoming
-
-
 def _refresh_orphan_flags(graph_root: Path, catalog: MasterCatalog) -> None:
-    incoming = _compute_incoming_backlinks(graph_root)
+    incoming = load_incoming_backlinks(graph_root)
     for title, entry in catalog.pages.items():
         entry.orphan = incoming.get(title, 0) == 0
 
@@ -230,17 +203,32 @@ def harvest_page_into_catalog(
         return "missing", True, False
 
     try:
-        content = page_path.read_text(encoding="utf-8", errors="replace")
         mtime = int(page_path.stat().st_mtime)
+    except OSError as exc:
+        return f"error:{exc}", False, False
+
+    incoming = incoming_counts or {}
+    orphan = incoming.get(title, 0) == 0
+    extracted: CatalogEntry | None = None
+    content = ""
+    try:
+        from .markdown_io import graph_read_mmap_enabled
+
+        if graph_read_mmap_enabled():
+            with mmap_graph_page(page_path, graph_root) as view:
+                extracted = extract_catalog_fields_from_mmap(view)
+                content = view.decode_utf8(errors="replace")
+        else:
+            content = read_graph_page_text(page_path, graph_root, errors="replace")
+            extracted = extract_catalog_fields_from_content(content)
     except OSError as exc:
         return f"error:{exc}", False, False
 
     if not content.strip():
         return "skipped_empty", False, False
 
-    incoming = incoming_counts or {}
-    orphan = incoming.get(title, 0) == 0
-    extracted = extract_catalog_fields_from_content(content)
+    if extracted is None:
+        extracted = extract_catalog_fields_from_content(content)
     if extracted is not None:
         extracted.last_mtime = mtime
         extracted.orphan = orphan
@@ -307,7 +295,7 @@ def run_bootstrap_harvest(
     lint_config = config or load_plumber_lint_config()
     catalog = load_master_catalog(root, force_reload=True)
     metrics = HarvestMetrics()
-    incoming = _compute_incoming_backlinks(root)
+    incoming = load_incoming_backlinks(root)
     titles_before = _snapshot_page_titles(root) if phase1_strict else set()
 
     paths = (
@@ -326,13 +314,15 @@ def run_bootstrap_harvest(
     changed = metrics.pruned > 0
     interval = max(1, progress_interval)
     stopped_early = False
-    for page_path in paths:
+    io_pause = io_batch_pause_seconds()
+    for page_index, page_path in enumerate(paths):
         if should_stop is not None and should_stop():
             stopped_early = True
             break
         if stop_event is not None and stop_event.is_set():
             stopped_early = True
             break
+        yield_host(page_index)
         metrics.scanned += 1
         try:
             status, page_changed, llm_called_this_turn = harvest_page_into_catalog(
@@ -358,10 +348,14 @@ def run_bootstrap_harvest(
 
         if status == "regex":
             metrics.regex_harvested += 1
+            if io_pause > 0:
+                time.sleep(io_pause)
         elif status == "llm":
             metrics.llm_harvested += 1
         elif status == "skipped_empty":
             metrics.skipped_empty += 1
+            if io_pause > 0:
+                time.sleep(io_pause)
         changed = changed or page_changed
         harvest_status = _progress_harvest_status(status)
         if on_page_cataloged is not None:

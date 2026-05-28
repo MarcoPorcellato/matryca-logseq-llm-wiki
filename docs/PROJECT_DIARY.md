@@ -1,12 +1,51 @@
 # Project diary — technical lifecycle log
 
-This document records **architecture decisions**, **phase milestones**, and **real-world defects crushed** during the evolution of **Matryca Plumber** (`matryca-plumber` on PyPI, **v1.5.17**).
+This document records **architecture decisions**, **phase milestones**, and **real-world defects crushed** during the evolution of **Matryca Plumber** (`matryca-plumber` on PyPI; current line **v1.8.0**).
 
 The project began as an MCP-first bridge so external LLM hosts could mutate Logseq Markdown safely. Phases **12–16** completed the pivot to a **fully autonomous background agent** — `MaintenanceDaemon`, Sovereign UI, native AST I/O, OCC, and Zero-Trust cockpit APIs — where **FastMCP is an optional auxiliary surface**, not the product’s center of gravity.
 
 For the engineering contract (modules, diagrams, concurrency), see [`ARCHITECTURE.md`](ARCHITECTURE.md). For operator setup, see [`../README.md`](../README.md).
 
 Entries are chronological (**newest first** within each major release block). When a decision is superseded, add a new entry rather than rewriting history.
+
+---
+
+## [2026-05-27] v1.8 — Edge computing & performance (16 GB / 10k pages)
+
+### Context
+
+Matryca Plumber’s stated operator profile is a **CPU-only 16 GB laptop** with a **local** LLM (LM Studio, Ollama, llama.cpp) and vaults approaching **10,000** Markdown pages. Phase 14d fixed megabyte-page **token** cost via summaries and introduced content-before-task ordering for Phase 2 indexing — but production traces still showed:
+
+1. **Bootstrap harvest** sending `Task` before `Content`, destroying KV-cache reuse on every MapReduce chunk and reduce pass.
+2. **Per-page alias maps in the system prompt**, preventing any cross-page system-string reuse on local servers.
+3. **RAM creep** — full BM25 token bags, unbounded semantic-cache `_memory`, and a full-graph backlink rebuild at every Phase 1 start.
+4. **Host freezes** — synchronous 10k-file loops, daemon checkpoints every five cataloged pages, and `purge_expired_semantic_cache` accidentally deleting `master_catalog.json` alongside inference cache files.
+
+v1.8 is explicitly **performance-only**: zero new semantic or graph-manipulation features.
+
+### Milestones shipped
+
+1. **`PagePromptSession`** (`page_prompt_session.py`) — One stable page block per file per cycle; cognitive modules and semantic index share it; AliasIndex moves to a **capped user footer** (`MATRYCA_ALIAS_PROMPT_MAX_CHARS`).
+
+2. **`build_semantic_lint_system_prompt()`** (`semantic_lint_prompts.py`) — Stable system instructions extracted from `maintenance_daemon.py` to break circular imports and keep the system string constant.
+
+3. **Cache-aligned bootstrap** — `harvest_page_summary` and MapReduce reduce use `build_cache_aligned_prompt`; `stateless=True` on per-page inference paths.
+
+4. **Memory plane** — BM25 postings-lite (`doc_term_freqs`), `release_phase1_memory()` after Phase 1, semantic cache LRU, `unload_master_catalog()`, reserved JSON files during TTL purge.
+
+5. **I/O plane** — `cooperative_yield.yield_host()`, persisted `backlink_counts.json`, `MATRYCA_BOOTSTRAP_CHECKPOINT_EVERY`, `apply_plumber_priority()` (`nice` + optional psutil ionice). Micro-yields (2 ms batch pauses) are distinct from **thermal** sleeps (≥ 1 s, post-LLM only); thermal tests filter `time.sleep` with `s >= 1.0`.
+
+6. **Docs & tests** — [`v1.8-OPTIMIZATION-PLAN.md`](v1.8-OPTIMIZATION-PLAN.md), [`openspec/llm-performance.md`](openspec/llm-performance.md), `scripts/gen_synthetic_graph.py`, `make perf` / `@pytest.mark.slow`.
+
+7. **Software edge** — [`llm_client.py`](../src/agent/llm_client.py) probe-driven Path A/B structured output; `FrozenPromptPrefix` + `kv_prefix_hash`; [`markdown_io.py`](../src/graph/markdown_io.py) mmap Phase 1 reads; [`process_priority.py`](../src/agent/process_priority.py) CPU sandbox (`MATRYCA_CPU_SANDBOX`, `[edge]` extra). Spec: [`v1.8-SOFTWARE-EDGE-PLAN.md`](v1.8-SOFTWARE-EDGE-PLAN.md).
+
+### Architectural outcome
+
+The product can be described as **edge-ready**: the daemon is designed to run **silently for days** on laptop-class hardware when operators enable the v1.8 `.env` profile. The Context Acceleration Shield (Phase 14d) and the v1.8 Zero-Prefill stack are complementary — summaries shrink tokens; stable prefixes maximize **reuse** of whatever tokens remain.
+
+### Status
+
+**Shipped in 1.8.0** — see [`CHANGELOG.md`](../CHANGELOG.md) `[1.8.0]`.
 
 ---
 
@@ -32,7 +71,7 @@ A full-repository security review identified gaps where **SSRF policy applied on
 
 ### Status
 
-**Shipped** on `main` working tree. Operators enabling Claude Desktop should set `MATRYCA_MCP_ENABLED=true` in `.env`. See [`CHANGELOG.md`](../CHANGELOG.md) `[Unreleased]`.
+**Shipped in 1.7.5**. Operators enabling Claude Desktop should set `MATRYCA_MCP_ENABLED=true` in `.env`. See [`CHANGELOG.md`](../CHANGELOG.md) `[1.7.5]`.
 
 ---
 
@@ -127,6 +166,7 @@ Shipped. Test bar at phase close: **349+** passing (later superseded by 437).
 | **13** | Operational hardening (v1.4.1) | `chdir` sandbox root, MCP telemetry sanitizer, `service install` |
 | **14** | Plumber OS | `MaintenanceDaemon`, Louvain GraphRAG, FastAPI + React cockpit |
 | **14d** | Context Acceleration | TRIZ payload + prompt prefix alignment + `reload_plumber_dotenv` |
+| **1.8** | Edge computing & performance | PagePromptSession, backlink index, BM25 slimming, cooperative harvest, memory teardown |
 | **15** | Logseq-native parity | OCC, namespaces, frontmatter, Trust UI |
 | **16** | Enterprise Ironclad | Zero-Trust UI, subprocess daemon, SSRF, cross-platform lock |
 | **1.5.15** | Ironclad consolidation | `plumber_entry`, MCP log bridge, UI launch fix, OCC ordering, atomic `.env`, LRU locks |
@@ -151,6 +191,8 @@ A **5,260-block** production page turned Phase 2 into a sequential GPU prefill b
 ### Status
 
 Shipped. **`tests/test_llm_context_payload.py`** added; suite grew to **317+** green at the time.
+
+**Evolution (v1.8):** Phase 14d fixed Phase 2 indexing and token volume; v1.8 extends the same `[STABLE_PAGE] + [DYNAMIC_TASK]` contract to **bootstrap harvest**, **MapReduce**, and **multi-module cognitive pipelines** via `PagePromptSession` — see the [2026-05-27 v1.8 entry](#2026-05-27-v18--edge-computing--performance-16-gb--10k-pages) above.
 
 ---
 

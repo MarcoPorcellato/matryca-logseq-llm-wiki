@@ -147,3 +147,5 @@ out/
 # Env del frontend (se presenti)
 frontend/.env
 frontend/.env.local
+.coverage.MacBook-Pro_local.pid76605.XLTpNzLx.HNQIp837rWOh
+.coverage.MacBook-Pro_local.pid86179.XqL6mq1x.HNQIp837rWOh

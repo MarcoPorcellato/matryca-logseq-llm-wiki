@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+from src.agent.plumber_modules import semantic_cache_router as router
 from src.agent.plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
@@ -43,3 +44,18 @@ def test_semantic_cache_miss_after_ttl_expired(
     cache_put(graph_root, "index", key, {"summary": "old"}, ttl_seconds=1)
     time.sleep(1.1)
     assert cache_get(graph_root, "index", key) is None
+
+
+def test_semantic_cache_memory_lru_eviction(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_semantic_cache(graph_root)
+    monkeypatch.setattr(router, "_memory_max_entries", lambda: 2)
+    page = graph_root / "pages" / "A.md"
+    page.write_text("- a\n", encoding="utf-8")
+    for index in range(3):
+        key = f"op{index}:{page.name}:1"
+        cache_put(graph_root, "index", key, {"n": index})
+    with router._lock:
+        assert len(router._memory) <= 2

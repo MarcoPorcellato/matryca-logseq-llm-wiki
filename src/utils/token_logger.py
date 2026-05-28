@@ -91,9 +91,10 @@ class TokenLogEntry:
     model: str = ""
     ok: bool = True
     error: str | None = None
+    kv_prefix_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "timestamp": self.timestamp,
             "target_file": self.target_file,
             "operation": self.operation,
@@ -107,6 +108,9 @@ class TokenLogEntry:
             "ok": self.ok,
             "error": self.error,
         }
+        if self.kv_prefix_hash:
+            payload["kv_prefix_hash"] = self.kv_prefix_hash
+        return payload
 
 
 @dataclass
@@ -130,6 +134,7 @@ class TokenLogger:
         model: str = "",
         ok: bool = True,
         error: str | None = None,
+        kv_prefix_hash: str | None = None,
     ) -> TokenLogEntry:
         """Persist one LLM turn and update session token totals."""
         entry = TokenLogEntry(
@@ -150,6 +155,7 @@ class TokenLogger:
             model=model,
             ok=ok,
             error=sanitize_for_console(error) if error else None,
+            kv_prefix_hash=kv_prefix_hash,
         )
         self.session_prompt_tokens += prompt_tokens
         self.session_completion_tokens += completion_tokens

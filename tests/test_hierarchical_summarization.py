@@ -52,8 +52,9 @@ def test_mapreduce_harvest_uses_single_pass_below_trigger() -> None:
             *,
             page_path: Path | None = None,
             graph_root: Path | None = None,
+            task_instruction: str | None = None,
         ) -> BootstrapSummaryResult:
-            _ = (page_path, graph_root)
+            _ = (page_path, graph_root, task_instruction)
             calls.append(content)
             return BootstrapSummaryResult(summary=f"Summary for {page_title}")
 
@@ -70,7 +71,7 @@ def test_mapreduce_harvest_uses_single_pass_below_trigger() -> None:
 
 
 def test_mapreduce_harvest_splits_and_reduces_above_trigger() -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str | None]] = []
 
     class MapReduceLLM:
         def harvest_page_summary(
@@ -80,10 +81,11 @@ def test_mapreduce_harvest_splits_and_reduces_above_trigger() -> None:
             *,
             page_path: Path | None = None,
             graph_root: Path | None = None,
+            task_instruction: str | None = None,
         ) -> BootstrapSummaryResult:
             _ = (page_path, graph_root)
-            calls.append(content)
-            if "MapReduce consolidation task" in content:
+            calls.append((content, task_instruction))
+            if task_instruction and "MapReduce consolidation task" in task_instruction:
                 return BootstrapSummaryResult(
                     summary="Unified giant page summary.",
                     suggested_tags=["activity", "fbu"],
@@ -108,7 +110,8 @@ def test_mapreduce_harvest_splits_and_reduces_above_trigger() -> None:
     assert result.summary == "Unified giant page summary."
     assert result.suggested_tags == ["activity", "fbu"]
     assert len(calls) >= 3
-    assert "MapReduce consolidation task" in calls[-1]
+    assert calls[-1][1] is not None
+    assert "MapReduce consolidation task" in calls[-1][1]
 
 
 def test_mapreduce_thermal_pause_after_each_harvest_turn(
@@ -128,10 +131,11 @@ def test_mapreduce_thermal_pause_after_each_harvest_turn(
             *,
             page_path: Path | None = None,
             graph_root: Path | None = None,
+            task_instruction: str | None = None,
         ) -> BootstrapSummaryResult:
             _ = (page_title, page_path, graph_root)
             calls.append(content[:40])
-            if "MapReduce consolidation task" in content:
+            if task_instruction and "MapReduce consolidation task" in task_instruction:
                 return BootstrapSummaryResult(summary="Unified summary.")
             return BootstrapSummaryResult(summary="Partial.")
 
@@ -165,10 +169,11 @@ def test_harvest_page_into_catalog_mapreduce_integration(graph_root: Path) -> No
             *,
             page_path: Path | None = None,
             graph_root: Path | None = None,
+            task_instruction: str | None = None,
         ) -> BootstrapSummaryResult:
             _ = (page_title, page_path, graph_root)
             calls.append(len(content))
-            if "MapReduce consolidation task" in content:
+            if task_instruction and "MapReduce consolidation task" in task_instruction:
                 return BootstrapSummaryResult(
                     summary="Consolidated activity log.",
                     suggested_tags=["fbu"],

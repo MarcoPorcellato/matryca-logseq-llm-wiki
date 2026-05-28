@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-05-28
+
+### Added
+
+- **v1.8 edge software plan** — [`docs/v1.8-SOFTWARE-EDGE-PLAN.md`](docs/v1.8-SOFTWARE-EDGE-PLAN.md): CPU sandbox, frozen KV prefix, adaptive structured output, mmap reads.
+- **Adaptive LLM client** — [`src/agent/llm_client.py`](src/agent/llm_client.py): capability probe, logits JSON-schema fast path, 3-try validation self-correction on legacy servers, `StructuredOutputExhaustedError`.
+- **Frozen prompt prefix** — `FrozenPromptPrefix` + SHA-256 verify before LLM calls; `kv_prefix_hash` in ops JSONL.
+- **CPU sandbox** — `MATRYCA_CPU_SANDBOX`, optional `MATRYCA_PLUMBER_CPU_AFFINITY`; `psutil` via `[edge]` extra.
+- **Mmap graph reads** — [`src/graph/markdown_io.py`](src/graph/markdown_io.py) for Phase 1 bootstrap regex path (`MATRYCA_GRAPH_READ_MMAP`).
+- **v1.8 edge computing documentation** — [`docs/v1.8-OPTIMIZATION-PLAN.md`](docs/v1.8-OPTIMIZATION-PLAN.md), [`docs/openspec/llm-performance.md`](docs/openspec/llm-performance.md), ARCHITECTURE / PROJECT_DIARY / README updates.
+- **PagePromptSession** — stable per-page LLM prefix reused across cognitive tasks; alias map in capped user block (`MATRYCA_ALIAS_PROMPT_MAX_CHARS`), not system prompt.
+- **Stable semantic system prompt** — `semantic_lint_prompts.py` for KV-friendly compiler rules shared by index + cognitive pipeline.
+- **Backlink index** — persisted `.matryca_semantic_cache/backlink_counts.json` replaces full-graph rescans during bootstrap.
+- **Memory budget** — `release_phase1_memory()`, RSS snapshots (`MATRYCA_RAM_BUDGET_MB`), semantic cache in-process LRU.
+- **Cooperative yield** — `yield_host()` during bootstrap; env-tunable intervals and I/O batch pauses.
+- **Synthetic graph script** — `scripts/gen_synthetic_graph.py`; slow tests via `make perf` (`pytest -m slow`).
+
+### Changed
+
+- **Documentation** — README, ARCHITECTURE, PROJECT_DIARY, openspec, and v1.8 plans aligned to **1.8.0**; `.env.example` marks legacy `MATRYCA_LM_INSTRUCTOR_*` vars as deprecated (probe-driven `llm_client` Path A/B).
+- **Bootstrap harvest** — `build_cache_aligned_prompt` for `harvest_page_summary` and MapReduce reduce; `stateless=True` on per-page LLM paths.
+- **BM25 corpus** — postings-lite `doc_term_freqs` (lower RAM); `MATRYCA_BM25_MODE=resident|ondemand`; `release_bm25_corpus()` on Phase 1 teardown.
+- **Semantic cache purge** — TTL sweep skips `master_catalog.json`, `backlink_counts.json`, and `semantic_clusters.json`.
+- **Daemon** — post-bootstrap `release_phase1_memory()`, cluster precompute after Phase 1, `apply_cpu_sandbox()` / `apply_plumber_priority`, LLM `probe_backend()` at foreground start, `MATRYCA_BOOTSTRAP_CHECKPOINT_EVERY`.
+- **Structured output** — `InstructorLLMClient` moved to `llm_client.py`; instructor mode carousel replaced by probe-driven Path A/B.
+
+### Fixed
+
+- **Semantic cache TTL** — no longer deletes the master catalog when purging expired inference cache files.
+
 ## [1.7.5] - 2026-05-27
 
 ### Added

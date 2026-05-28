@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +29,25 @@ def clear_generational_caches() -> None:
     with _lock:
         _alias_cache.clear()
         _bm25_cache.clear()
+
+
+def _bm25_mode() -> str:
+    raw = os.environ.get("MATRYCA_BM25_MODE", "resident").strip().lower()
+    return raw if raw in {"resident", "ondemand"} else "resident"
+
+
+def release_bm25_corpus(graph_root: str | Path) -> None:
+    """Drop in-memory BM25 corpus for one graph (Phase 1 teardown)."""
+    key = str(Path(graph_root).expanduser().resolve(strict=False))
+    with _lock:
+        _bm25_cache.pop(key, None)
+
+
+def _tokens_to_term_freqs(tokens: list[str]) -> dict[str, int]:
+    tf: dict[str, int] = {}
+    for token in tokens:
+        tf[token] = tf.get(token, 0) + 1
+    return tf
 
 
 def _mtime_ns(path: Path) -> int | None:
@@ -82,15 +101,15 @@ def _remove_bm25_doc(corpus: Bm25Corpus, rel: str) -> None:
     if rel not in corpus.rels:
         return
     idx = corpus.rels.index(rel)
-    old_tokens = corpus.docs_tokens[idx]
-    for token in set(old_tokens):
+    old_tf = corpus.doc_term_freqs[idx]
+    for token in old_tf:
         count = corpus.df.get(token, 0) - 1
         if count <= 0:
             corpus.df.pop(token, None)
         else:
             corpus.df[token] = count
     del corpus.rels[idx]
-    del corpus.docs_tokens[idx]
+    del corpus.doc_term_freqs[idx]
     del corpus.doc_lens[idx]
     corpus.n_docs = max(0, corpus.n_docs - 1)
     corpus.avgdl = sum(corpus.doc_lens) / corpus.n_docs if corpus.n_docs else 1.0
@@ -100,10 +119,11 @@ def _replace_bm25_doc(corpus: Bm25Corpus, rel: str, tokens: list[str]) -> None:
     _remove_bm25_doc(corpus, rel)
     if not tokens:
         return
+    tf = _tokens_to_term_freqs(tokens)
     corpus.rels.append(rel)
-    corpus.docs_tokens.append(tokens)
+    corpus.doc_term_freqs.append(tf)
     corpus.doc_lens.append(len(tokens))
-    for token in set(tokens):
+    for token in tf:
         corpus.df[token] = corpus.df.get(token, 0) + 1
     corpus.n_docs += 1
     corpus.avgdl = sum(corpus.doc_lens) / corpus.n_docs if corpus.n_docs else 1.0
@@ -182,6 +202,11 @@ def patch_generational_caches_for_paths(
             _bm25_cache[key] = (new_sig, corpus)
             patched = True
 
+    if resolved:
+        from .backlink_index import patch_backlink_index_for_paths
+
+        patch_backlink_index_for_paths(root, resolved)
+
     return patched
 
 
@@ -225,10 +250,10 @@ def _bm25_page_paths(root: Path) -> list[Path]:
 
 @dataclass(slots=True)
 class Bm25Corpus:
-    """Pre-tokenized page bag for Okapi BM25."""
+    """Pre-tokenized page bag for Okapi BM25 (term frequencies only — no raw token lists)."""
 
     rels: list[str]
-    docs_tokens: list[list[str]]
+    doc_term_freqs: list[dict[str, int]]
     doc_lens: list[int]
     df: dict[str, int]
     n_docs: int
@@ -239,8 +264,9 @@ def _build_bm25_corpus(root: Path) -> Bm25Corpus:
     from src.rag.local_query import tokenize
 
     paths = _bm25_page_paths(root)
-    docs_tokens: list[list[str]] = []
+    doc_term_freqs: list[dict[str, int]] = []
     rels: list[str] = []
+    doc_lens: list[int] = []
     for path in paths:
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
@@ -249,22 +275,29 @@ def _build_bm25_corpus(root: Path) -> Bm25Corpus:
         toks = tokenize(raw)
         if not toks:
             continue
-        docs_tokens.append(toks)
+        doc_term_freqs.append(_tokens_to_term_freqs(toks))
+        doc_lens.append(len(toks))
         rels.append(path.relative_to(root).as_posix())
 
-    n_docs = len(docs_tokens)
+    n_docs = len(doc_term_freqs)
     if n_docs == 0:
-        return Bm25Corpus(rels=[], docs_tokens=[], doc_lens=[], df={}, n_docs=0, avgdl=1.0)
+        return Bm25Corpus(
+            rels=[],
+            doc_term_freqs=[],
+            doc_lens=[],
+            df={},
+            n_docs=0,
+            avgdl=1.0,
+        )
 
-    doc_lens = [len(d) for d in docs_tokens]
     avgdl = sum(doc_lens) / n_docs
     df: dict[str, int] = {}
-    for toks in docs_tokens:
-        for t in set(toks):
+    for tf in doc_term_freqs:
+        for t in tf:
             df[t] = df.get(t, 0) + 1
     return Bm25Corpus(
         rels=rels,
-        docs_tokens=docs_tokens,
+        doc_term_freqs=doc_term_freqs,
         doc_lens=doc_lens,
         df=df,
         n_docs=n_docs,
@@ -279,12 +312,14 @@ def get_cached_bm25_corpus(graph_root: str | Path) -> Bm25Corpus:
     with _lock:
         paths = _bm25_page_paths(root)
         sig = _signature(paths, root)
-        hit = _bm25_cache.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
+        if _bm25_mode() == "resident":
+            hit = _bm25_cache.get(key)
+            if hit is not None and hit[0] == sig:
+                return hit[1]
         corpus = _build_bm25_corpus(root)
-        sig_after = _signature(_bm25_page_paths(root), root)
-        _bm25_cache[key] = (sig_after, corpus)
+        if _bm25_mode() == "resident":
+            sig_after = _signature(_bm25_page_paths(root), root)
+            _bm25_cache[key] = (sig_after, corpus)
         return corpus
 
 
@@ -306,11 +341,10 @@ def score_bm25_query(
     n_docs = corpus.n_docs
     avgdl = corpus.avgdl
     scores: list[tuple[str, float]] = []
-    for rel, toks, dl in zip(corpus.rels, corpus.docs_tokens, corpus.doc_lens, strict=True):
-        tf = Counter(toks)
+    for rel, tf_map, dl in zip(corpus.rels, corpus.doc_term_freqs, corpus.doc_lens, strict=True):
         score = 0.0
         for t in q_tokens:
-            freq = tf.get(t, 0)
+            freq = tf_map.get(t, 0)
             if freq == 0:
                 continue
             idf = math.log((n_docs - corpus.df.get(t, 0) + 0.5) / (corpus.df.get(t, 0) + 0.5) + 1.0)
@@ -330,5 +364,6 @@ __all__ = [
     "gc_generational_alias_cache",
     "get_cached_bm25_corpus",
     "patch_generational_caches_for_paths",
+    "release_bm25_corpus",
     "score_bm25_query",
 ]

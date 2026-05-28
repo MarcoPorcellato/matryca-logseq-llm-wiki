@@ -17,18 +17,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol
 
-import httpx
-import instructor
 from loguru import logger
-from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from ..config import load_matryca_wiki_config
 from ..graph.alias_index import (
     AliasIndex,
-    format_alias_index_for_prompt,
     iter_alias_source_paths,
     resolve_canonical_page_title,
 )
@@ -45,7 +41,6 @@ from ..graph.generational_cache import (
 from ..graph.global_fence_scanner import compute_page_protected_line_indices
 from ..graph.graph_analytics import reconcile_telemetry_ledger
 from ..graph.insights_engine import (
-    INSIGHTS_SYSTEM_PROMPT,
     run_graph_insights_engine,
 )
 from ..graph.json_flock import cross_process_json_flock
@@ -88,59 +83,47 @@ from ..graph.semantic_clustering import (
     load_or_compute_semantic_clusters,
 )
 from ..utils.console_sanitize import sanitize_for_console
-from ..utils.json_repair import parse_llm_json
 from ..utils.logging_config import configure_loguru
 from ..utils.runtime_bootstrap import prepare_matryca_runtime
 from ..utils.token_logger import OperationType, TokenLogger
-from .context_compressor import (
-    COMPRESSION_SYSTEM_PROMPT,
-    MAX_EXECUTION_HISTORY_MESSAGES,
-    ChatMessage,
-    condense_messages,
-    extract_persisted_history,
-)
 from .control_room_progress import refresh_phase2_cognitive_totals
+from .cooperative_yield import bootstrap_checkpoint_every
+from .llm_client import (
+    InstructorLLMClient as _BaseInstructorLLMClient,
+)
+from .llm_client import (
+    LLMResponseError,
+    StructuredOutputExhaustedError,
+    ThermalProfile,
+)
 from .llm_context_payload import prepare_llm_context_payload
+from .memory_budget import log_snapshot, maybe_release_after_cycle, release_phase1_memory
+from .page_prompt_session import PagePromptSession, build_page_prompt_session
 from .plumber_config import (
     DEFAULT_LLM_MODEL_NAME,
     DEFAULT_LM_BASE_URL,
     DEFAULT_LM_MODEL,
     PlumberLintConfig,
-    apply_thermal_pause_bootstrap,
-    apply_thermal_pause_cognitive,
     bootstrap_phase_lint_config,
     load_plumber_lint_config,
     reload_plumber_dotenv,
-    resolve_llm_api_key,
     resolve_llm_model_name,
-    resolve_validated_llm_base_url,
 )
 from .plumber_llm import (
     BootstrapSummaryResult,
-    ContextualSeedResult,
-    EntityOverlapResult,
     GraphInsightsLLMResult,
-    InferredPropertiesResult,
-    MarpaClassificationResult,
 )
 from .plumber_modules import CognitiveLintOutcome, run_cognitive_lint_pipeline
 from .plumber_modules.backlink_backpropagator import BacklinkCorrection, run_backlink_backpropagator
-from .plumber_modules.marpa_framework import (
-    build_marpa_classify_system_prompt,
-    build_marpa_classify_user_prompt,
-)
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
     purge_expired_semantic_cache,
     semantic_cache_key,
 )
-from .prompt_constraints import ALIAS_FIRST_LINK_CONSTRAINT, finalize_system_prompt
+from .process_priority import apply_cpu_sandbox, apply_plumber_priority, resolve_cpu_sandbox_config
 from .prompt_layout import build_cache_aligned_prompt
-
-_LLM_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=5.0, pool=5.0)
-
-ThermalProfile = Literal["none", "bootstrap", "cognitive"]
+from .semantic_lint_prompts import build_semantic_lint_system_prompt
 
 STATE_FILENAME = ".matryca_daemon_state.json"
 STATE_TMP_FILENAME = f"{STATE_FILENAME}.tmp"
@@ -255,6 +238,8 @@ class LLMClient(Protocol):
         graph_root: Path | None = None,
         alias_index: AliasIndex | None = None,
         enable_semantic_routing: bool = False,
+        llm_context: str | None = None,
+        prompt_session: PagePromptSession | None = None,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
         """Return structured index and token usage dict with prompt/completion keys."""
         ...
@@ -266,6 +251,7 @@ class LLMClient(Protocol):
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        task_instruction: str | None = None,
     ) -> BootstrapSummaryResult:
         """Return a one-sentence bootstrap summary."""
         ...
@@ -1025,66 +1011,39 @@ def _enumerate_blocks_for_prompt(content: str) -> str:
     return "\n".join(blocks)
 
 
-def _build_semantic_lint_system_prompt(*, alias_index_context: str | None = None) -> str:
-    instructions = (
-        "You are Matryca Plumber, a semantic linter and indexer for Logseq OG outliner pages. "
-        "Behave like a strict compiler: analyze block-by-block, propose only safe additive "
-        "micro-corrections, never rewrite whole files. "
-        "Rules for semantic_corrections: "
-        "(1) block_uuid must match an id:: line from the page; "
-        "(2) original_text must copy the bullet-line text verbatim "
-        "(exclude id:: / property lines); "
-        "(3) corrected_text must preserve original_text unchanged "
-        "and only add [[WikiLinks]] or #tags; "
-        "(4) never delete, shorten, or paraphrase user prose; "
-        "(5) if unsure, omit the correction. "
-        "lint_type auto_wikilink: wrap recognizable concepts in [[Page Title]] links. "
-        "lint_type tag_hygiene: normalize inline #tags without removing words. "
-        "lint_type anomaly_warning: flag issues only — set corrected_text equal to original_text. "
-        "Also populate summary, cross_references, suggested_tags, and moc_pointers. "
-        f"{ALIAS_FIRST_LINK_CONSTRAINT}"
+def _build_index_task_instruction(page_title: str, content: str) -> str:
+    block_catalog = _enumerate_blocks_for_prompt(content)
+    return "\n".join(
+        [
+            "Task: semantic indexing and safe per-block lint for one Logseq OG outliner page.",
+            "Output: structured JSON only.",
+            "Steps:",
+            "1. Read the page title, block catalog, AliasIndex, and page content above.",
+            "2. Extract summary, cross_references, suggested_tags, and moc_pointers.",
+            "3. Propose semantic_corrections only when every system-prompt safety rule "
+            "is satisfied.",
+            "4. Prefer existing canonical titles and alias:: over inventing new page names.",
+            "",
+            f"Page title: {page_title}",
+            "",
+            f"Blocks available for semantic_corrections:\n{block_catalog}",
+        ],
     )
-    if alias_index_context:
-        instructions += (
-            "\n\nCompiled AliasIndex (canonical page titles and alias:: values):\n"
-            f"{alias_index_context}"
-        )
-    return finalize_system_prompt(instructions)
 
 
 def _build_index_prompt(
     page_title: str,
     content: str,
     *,
-    alias_index_context: str | None = None,
     llm_body: str | None = None,
+    session: PagePromptSession | None = None,
 ) -> str:
-    block_catalog = _enumerate_blocks_for_prompt(content)
+    if session is not None:
+        return session.build_task_prompt(_build_index_task_instruction(page_title, content))
     display_body = llm_body if llm_body is not None else content
-    task_lines = [
-        "Task: semantic indexing and safe per-block lint for one Logseq OG outliner page.",
-        "Output: structured JSON only.",
-        "Steps:",
-        "1. Read the page title, block catalog, AliasIndex, and page content above.",
-        "2. Extract summary, cross_references, suggested_tags, and moc_pointers.",
-        "3. Propose semantic_corrections only when every system-prompt safety rule is satisfied.",
-        "4. Prefer existing canonical titles and alias:: over inventing new page names.",
-        "",
-        f"Page title: {page_title}",
-        "",
-        f"Blocks available for semantic_corrections:\n{block_catalog}",
-    ]
-    if alias_index_context:
-        task_lines.extend(
-            [
-                "",
-                "AliasIndex (resolve every wikilink against this map before suggesting links):",
-                alias_index_context,
-            ],
-        )
     return build_cache_aligned_prompt(
         content=display_body[:8000],
-        task_instruction="\n".join(task_lines),
+        task_instruction=_build_index_task_instruction(page_title, content),
     )
 
 
@@ -1474,25 +1433,6 @@ def apply_semantic_page_result(
     return lint_outcome
 
 
-class LLMResponseError(RuntimeError):
-    """Raised when the local LLM returns an empty or malformed completion."""
-
-
-def _extract_first_choice_content(response: object) -> str:
-    """Return assistant text from an OpenAI-compatible completion or raise ``LLMResponseError``."""
-    choices = getattr(response, "choices", None)
-    if not isinstance(choices, list) or not choices:
-        raise LLMResponseError("LLM response missing choices")
-    first = choices[0]
-    message = getattr(first, "message", None)
-    if message is None:
-        raise LLMResponseError("LLM response choice missing message")
-    content = getattr(message, "content", None)
-    if content is None or not str(content).strip():
-        raise LLMResponseError("LLM response choice has empty content")
-    return str(content).strip()
-
-
 def append_semantic_index(
     graph_root: Path,
     page_path: Path,
@@ -1511,447 +1451,8 @@ def append_semantic_index(
     )
 
 
-class InstructorLLMClient:
-    """OpenAI-compatible local LLM client (LM Studio, Ollama, …) via instructor + OpenAI SDK."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        token_logger: TokenLogger | None = None,
-    ) -> None:
-        self.token_logger = token_logger or TokenLogger()
-        self._explicit_model = model
-        self._explicit_base_url = base_url
-        self._explicit_api_key = api_key
-        self.base_url = resolve_validated_llm_base_url(override=base_url)
-        self.model = resolve_llm_model_name(override=model)
-        self.api_key = resolve_llm_api_key(override=api_key)
-        self._raw_client: OpenAI = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=_LLM_HTTP_TIMEOUT,
-        )
-        self._execution_history: list[ChatMessage] = []
-        self._runtime_lint_config: PlumberLintConfig | None = None
-        self.thermal_stop_event: threading.Event | None = None
-
-    def bind_lint_config(self, config: PlumberLintConfig | None) -> None:
-        """Pin the active lint/thermal config for this daemon cycle (live drawer updates)."""
-        self._runtime_lint_config = config
-
-    def _active_lint_config(self) -> PlumberLintConfig:
-        return self._runtime_lint_config or load_plumber_lint_config()
-
-    def refresh_config(
-        self,
-        *,
-        model: str | None = None,
-        base_url: str | None = None,
-        api_key: str | None = None,
-    ) -> None:
-        """Reload LLM settings from env (explicit ctor overrides win over env)."""
-        resolved_model = model if model is not None else self._explicit_model
-        resolved_base = base_url if base_url is not None else self._explicit_base_url
-        resolved_api_key = api_key if api_key is not None else self._explicit_api_key
-        self.base_url = resolve_validated_llm_base_url(override=resolved_base)
-        self.model = resolve_llm_model_name(override=resolved_model)
-        self.api_key = resolve_llm_api_key(override=resolved_api_key)
-        self._raw_client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=_LLM_HTTP_TIMEOUT,
-        )
-
-    def reset_execution_history(self) -> None:
-        """Drop per-page session history (constant memory footprint across daemon uptime)."""
-        self._execution_history.clear()
-
-    def inject_cluster_focus_context(self, neighborhood_text: str) -> None:
-        """Seed Ermes rolling history with an isolated semantic cluster boundary."""
-        self.reset_execution_history()
-        focus_prompt = (
-            "[CLUSTER FOCUS: NEIGHBORHOOD MAP]\n"
-            "Below are the summaries of all nodes in this isolated semantic cluster:\n\n"
-            f"{neighborhood_text}"
-        )
-        self._execution_history.append({"role": "user", "content": focus_prompt})
-        self._execution_history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "Acknowledged. I will process pages within this semantic neighborhood, "
-                    "prioritizing dense cross-links and alias consolidation among these "
-                    "related nodes."
-                ),
-            },
-        )
-
-    def _trim_execution_history(self) -> None:
-        if len(self._execution_history) > MAX_EXECUTION_HISTORY_MESSAGES:
-            self._execution_history = self._execution_history[-MAX_EXECUTION_HISTORY_MESSAGES:]
-
-    def _append_execution_turn(self, prompt: str, response: str) -> None:
-        self._execution_history.append({"role": "user", "content": prompt})
-        self._execution_history.append({"role": "assistant", "content": response})
-        self._trim_execution_history()
-
-    def _completion_messages(
-        self,
-        *,
-        system_prompt: str,
-        prompt: str,
-        stateless: bool,
-    ) -> list[ChatMessage]:
-        """Build chat messages for one completion (Ermes history only when stateful)."""
-        if stateless:
-            self.reset_execution_history()
-            return [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ]
-        messages: list[ChatMessage] = [{"role": "system", "content": system_prompt}]
-        messages.extend(self._execution_history)
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
-    @staticmethod
-    def _extract_completion_usage(completion: object) -> dict[str, int]:
-        usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        usage_obj = getattr(completion, "usage", None)
-        if usage_obj is not None:
-            usage["prompt_tokens"] = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
-            usage["completion_tokens"] = int(getattr(usage_obj, "completion_tokens", 0) or 0)
-        return usage
-
-    def _log_completion_turn(
-        self,
-        *,
-        completion: object,
-        target_file: str,
-        operation: OperationType,
-        prompt: str,
-        response: str,
-        latency_seconds: float,
-        ok: bool = True,
-        error: str | None = None,
-    ) -> dict[str, int]:
-        """Record one structured LLM completion on the shared token logger."""
-        usage = self._extract_completion_usage(completion)
-        self.token_logger.log_turn(
-            target_file=target_file,
-            operation=operation,
-            prompt_tokens=usage["prompt_tokens"],
-            completion_tokens=usage["completion_tokens"],
-            prompt=prompt,
-            response=response,
-            latency_seconds=latency_seconds,
-            model=self.model,
-            ok=ok,
-            error=error,
-        )
-        return usage
-
-    def _compress_history_via_llm(self, compression_prompt: str) -> str:
-        """Send isolated history to the local LLM for epistemic condensation."""
-        started = time.perf_counter()
-        response = self._raw_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
-                {"role": "user", "content": compression_prompt},
-            ],
-            temperature=0.1,
-        )
-        content = _extract_first_choice_content(response)
-        text = content
-        self._log_completion_turn(
-            completion=response,
-            target_file="execution_history",
-            operation="Context Compression",
-            prompt=compression_prompt,
-            response=text,
-            latency_seconds=time.perf_counter() - started,
-        )
-        return text
-
-    def _apply_thermal_after_completion(self, profile: ThermalProfile) -> None:
-        cfg = self._active_lint_config()
-        stop_event = self.thermal_stop_event
-        if profile == "bootstrap":
-            apply_thermal_pause_bootstrap(cfg, stop_event=stop_event)
-        elif profile == "cognitive":
-            apply_thermal_pause_cognitive(cfg, stop_event=stop_event)
-
-    def _raw_json_completion(
-        self,
-        messages: list[ChatMessage],
-        *,
-        thermal_profile: ThermalProfile = "cognitive",
-    ) -> tuple[str, object]:
-        """Request a raw JSON completion when instructor parsing fails."""
-        _ = thermal_profile
-        api_messages = cast(Any, messages)
-        try:
-            response = self._raw_client.chat.completions.create(
-                model=self.model,
-                messages=api_messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-        except Exception:  # noqa: BLE001 - local servers may reject response_format
-            response = self._raw_client.chat.completions.create(
-                model=self.model,
-                messages=api_messages,
-                temperature=0.1,
-            )
-        content = _extract_first_choice_content(response)
-        return content, response
-
-    def _finalize_structured_completion[T: BaseModel](
-        self,
-        *,
-        parsed: T,
-        completion: object,
-        prompt: str,
-        started: float,
-        telemetry_target: str | None,
-        telemetry_operation: OperationType | None,
-        log_tokens: bool,
-    ) -> tuple[T, object]:
-        if log_tokens and telemetry_target and telemetry_operation:
-            self._log_completion_turn(
-                completion=completion,
-                target_file=telemetry_target,
-                operation=telemetry_operation,
-                prompt=prompt,
-                response=parsed.model_dump_json(),
-                latency_seconds=time.perf_counter() - started,
-            )
-        return parsed, completion
-
-    def _completion_with_structured_output[T: BaseModel](
-        self,
-        *,
-        prompt: str,
-        response_model: type[T],
-        system_prompt: str,
-        stateless: bool = False,
-        telemetry_target: str | None = None,
-        telemetry_operation: OperationType | None = None,
-        log_tokens: bool = True,
-        thermal_profile: ThermalProfile = "cognitive",
-    ) -> tuple[T, object]:
-        """Call the local OpenAI-compatible server with JSON schema mode.
-
-        Falls back to raw JSON completion when instructor parsing fails.
-        """
-        started = time.perf_counter()
-        self.refresh_config()
-        config = self._active_lint_config()
-        messages = self._completion_messages(
-            system_prompt=system_prompt,
-            prompt=prompt,
-            stateless=stateless,
-        )
-        use_history = not stateless
-        use_compression = config.context_compression and not stateless
-        compression_event = None
-        if use_compression:
-            messages, compression_event = condense_messages(
-                messages,
-                trigger=config.compression_trigger,
-                target=config.compression_target,
-                compress_fn=self._compress_history_via_llm,
-                warn_fn=lambda msg: self.token_logger.log_compression_warning(
-                    msg,
-                    model=self.model,
-                ),
-            )
-            if compression_event is not None:
-                self._execution_history = extract_persisted_history(messages)
-                self.token_logger.log_compression_event(
-                    initial_tokens=compression_event.initial_tokens,
-                    post_tokens=compression_event.post_tokens,
-                    latency_seconds=compression_event.latency_seconds,
-                    compression_ratio=compression_event.compression_ratio,
-                    messages_before=compression_event.messages_before,
-                    messages_after=compression_event.messages_after,
-                    model=self.model,
-                )
-
-        errors: list[str] = []
-        for mode in _instructor_modes_to_try():
-            client = instructor.from_openai(self._raw_client, mode=mode)
-            try:
-                parsed, completion = client.chat.completions.create_with_completion(
-                    model=self.model,
-                    messages=messages,
-                    response_model=response_model,
-                )
-                if use_history:
-                    self._append_execution_turn(prompt, parsed.model_dump_json())
-                if stateless:
-                    self.reset_execution_history()
-                finalized = self._finalize_structured_completion(
-                    parsed=parsed,
-                    completion=completion,
-                    prompt=prompt,
-                    started=started,
-                    telemetry_target=telemetry_target,
-                    telemetry_operation=telemetry_operation,
-                    log_tokens=log_tokens,
-                )
-                self._apply_thermal_after_completion(thermal_profile)
-                return finalized
-            except Exception as exc:  # noqa: BLE001 - try next instructor mode
-                errors.append(f"{mode.name}: {exc}")
-        try:
-            raw_text, completion = self._raw_json_completion(
-                messages,
-                thermal_profile=thermal_profile,
-            )
-            parsed = parse_llm_json(raw_text, response_model)
-            if use_history:
-                self._append_execution_turn(prompt, parsed.model_dump_json())
-            if stateless:
-                self.reset_execution_history()
-            finalized = self._finalize_structured_completion(
-                parsed=parsed,
-                completion=completion,
-                prompt=prompt,
-                started=started,
-                telemetry_target=telemetry_target,
-                telemetry_operation=telemetry_operation,
-                log_tokens=log_tokens,
-            )
-            self._apply_thermal_after_completion(thermal_profile)
-            return finalized
-        except Exception as exc:  # noqa: BLE001 - include lenient repair in failure chain
-            errors.append(f"lenient-repair: {exc}")
-        msg = "Structured output failed for all instructor modes: " + "; ".join(errors)
-        raise RuntimeError(msg)
-
-    def generate_contextual_seed(
-        self,
-        *,
-        link_title: str,
-        source_page: str,
-        context: str,
-        max_words: int,
-    ) -> ContextualSeedResult:
-        prompt = build_cache_aligned_prompt(
-            content=context,
-            task_instruction=(
-                "Task: write a contextual seed definition for a dangling wikilink.\n"
-                f"Target link: [[{link_title}]]\n"
-                f"Source page: [[{source_page}]]\n"
-                f"Max length: {max_words} words."
-            ),
-        )
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=ContextualSeedResult,
-            system_prompt=finalize_system_prompt(
-                "You seed new Logseq pages from local context. Return JSON only. "
-                "Write a neutral, concise definition without markdown headings."
-            ),
-            telemetry_target=source_page,
-            telemetry_operation="Semantic Linting",
-        )
-        return result
-
-    def assess_entity_overlap(
-        self,
-        *,
-        title_a: str,
-        title_b: str,
-        context: str,
-    ) -> EntityOverlapResult:
-        prompt = build_cache_aligned_prompt(
-            content=context[:3000],
-            task_instruction=(
-                "Task: decide whether two page titles refer to the same concept.\n"
-                f"Title A: {title_a}\n"
-                f"Title B: {title_b}"
-            ),
-        )
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=EntityOverlapResult,
-            system_prompt=finalize_system_prompt(
-                "You are an entity consolidation linter for Logseq. Prefer one canonical title "
-                "and register the other as alias. Never suggest merging file contents."
-            ),
-            telemetry_target=title_a,
-            telemetry_operation="Semantic Linting",
-        )
-        return result
-
-    def infer_tag_properties(
-        self,
-        *,
-        tag: str,
-        required_keys: list[str],
-        page_title: str,
-        content: str,
-    ) -> InferredPropertiesResult:
-        keys = ", ".join(required_keys)
-        prompt = build_cache_aligned_prompt(
-            content=content[:5000],
-            task_instruction=(
-                "Task: infer Logseq block property values from page context.\n"
-                f"Page: [[{page_title}]]\n"
-                f"Tag: #{tag}\n"
-                f"Required property keys: {keys}"
-            ),
-        )
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=InferredPropertiesResult,
-            system_prompt=finalize_system_prompt(
-                "Infer Logseq block properties from context. Use empty string when unknown. "
-                "Return JSON with a properties object."
-            ),
-            telemetry_target=page_title,
-            telemetry_operation="Semantic Linting",
-        )
-        return result
-
-    def classify_marpa_page(
-        self,
-        *,
-        page_title: str,
-        content: str,
-        namespace_hint: str | None,
-        page_path: Path | None = None,
-        graph_root: Path | None = None,
-    ) -> MarpaClassificationResult:
-        prompt = build_marpa_classify_user_prompt(
-            page_title,
-            content,
-            namespace_hint=namespace_hint,
-        )
-        config = load_plumber_lint_config()
-        if config.semantic_routing and page_path is not None and graph_root is not None:
-            key = semantic_cache_key(page_path, "marpa_classify")
-            cached = cache_get(graph_root, "marpa", key)
-            if cached is not None:
-                return MarpaClassificationResult.model_validate(cached)
-
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=MarpaClassificationResult,
-            system_prompt=build_marpa_classify_system_prompt(),
-            telemetry_target=page_title,
-            telemetry_operation="Semantic Linting",
-        )
-        if config.semantic_routing and page_path is not None and graph_root is not None:
-            key = semantic_cache_key(page_path, "marpa_classify")
-            cache_put(graph_root, "marpa", key, result.model_dump())
-        return result
+class InstructorLLMClient(_BaseInstructorLLMClient):
+    """Daemon LLM client; adds semantic ``index_page`` with alias normalization."""
 
     def index_page(
         self,
@@ -1963,27 +1464,39 @@ class InstructorLLMClient:
         alias_index: AliasIndex | None = None,
         enable_semantic_routing: bool = False,
         llm_context: str | None = None,
+        prompt_session: PagePromptSession | None = None,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
         config = load_plumber_lint_config()
-        if llm_context is None and graph_root is not None:
+        session = prompt_session
+        if session is None and graph_root is not None:
+            session = build_page_prompt_session(
+                graph_root,
+                page_title,
+                content,
+                config=config,
+                stable_system=build_semantic_lint_system_prompt(),
+                page_path=page_path,
+                alias_index=alias_index,
+            )
+        elif session is None and llm_context is not None:
+            session = None
+        if session is None and llm_context is None and graph_root is not None:
             llm_context, _ = prepare_llm_context_payload(
                 graph_root,
                 page_title,
                 content,
                 config=config,
             )
-        index_body = llm_context if llm_context is not None else content
-        alias_context = (
-            format_alias_index_for_prompt(alias_index, page_content=content)
-            if alias_index is not None
-            else None
-        )
         prompt = _build_index_prompt(
             page_title,
             content,
-            alias_index_context=alias_context,
-            llm_body=index_body,
+            llm_body=llm_context,
+            session=session,
         )
+        kv_prefix_hash: str | None = None
+        if session is not None:
+            session.frozen.verify_unchanged()
+            kv_prefix_hash = session.prefix_sha256
         started = time.perf_counter()
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         routing_enabled = enable_semantic_routing and config.semantic_routing
@@ -1999,12 +1512,16 @@ class InstructorLLMClient:
             result, completion = self._completion_with_structured_output(
                 prompt=prompt,
                 response_model=SemanticIndexResult,
-                system_prompt=_build_semantic_lint_system_prompt(
-                    alias_index_context=alias_context,
+                system_prompt=(
+                    session.stable_system
+                    if session is not None
+                    else build_semantic_lint_system_prompt()
                 ),
+                stateless=True,
                 telemetry_target=page_title,
                 telemetry_operation="Concept Indexing",
                 log_tokens=False,
+                kv_prefix_hash=kv_prefix_hash,
             )
             result = _normalize_index_result_aliases(result, alias_index)
             latency = time.perf_counter() - started
@@ -2024,6 +1541,7 @@ class InstructorLLMClient:
                 response=result.model_dump_json(),
                 latency_seconds=latency,
                 model=self.model,
+                kv_prefix_hash=kv_prefix_hash,
             )
             if routing_enabled and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
@@ -2044,58 +1562,6 @@ class InstructorLLMClient:
                 error=str(exc),
             )
             raise
-
-    def harvest_page_summary(
-        self,
-        page_title: str,
-        content: str,
-        *,
-        page_path: Path | None = None,
-        graph_root: Path | None = None,
-    ) -> BootstrapSummaryResult:
-        """Extract a one-sentence summary for bootstrap harvesting."""
-        prompt = (
-            "Task: extract a concise one-sentence summary for catalog indexing.\n"
-            "Return JSON with summary, suggested_tags (0-5 tags), and optional MARPA domain "
-            "(mappa|area|risorsa|progetto|archivio) when clearly inferable.\n\n"
-            f"Page title: {page_title}\n\n"
-            f"Content:\n{content[:6000]}"
-        )
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=BootstrapSummaryResult,
-            system_prompt=finalize_system_prompt(
-                "You are Matryca Plumber's bootstrap harvester. Return JSON only. "
-                "Write one crisp English sentence summarizing the page."
-            ),
-            stateless=True,
-            telemetry_target=page_title,
-            telemetry_operation="Concept Indexing",
-            thermal_profile="none",
-        )
-        _ = (page_path, graph_root)
-        return result
-
-    def generate_graph_insights(
-        self,
-        *,
-        metrics_json: str,
-        graph_root: Path,
-    ) -> GraphInsightsLLMResult:
-        """Generate structured graph diagnostics from topology aggregates."""
-        prompt = (
-            "Task: produce a panoramic ontology report and non-destructive cleanup suggestions "
-            "from the structural metrics below.\n\n"
-            f"Topology metrics JSON:\n{metrics_json[:12000]}"
-        )
-        result, _ = self._completion_with_structured_output(
-            prompt=prompt,
-            response_model=GraphInsightsLLMResult,
-            system_prompt=INSIGHTS_SYSTEM_PROMPT,
-            telemetry_target=str(graph_root),
-            telemetry_operation="Concept Indexing",
-        )
-        return result
 
 
 @dataclass
@@ -2261,26 +1727,6 @@ def prune_stale_daemon_file_entries(state: DaemonState, graph_root: Path) -> int
     for key in ghosts:
         del state.files[key]
     return len(ghosts)
-
-
-def _resolve_instructor_mode(name: str) -> instructor.Mode:
-    mapping = {
-        "JSON": instructor.Mode.JSON,
-        "JSON_SCHEMA": instructor.Mode.JSON_SCHEMA,
-        "MD_JSON": instructor.Mode.MD_JSON,
-        "TOOLS": instructor.Mode.TOOLS,
-    }
-    return mapping.get(name.strip().upper(), instructor.Mode.JSON_SCHEMA)
-
-
-def _instructor_modes_to_try() -> list[instructor.Mode]:
-    primary = os.environ.get("MATRYCA_LM_INSTRUCTOR_MODE", "JSON_SCHEMA")
-    modes = [_resolve_instructor_mode(primary)]
-    fallback = os.environ.get("MATRYCA_LM_INSTRUCTOR_FALLBACK", "MD_JSON")
-    fallback_mode = _resolve_instructor_mode(fallback)
-    if fallback_mode not in modes:
-        modes.append(fallback_mode)
-    return modes
 
 
 class MaintenanceDaemon:
@@ -2493,7 +1939,7 @@ class MaintenanceDaemon:
             if harvest_status is not None:
                 upsert_bootstrap_recent(checkpoint, key, harvest_status)
             record_bootstrap_harvest_impact(checkpoint, harvest_status)
-            if scanned % 5 == 0:
+            if scanned % bootstrap_checkpoint_every() == 0:
                 checkpoint.status = "running"
                 save_daemon_state(self.graph_root, checkpoint)
 
@@ -2569,6 +2015,15 @@ class MaintenanceDaemon:
 
         self.bootstrap_complete = True
         self._persist_bootstrap_complete(checkpoint)
+        try:
+            load_or_compute_semantic_clusters(self.graph_root)
+        except Exception as exc:  # noqa: BLE001 - deferral must not block daemon
+            logger.warning("Semantic cluster precompute after bootstrap skipped: {}", exc)
+        try:
+            release_phase1_memory(self.graph_root)
+            log_snapshot(label="post_bootstrap_teardown")
+        except Exception as exc:  # noqa: BLE001 - teardown must not block Phase 2
+            logger.warning("Post-bootstrap memory release skipped: {}", exc)
         self._run_phase2_graph_insights()
 
     def _run_phase2_graph_insights(self) -> None:
@@ -2795,8 +2250,9 @@ class MaintenanceDaemon:
             baseline_mtime = occ_snapshot(path)
             content = path.read_text(encoding="utf-8", errors="replace")
             cognitive_outcome: CognitiveLintOutcome | None = None
+            prompt_session: PagePromptSession | None = None
             if self.bootstrap_complete and lint_config.any_enabled:
-                cognitive_outcome = run_cognitive_lint_pipeline(
+                cognitive_outcome, prompt_session = run_cognitive_lint_pipeline(
                     self.graph_root,
                     path,
                     title,
@@ -2848,6 +2304,16 @@ class MaintenanceDaemon:
                     prior=prior_rec,
                 )
                 return False
+            if prompt_session is None and self.graph_root is not None:
+                prompt_session = build_page_prompt_session(
+                    self.graph_root,
+                    title,
+                    content,
+                    config=lint_config,
+                    stable_system=build_semantic_lint_system_prompt(),
+                    page_path=path,
+                    alias_index=alias_index,
+                )
             result, usage = self.llm_client.index_page(
                 title,
                 content,
@@ -2855,6 +2321,7 @@ class MaintenanceDaemon:
                 graph_root=self.graph_root,
                 alias_index=alias_index,
                 enable_semantic_routing=enable_semantic_routing,
+                prompt_session=prompt_session,
             )
             llm_called_from_usage = (
                 int(usage.get("prompt_tokens", 0) or 0)
@@ -3101,6 +2568,10 @@ class MaintenanceDaemon:
         if not self._stop_requested:
             state.status = "idle"
         save_daemon_state(self.graph_root, state)
+        maybe_release_after_cycle(
+            llm_turns=llm_turns_this_cycle,
+            graph_root=self.graph_root,
+        )
         return state
 
     def run_forever(self) -> None:
@@ -3129,6 +2600,7 @@ class MaintenanceDaemon:
         self._hydrate_token_logger_from_state(state)
         state.status = "running"
         save_daemon_state(self.graph_root, state)
+        log_snapshot(label="daemon_start")
 
         try:
             self.run_bootstrap_pipeline(state)
@@ -3207,9 +2679,11 @@ def start_daemon_foreground(graph_root: Path | None = None) -> None:
     root = graph_root or resolve_graph_root()
     prepare_matryca_runtime(graph_root=root, wiki_config=load_matryca_wiki_config())
     config = load_plumber_lint_config()
-    if config.low_priority_mode and hasattr(os, "nice"):
-        with contextlib.suppress(OSError):
-            os.nice(19)
+    sandbox = resolve_cpu_sandbox_config(config)
+    if sandbox.enabled:
+        apply_cpu_sandbox(sandbox)
+    else:
+        apply_plumber_priority(config)
     lock_fd = _try_acquire_daemon_process_lock(root)
     if lock_fd is None:
         logger.error(
@@ -3220,6 +2694,8 @@ def start_daemon_foreground(graph_root: Path | None = None) -> None:
     global _daemon_process_lock_fd
     _daemon_process_lock_fd = lock_fd
     daemon = MaintenanceDaemon(root)
+    if isinstance(daemon.llm_client, InstructorLLMClient):
+        daemon.llm_client.probe_backend()
     daemon.run_forever()
 
 
@@ -3287,7 +2763,9 @@ __all__ = [
     "InstructorLLMClient",
     "LLMClient",
     "LLMResponseError",
+    "StructuredOutputExhaustedError",
     "LintType",
+    "ThermalProfile",
     "MaintenanceDaemon",
     "PID_FILENAME",
     "DAEMON_LOCK_FILENAME",

@@ -15,6 +15,7 @@ from loguru import logger
 from .alias_index import build_alias_index, iter_alias_source_paths, page_title_from_path
 from .json_flock import cross_process_json_flock
 from .markdown_blocks import atomic_write_bytes
+from .markdown_io import MmapTextView, read_graph_page_text
 
 CATALOG_FILENAME = "master_catalog.json"
 CATALOG_VERSION = 1
@@ -241,6 +242,14 @@ def clear_master_catalog_cache(graph_root: Path | None = None) -> None:
         _loaded.pop(key, None)
 
 
+def unload_master_catalog(graph_root: Path | str) -> bool:
+    """Release in-memory catalog for one graph (Phase 1 teardown / RAM budget)."""
+    key = str(Path(graph_root).expanduser().resolve(strict=False))
+    with _lock:
+        return _loaded.pop(key, None) is not None
+
+
+
 def _normalize_domain(raw: str) -> str:
     value = raw.strip().lower()
     return value if value in _MARPA_DOMAINS else ""
@@ -253,6 +262,13 @@ def _parse_tags(raw: str) -> list[str]:
         if token:
             tags.append(token.lower())
     return tags
+
+
+def extract_catalog_fields_from_mmap(view: MmapTextView) -> CatalogEntry | None:
+    """Fast regex read of semantic index metadata from a mmap view."""
+    if view.search(SEMANTIC_INDEX_HEADING) is None:
+        return None
+    return extract_catalog_fields_from_content(view.decode_utf8())
 
 
 def extract_catalog_fields_from_content(content: str) -> CatalogEntry | None:
@@ -290,7 +306,7 @@ def entry_from_page_path(graph_root: Path, page_path: Path) -> CatalogEntry | No
     if not page_path.is_file():
         return None
     try:
-        content = page_path.read_text(encoding="utf-8", errors="replace")
+        content = read_graph_page_text(page_path, graph_root, errors="replace")
         mtime = int(page_path.stat().st_mtime)
     except OSError:
         return None
@@ -422,6 +438,7 @@ __all__ = [
     "is_bootstrap_catalog_complete",
     "list_stale_page_paths",
     "load_master_catalog",
+    "unload_master_catalog",
     "master_index_page_path",
     "write_master_index_page",
 ]

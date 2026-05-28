@@ -63,9 +63,13 @@ or `memory_path` in `matryca-wiki.yml`. Bootstrap will create that path and seed
 
 ### 3. Graph-local working directories (when a valid graph is configured)
 
-| Directory | Purpose |
-|-----------|---------|
-| `.matryca_semantic_cache/` | `master_catalog.json`, semantic clusters, LLM routing cache — excluded from alias/catalog page scans |
+| Directory / file | Purpose |
+|------------------|---------|
+| `.matryca_semantic_cache/` | Working cache root — excluded from alias/catalog page scans |
+| `.matryca_semantic_cache/master_catalog.json` | Phase 1 catalog rows (summaries, tags, mtimes) |
+| `.matryca_semantic_cache/backlink_counts.json` | Persisted incoming wikilink counts (v1.8 — avoids full-graph rescans) |
+| `.matryca_semantic_cache/semantic_clusters.json` | Louvain neighborhoods for Phase 2 cluster cycles |
+| `.matryca_semantic_cache/*.json` (hash names) | Per-operation semantic inference cache (TTL); **not** deleted when reserved files above are present |
 | `templates/` (or `templates_subdir` from wiki YAML) | Template Markdown for `read_logseq_template` |
 
 **Rationale:** Cache and templates must exist before the first catalog save or template read; creating them at startup avoids racey `mkdir` scattered through writers.
@@ -98,3 +102,4 @@ This follows *create on first meaningful write* for stateful JSON so checkpoints
 
 - [`l1-l2-routing.md`](l1-l2-routing.md) — How L1 content is loaded into agent context vs L2 graph reads.
 - [`ingest.md`](ingest.md) — Search → Scan → Update after bootstrap has prepared the filesystem.
+- [`llm-performance.md`](llm-performance.md) — v1.8 KV-cache layout, memory teardown, cooperative harvest.

@@ -59,8 +59,17 @@ class StubLLM:
         graph_root: Path | None = None,
         alias_index: object | None = None,
         enable_semantic_routing: bool = False,
+        llm_context: str | None = None,
+        prompt_session: object | None = None,
     ) -> tuple[SemanticIndexResult, dict[str, int]]:
-        _ = (page_path, graph_root, alias_index, enable_semantic_routing)
+        _ = (
+            page_path,
+            graph_root,
+            alias_index,
+            enable_semantic_routing,
+            llm_context,
+            prompt_session,
+        )
         corrections: list[SemanticLintCorrection] = []
         if BLOCK_UUID in content and "Redis" in content:
             corrections.append(
@@ -96,8 +105,9 @@ class StubLLM:
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        task_instruction: str | None = None,
     ) -> BootstrapSummaryResult:
-        _ = (content, page_path, graph_root)
+        _ = (content, page_path, graph_root, task_instruction)
         return BootstrapSummaryResult(summary=f"Summary for {page_title}", suggested_tags=["test"])
 
     def generate_graph_insights(
@@ -931,11 +941,20 @@ def test_instructor_client_reset_execution_history() -> None:
 def test_completion_with_structured_output_uses_lenient_json_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.agent.llm_client import GrammarCapability, LlmBackendProfile
+
     client = InstructorLLMClient(base_url="http://localhost:1234/v1")
     malformed = (
         '{"ontology_report": "940 pages mapped.", '
         '"cleanup_suggestions": ["Review orphan cluster"]} { "reason": null }'
     )
+    profile = LlmBackendProfile(
+        base_url=client.base_url,
+        model=client.model,
+        grammar_capability=GrammarCapability.LEGACY_TEXT,
+        probed_at=0.0,
+    )
+    monkeypatch.setattr(client._structured_engine, "probe_backend", lambda **_: profile)
 
     class FakeCompletions:
         def create_with_completion(self, **_kwargs: object) -> tuple[object, object]:
@@ -945,7 +964,7 @@ def test_completion_with_structured_output_uses_lenient_json_repair(
         chat = type("Chat", (), {"completions": FakeCompletions()})()
 
     monkeypatch.setattr(
-        "src.agent.maintenance_daemon.instructor.from_openai",
+        "src.agent.llm_client.instructor.from_openai",
         lambda *_args, **_kwargs: FakeClient(),
     )
     monkeypatch.setattr(
@@ -1209,6 +1228,8 @@ def test_run_cycle_disables_semantic_routing_until_bootstrap_complete(
             graph_root: Path | None = None,
             alias_index: object | None = None,
             enable_semantic_routing: bool = False,
+            llm_context: str | None = None,
+            prompt_session: object | None = None,
         ) -> tuple[SemanticIndexResult, dict[str, int]]:
             observed["enable_semantic_routing"] = enable_semantic_routing
             return super().index_page(
@@ -1218,6 +1239,8 @@ def test_run_cycle_disables_semantic_routing_until_bootstrap_complete(
                 graph_root=graph_root,
                 alias_index=alias_index,
                 enable_semantic_routing=enable_semantic_routing,
+                llm_context=llm_context,
+                prompt_session=prompt_session,
             )
 
     _write_page(graph_root, "Probe", "- Probe content\n")
@@ -1433,18 +1456,30 @@ def test_bootstrap_progress_persists_live_token_counters(
         "src.agent.maintenance_daemon.run_bootstrap_harvest",
         _fake_harvest,
     )
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.is_bootstrap_catalog_complete",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(
+        "src.agent.maintenance_daemon.bootstrap_checkpoint_every",
+        lambda: 25,
+    )
+    master_index = graph_root / "pages" / "Matryca Master Index.md"
+    master_index.parent.mkdir(parents=True, exist_ok=True)
+    master_index.write_text("# index\n", encoding="utf-8")
 
     daemon = MaintenanceDaemon(graph_root, token_logger=logger, llm_client=StubLLM())
     assert daemon.bootstrap_complete is False
     daemon.run_bootstrap_pipeline()
 
     loaded = load_daemon_state(graph_root)
-    assert loaded.bootstrap_scanned == 25
-    assert loaded.bootstrap_total == 100
+    assert loaded.bootstrap_complete is True
+    # Progress counters reset when bootstrap completes; token totals persist.
+    assert loaded.bootstrap_scanned == 0
+    assert loaded.bootstrap_total == 0
     assert loaded.session_prompt_tokens == 77
     assert loaded.session_completion_tokens == 22
     assert loaded.page_summaries_created == 1
-    assert any(key.endswith("Sample.md") for key in loaded.bootstrap_recent)
 
 
 def test_run_cycle_increments_phase2_turns_and_persists_tokens(
@@ -1463,6 +1498,8 @@ def test_run_cycle_increments_phase2_turns_and_persists_tokens(
             graph_root: Path | None = None,
             alias_index: object | None = None,
             enable_semantic_routing: bool = False,
+            llm_context: str | None = None,
+            prompt_session: object | None = None,
         ) -> tuple[SemanticIndexResult, dict[str, int]]:
             result, _usage = super().index_page(
                 page_title,
@@ -1471,6 +1508,8 @@ def test_run_cycle_increments_phase2_turns_and_persists_tokens(
                 graph_root=graph_root,
                 alias_index=alias_index,
                 enable_semantic_routing=enable_semantic_routing,
+                llm_context=llm_context,
+                prompt_session=prompt_session,
             )
             return result, {"prompt_tokens": 8, "completion_tokens": 2}
 
@@ -1568,8 +1607,17 @@ def test_structured_completion_logs_tokens_to_shared_logger(
     class FakeClient:
         chat = type("Chat", (), {"completions": FakeCompletions()})()
 
+    from src.agent.llm_client import GrammarCapability, LlmBackendProfile
+
+    profile = LlmBackendProfile(
+        base_url=client.base_url,
+        model=client.model,
+        grammar_capability=GrammarCapability.LEGACY_TEXT,
+        probed_at=0.0,
+    )
+    monkeypatch.setattr(client._structured_engine, "probe_backend", lambda **_: profile)
     monkeypatch.setattr(
-        "src.agent.maintenance_daemon.instructor.from_openai",
+        "src.agent.llm_client.instructor.from_openai",
         lambda *_args, **_kwargs: FakeClient(),
     )
     client.assess_entity_overlap(title_a="Alpha", title_b="Beta", context="shared context")

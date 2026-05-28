@@ -25,6 +25,16 @@ def test_build_cache_aligned_prompt_puts_content_first() -> None:
     assert prompt.startswith("Page content:\n")
 
 
+def test_harvest_prompt_layout_content_before_task() -> None:
+    from src.agent.prompt_layout import build_cache_aligned_prompt
+
+    prompt = build_cache_aligned_prompt(
+        content="Body text for bootstrap",
+        task_instruction="Task: extract summary.\nPage title: Demo",
+    )
+    assert prompt.index("Body text") < prompt.index("Task: extract")
+
+
 def test_build_marpa_classify_user_prompt_is_cache_aligned() -> None:
     prompt = build_marpa_classify_user_prompt(
         "Demo",

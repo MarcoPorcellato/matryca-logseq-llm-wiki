@@ -21,6 +21,7 @@ Replace `X.Y.Z` with the semver you are shipping (no `v` prefix in `pyproject.to
 - [ ] Set `version = "X.Y.Z"` in `pyproject.toml`
 - [ ] Run `uv lock`
 - [ ] Run `make check` (or at minimum: `uv run pytest -q`, `uv run ruff check src tests`, `uv run mypy src tests`)
+- [ ] For performance-heavy releases (e.g. **1.8.x**): optionally run `make perf` (`pytest -m slow`) and note results in the GitHub release; see [`v1.8-OPTIMIZATION-PLAN.md`](v1.8-OPTIMIZATION-PLAN.md#verification-matrix)
 
 **Cursor shortcut:** ask the agent to *“prepare release vX.Y.Z”* (see [`.cursor/rules/05-release-preparation.mdc`](../.cursor/rules/05-release-preparation.mdc)).
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from ..llm_context_payload import prepare_llm_context_payload
+from ..page_prompt_session import PagePromptSession, build_page_prompt_session
 from ..plumber_config import PlumberLintConfig
 from ._shared import ModuleOutcome, is_journal_page_path
 from .auto_split import run_auto_split
@@ -56,20 +56,36 @@ def run_cognitive_lint_pipeline(
     *,
     llm: object,
     config: PlumberLintConfig,
-) -> CognitiveLintOutcome:
+    prompt_session: PagePromptSession | None = None,
+) -> tuple[CognitiveLintOutcome, PagePromptSession | None]:
     """Run enabled cognitive lint modules before the semantic index pass."""
     outcome = CognitiveLintOutcome()
     if not config.any_enabled:
-        return outcome
+        return outcome, prompt_session
 
     journal_page = is_journal_page_path(graph_root, page_path)
 
-    llm_context, _payload_source = prepare_llm_context_payload(
-        graph_root,
-        page_title,
-        content,
-        config=config,
-    )
+    from ..semantic_lint_prompts import build_semantic_lint_system_prompt
+
+    session = prompt_session
+    if session is None:
+        alias_index = None
+        try:
+            from ...graph.generational_cache import cached_build_alias_index
+
+            alias_index = cached_build_alias_index(graph_root)
+        except OSError:
+            alias_index = None
+        session = build_page_prompt_session(
+            graph_root,
+            page_title,
+            content,
+            config=config,
+            stable_system=build_semantic_lint_system_prompt(),
+            page_path=page_path,
+            alias_index=alias_index,
+        )
+    llm_context = session.stable_page_block
 
     if config.marpa_framework and not journal_page:
         _run_cognitive_module_safe(
@@ -150,7 +166,7 @@ def run_cognitive_lint_pipeline(
             outcome,
         )
 
-    return outcome
+    return outcome, session
 
 
 __all__ = ["CognitiveLintOutcome", "run_cognitive_lint_pipeline"]

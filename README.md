@@ -2,10 +2,10 @@
 
 **Developed by [Marco Porcellato](https://github.com/MarcoPorcellato) · [Matryca.ai](https://matryca.ai)** — open-source local-first maintenance daemon for Logseq OG. The product name is **Matryca Plumber** (not “Matryca” alone). See [`docs/BRANDING.md`](docs/BRANDING.md).
 
-> **v1.5 — Ironclad Release.** Agentic Knowledge Management for Logseq OG. An **enterprise-grade, local-first background AI daemon** with a real-time **Sovereign UI** control room, a **typed CLI**, and **direct Logseq Markdown AST** mutation (no Logseq HTTP API, no auxiliary database). The default experience is **autonomous**: the daemon and Python workers poll your graph, run structured local-LLM passes, and commit indexes and lint artifacts while you work or sleep. An **optional FastMCP stdio sidecar** exposes the same headless mutation plane to external clients (for example Claude Desktop) — same `graph_dispatch` contract, not a separate data path. Heavily inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). **100% native Logseq AST parity**, optimistic concurrency safety, versioned AI authorship stamping.
+> **v1.8 — Edge performance on Ironclad.** Agentic Knowledge Management for Logseq OG: **enterprise-grade, local-first background AI** with Sovereign UI, typed CLI, and direct Markdown AST mutation (no Logseq HTTP API). **v1.8** adds no new semantic features — only **Zero-Prefill** prompts (`PagePromptSession`), **adaptive structured output**, bounded RAM, and cooperative bootstrap I/O for **16 GB CPU-only laptops** and vaults up to **~10,000** pages. Optional FastMCP stdio reuses the same `graph_dispatch` contract. Inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). **100% native Logseq AST parity**, OCC, versioned AI authorship stamping.
 
 [![CI](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-453%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-550%2B%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
@@ -116,7 +116,7 @@ Matryca Plumber provisions missing runtime files automatically where possible (r
 
    **Matryca Plumber** (by Marco Porcellato · Matryca.ai) is built for **offline, CPU-only** use on a typical **16 GB RAM** machine — no cloud subscription or discrete GPU required. The **recommended and tested** model is **Gemma 4-E4b Instruct** — set the exact id `gemma-4-e4b-it` in Settings, then **Refresh models**. For CPU inference, prefer **GGUF** weights at **`Q4_K_M`** or **`Q5_K_M`**. We are actively testing additional open models to improve CPU-only, 16 GB setups; Gemma 4-E4b Instruct is our current default. Avoid large **MoE** models (e.g. Llama 4 Scout): full weights still require 60GB+ RAM.
 
-4. **First-run expectations** — **Phase 1** catalogs the entire graph (can take a long time on large vaults). **Phase 2** processes roughly one LLM-heavy page per poll interval by default.
+4. **First-run expectations** — **Phase 1** catalogs the entire graph (can take a long time on large vaults; v1.8 yields to the OS periodically during harvest). **Phase 2** processes roughly one LLM-heavy page per poll interval by default. After Phase 1, the daemon releases heavy in-memory indexes to keep RAM stable for long runs.
 
 **Live checks** (re-run anytime with **Re-run checks**):
 
@@ -137,7 +137,8 @@ Matryca Plumber provisions missing runtime files automatically where possible (r
 * 📐 **Exact Logseq AST Compliance:** True line-0 page frontmatter, block properties at +2 indent, and exact namespace encoding. Other tools break your graph; Matryca Plumber keeps it pristine.
 * 🔐 **Optimistic Concurrency Control:** It checks `st_mtime` before any AI inference. If you typed in Logseq while the AI was "thinking", Matryca Plumber aborts its write. **No silent data loss.**
 * 🪟 **Windows, macOS & Linux Support:** Runs safely in the background everywhere using a robust cross-platform lock (`.matryca_plumber_daemon.lock`).
-* ⚡ **Context Acceleration Shield:** Obliterates LLM prefill latency on 5,000+ block pages by using hierarchical summaries instead of raw megabyte-class text.
+* ⚡ **Context Acceleration Shield:** Shrinks megabyte-class pages to Phase 1 summaries or semantic skeletons before they reach the local LLM — essential on CPU-only hardware.
+* 🖥️ **Edge computing profile (v1.8):** KV-cache-aligned prompts (`PagePromptSession`), bounded RAM (BM25 postings-lite, semantic cache LRU, post-bootstrap teardown), and cooperative bootstrap I/O — tuned for **16 GB laptops** and vaults up to **~10,000** pages. See [docs/v1.8-OPTIMIZATION-PLAN.md](docs/v1.8-OPTIMIZATION-PLAN.md).
 
 ---
 
@@ -176,6 +177,25 @@ See [`docs/openspec/runtime-bootstrap.md`](docs/openspec/runtime-bootstrap.md) f
 
 *(See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for advanced thermal pacing, context compression, and deep linter settings. Copy the full template from `.env.example` — it documents UI auth, rate limits, graph allowlists, and log redaction.)*
 
+### Edge profile (large vaults / 16 GB RAM)
+
+Copy the **v1.8 Edge computing & performance** block from [`.env.example`](.env.example). Highlights:
+
+| Knob | Why |
+|------|-----|
+| `MATRYCA_BOOTSTRAP_YIELD_EVERY` | Keeps macOS/Windows responsive during Phase 1 file scans |
+| `MATRYCA_RAM_BUDGET_MB` | Logs when daemon RSS exceeds a soft cap |
+| `MATRYCA_BM25_MODE=ondemand` | Trade query latency for lower steady-state RAM |
+| `MATRYCA_LLM_CLUSTER_HISTORY=false` | Shorter Ermes history — better KV reuse in cluster mode |
+| `MATRYCA_CPU_SANDBOX=true` | Pin Plumber to idle cores; pair with manual LLM core mask |
+| `MATRYCA_GRAPH_READ_MMAP=true` | Kernel-paged reads during Phase 1 regex catalog path |
+
+Install CPU affinity support: `uv sync --extra edge` or `pip install matryca-plumber[edge]` (`psutil`).
+
+Deep dive: [docs/v1.8-OPTIMIZATION-PLAN.md](docs/v1.8-OPTIMIZATION-PLAN.md) · [docs/v1.8-SOFTWARE-EDGE-PLAN.md](docs/v1.8-SOFTWARE-EDGE-PLAN.md) · [docs/openspec/llm-performance.md](docs/openspec/llm-performance.md)
+
+**Load testing:** `uv run python scripts/gen_synthetic_graph.py /path/to/graph --count 1000` · **Slow CI:** `make perf`
+
 ---
 
 ## 🧑‍💻 Developer Setup
@@ -190,8 +210,11 @@ make install
 # Build the React frontend
 cd frontend && npm install && npm run build && cd ..
 
-# Run tests (453 passing, 0 Mypy strict issues)
+# Run tests (550+ passing, Mypy strict)
 make check
+
+# Optional: slow memory / harvest soak tests
+make perf
 ```
 
 ---
@@ -201,7 +224,10 @@ make check
 | Document | Description |
 |----------|-------------|
 | [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md) | Agent discipline, `made-by::` authorship, OCC rules. |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Data planes, Plumber lifecycle, RMW locking rationale. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Data planes, Plumber lifecycle, RMW locking, v1.8 edge performance. |
+| [`docs/v1.8-OPTIMIZATION-PLAN.md`](docs/v1.8-OPTIMIZATION-PLAN.md) | v1.8 scope, env vars, load testing. |
+| [`docs/v1.8-SOFTWARE-EDGE-PLAN.md`](docs/v1.8-SOFTWARE-EDGE-PLAN.md) | CPU sandbox, frozen KV prefix, adaptive LLM, mmap reads. |
+| [`docs/openspec/llm-performance.md`](docs/openspec/llm-performance.md) | LLM prompt layout, memory, and I/O contracts. |
 | [`docs/BRANDING.md`](docs/BRANDING.md) | Product name (**Matryca Plumber**), Matryca.ai attribution, writing rules. |
 | [`docs/openspec/runtime-bootstrap.md`](docs/openspec/runtime-bootstrap.md) | Startup provisioning: logs, L1, cache, wiki YAML. |
 | [`docs/openspec/l1-l2-routing.md`](docs/openspec/l1-l2-routing.md) | L1 memory vs L2 graph routing for agents. |

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..agent.plumber_config import PlumberLintConfig, apply_thermal_pause_bootstrap
 from ..agent.plumber_llm import BootstrapSummaryResult, HarvestLLM
+from ..agent.prompt_layout import build_cache_aligned_prompt
 from .bootstrap_stop import BootstrapHarvestStopped
 
 _ROOT_BULLET = re.compile(r"^[-*+]\s+")
@@ -79,13 +80,8 @@ def chunk_outliner_content(content: str, max_chunk_chars: int = 15000) -> list[s
     return chunks
 
 
-def _build_reduce_content(page_title: str, partials: list[BootstrapSummaryResult]) -> str:
-    lines = [
-        "MapReduce consolidation task: synthesize the following section summaries",
-        f"into a single cohesive one-sentence summary for the entire page '{page_title}',",
-        "and merge all discovered tags into a clean unique JSON array.",
-        "",
-    ]
+def _build_reduce_stable_block(partials: list[BootstrapSummaryResult]) -> str:
+    lines: list[str] = []
     for index, partial in enumerate(partials, start=1):
         lines.append(f"Section {index} summary: {partial.summary.strip()}")
         if partial.suggested_tags:
@@ -94,7 +90,27 @@ def _build_reduce_content(page_title: str, partials: list[BootstrapSummaryResult
         if partial.domain:
             lines.append(f"Section {index} domain hint: {partial.domain}")
         lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(lines).rstrip()
+
+
+def _build_reduce_task(page_title: str) -> str:
+    return (
+        "MapReduce consolidation task: synthesize the section summaries above "
+        f"into a single cohesive one-sentence summary for the entire page '{page_title}', "
+        "and merge all discovered tags into a clean unique JSON array.\n"
+        f"Page title: {page_title}"
+    )
+
+
+def build_mapreduce_reduce_prompt(
+    page_title: str,
+    partials: list[BootstrapSummaryResult],
+) -> str:
+    """Cache-aligned reduce pass: stable partial summaries first, task last."""
+    return build_cache_aligned_prompt(
+        content=_build_reduce_stable_block(partials),
+        task_instruction=_build_reduce_task(page_title),
+    )
 
 
 def mapreduce_harvest_page_summary(
@@ -109,7 +125,11 @@ def mapreduce_harvest_page_summary(
 ) -> BootstrapSummaryResult:
     """Harvest a page summary via structural MapReduce when content exceeds the trigger."""
 
-    def _harvest_turn(chunk_text: str) -> BootstrapSummaryResult:
+    def _harvest_turn(
+        chunk_text: str,
+        *,
+        task_instruction: str | None = None,
+    ) -> BootstrapSummaryResult:
         if stop_event is not None and stop_event.is_set():
             raise BootstrapHarvestStopped
         result = llm.harvest_page_summary(
@@ -117,6 +137,7 @@ def mapreduce_harvest_page_summary(
             chunk_text,
             page_path=page_path,
             graph_root=graph_root,
+            task_instruction=task_instruction,
         )
         apply_thermal_pause_bootstrap(config, stop_event=stop_event)
         return result
@@ -135,8 +156,10 @@ def mapreduce_harvest_page_summary(
             reset_history()
         partials.append(partial)
 
-    reduce_content = _build_reduce_content(page_title, partials)
-    consolidated = _harvest_turn(reduce_content)
+    consolidated = _harvest_turn(
+        _build_reduce_stable_block(partials),
+        task_instruction=_build_reduce_task(page_title),
+    )
     reset_history = getattr(llm, "reset_execution_history", None)
     if reset_history is not None:
         reset_history()
@@ -168,6 +191,7 @@ def mapreduce_harvest_page_summary(
 
 
 __all__ = [
+    "build_mapreduce_reduce_prompt",
     "chunk_outliner_content",
     "mapreduce_harvest_page_summary",
 ]

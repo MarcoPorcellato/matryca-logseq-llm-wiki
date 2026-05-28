@@ -49,7 +49,7 @@ pages/
 LOGSEQ copy test LLM/
 
 # --- 🤖 Output AI & Tooling ---
-repomix-output.xml
+# repomix-output.xml
 repomix-output.txt
 repomix-output.json
 .git/

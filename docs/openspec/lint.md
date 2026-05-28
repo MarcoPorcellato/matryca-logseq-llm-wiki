@@ -10,3 +10,5 @@
 | `lint_matryca_wiki_pages` | `src/graph/wiki_lint.py` | Prefixed pages: `type::`, stale knowledge, credentials, wikilinks. |
 
 Block structure for spatial semantics remains in **`logseq-matryca-parser`**; these lints are text/heuristic passes only.
+
+**LLM-heavy cognitive lint** (semantic index, MARPA, property hygiene, bootstrap harvest) shares the v1.8 prompt and memory contracts in [`llm-performance.md`](llm-performance.md).

@@ -19,6 +19,9 @@ typecheck: ## Run mypy for strict type checking
 test: ## Run the pytest suite
 	uv run pytest -q
 
+perf: ## Run slow performance/memory tests
+	uv run pytest -q -m slow tests/slow
+
 format-check: ## Verify formatting without modifying files
 	uv run ruff format --check .
 

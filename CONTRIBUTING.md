@@ -17,7 +17,9 @@ This project exists so humans and **autonomous local systems** can collaborate o
 | **Operator control plane** | `src/cli/**` (incl. `ui_server.py`, `ui_auth.py`), `frontend/` | **Zero-Trust** local API (`X-Matryca-Token`), cockpit UX |
 | **Optional MCP ingress** | `src/agent/mcp_server.py` (`register_mcp_tools`, `@mcp.tool()`) | Thin registration over the same dispatch graph — not a second datastore or write path |
 
-Deep reference: [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Deep reference: [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/openspec/llm-performance.md`](docs/openspec/llm-performance.md) (v1.8 edge profile).
+
+**Note:** `MATRYCA_LM_INSTRUCTOR_MODE` / `MATRYCA_LM_INSTRUCTOR_FALLBACK` in `.env.example` are **legacy** (ignored). Structured output uses `probe_backend()` in [`src/agent/llm_client.py`](src/agent/llm_client.py) (Path A strict schema vs Path B self-correction).
 
 ---
 
@@ -105,6 +107,12 @@ Optional git snapshots on the graph repo are fine; they remain files on disk.
 
    This runs `uv sync --extra dev` and creates `.venv/`.
 
+   For CPU sandbox / `psutil` tests (`tests/test_process_priority.py`), also install the edge extra:
+
+   ```bash
+   uv sync --extra dev --extra edge
+   ```
+
 4. Optional: activate the venv or use `uv run` / Makefile targets.
 
    ```bash
@@ -166,6 +174,7 @@ Ensure your repo **`.env`** includes the Ironclad security block from **`.env.ex
 | `make lint` | Ruff lint only |
 | `make typecheck` | `mypy src/ tests/` (strict) |
 | `make test` | `pytest -q` |
+| `make perf` | `pytest -m slow` — memory / harvest soak (optional, not in default CI) |
 | **`make check`** | **`format` → `lint` → `typecheck` → `test`** (full local gate) |
 | `make clean` | Remove `.venv`, caches |
 
@@ -189,7 +198,7 @@ That means, in order:
 
 1. **Ruff** — auto-fix and format the tree, then lint clean
 2. **Mypy** — strict type-check on `src/` and `tests/`
-3. **Pytest** — full suite (**417** targets on `main`; a small number may be skipped per `pyproject.toml`)
+3. **Pytest** — full suite (**550+** targets on `main`; slow tests excluded unless you run `make perf`)
 
 GitHub Actions on pushes and pull requests to **`main`** runs the same gate (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `uv sync`, frontend `npm ci` + `npm run build`, then `make check`. **Any failing test blocks merge.**
 

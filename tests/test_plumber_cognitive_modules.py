@@ -222,7 +222,7 @@ def test_cognitive_pipeline_skips_marpa_and_property_hygiene_for_journal(
         infer_missing_properties=True,
         entity_consolidation=True,
     )
-    outcome = run_cognitive_lint_pipeline(
+    outcome, _ = run_cognitive_lint_pipeline(
         graph_root,
         path,
         "2026_05_22",
@@ -277,7 +277,7 @@ def test_auto_split_extracts_dense_subtree(graph_root: Path) -> None:
 
 def test_cognitive_pipeline_respects_disabled_modules(graph_root: Path) -> None:
     path = _write_page(graph_root, "Idle", "- plain note\n")
-    outcome = run_cognitive_lint_pipeline(
+    outcome, _ = run_cognitive_lint_pipeline(
         graph_root,
         path,
         "Idle",
@@ -295,7 +295,7 @@ def test_cognitive_pipeline_runs_enabled_modules(graph_root: Path) -> None:
         property_hygiene=True,
         infer_missing_properties=True,
     )
-    outcome = run_cognitive_lint_pipeline(
+    outcome, _ = run_cognitive_lint_pipeline(
         graph_root,
         path,
         "Tagged",
@@ -332,7 +332,7 @@ def test_marpa_framework_classifies_project_with_deadline(graph_root: Path) -> N
 def test_marpa_disabled_by_default_leaves_file_untouched(graph_root: Path) -> None:
     original = "- plain note without MARPA metadata\n"
     path = _write_page(graph_root, "Idle", original)
-    outcome = run_cognitive_lint_pipeline(
+    outcome, _ = run_cognitive_lint_pipeline(
         graph_root,
         path,
         "Idle",

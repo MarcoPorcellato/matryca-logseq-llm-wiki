@@ -76,6 +76,7 @@ class HarvestLLM(Protocol):
         *,
         page_path: Path | None = None,
         graph_root: Path | None = None,
+        task_instruction: str | None = None,
     ) -> BootstrapSummaryResult: ...
 
 
