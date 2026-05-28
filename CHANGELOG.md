@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-05-28
+
+### Fixed
+
+- **CI formatting** — `ruff format` on `page_prompt_session.py`, `process_priority.py`, and `master_catalog.py` so `make ci` passes on `main`.
+
 ## [1.8.0] - 2026-05-28
 
 ### Added

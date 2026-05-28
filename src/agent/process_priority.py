@@ -90,8 +90,10 @@ def resolve_cpu_sandbox_config(config: PlumberLintConfig | None = None) -> CpuSa
     enabled = _map_bool(env, "MATRYCA_CPU_SANDBOX", config.low_priority_mode)
     explicit = _parse_cpu_affinity_env()
     topology = probe_cpu_topology() if enabled else None
-    affinity = explicit if explicit is not None else (
-        topology.recommended_plumber_cpus if topology is not None else None
+    affinity = (
+        explicit
+        if explicit is not None
+        else (topology.recommended_plumber_cpus if topology is not None else None)
     )
     nice_level = max(0, min(19, _env_int("MATRYCA_PLUMBER_NICE_LEVEL", 19)))
     return CpuSandboxConfig(

@@ -249,7 +249,6 @@ def unload_master_catalog(graph_root: Path | str) -> bool:
         return _loaded.pop(key, None) is not None
 
 
-
 def _normalize_domain(raw: str) -> str:
     value = raw.strip().lower()
     return value if value in _MARPA_DOMAINS else ""

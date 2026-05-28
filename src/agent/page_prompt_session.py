@@ -33,9 +33,7 @@ def _cap_alias_footer(text: str, *, max_chars: int) -> str:
 
 def _prefix_digest(system_text: str, stable_user_prefix: str) -> str:
     canonical = (
-        normalize_stable_text(system_text)
-        + "\x1e"
-        + normalize_stable_text(stable_user_prefix)
+        normalize_stable_text(system_text) + "\x1e" + normalize_stable_text(stable_user_prefix)
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
