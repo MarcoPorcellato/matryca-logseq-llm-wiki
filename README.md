@@ -1,13 +1,27 @@
 # Matryca Plumber
 
+[![CI](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/matryca-plumber.svg)](https://pypi.org/project/matryca-plumber/)
+[![GitHub release](https://img.shields.io/github/v/release/MarcoPorcellato/matryca-plumber?display_name=tag)](https://github.com/MarcoPorcellato/matryca-plumber/releases)
+[![Python](https://img.shields.io/pypi/pyversions/matryca-plumber.svg)](https://pypi.org/project/matryca-plumber/)
+
+[![Tests](https://img.shields.io/badge/tests-550%2B%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A570%25-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/blob/main/pyproject.toml#L135)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![mypy](https://img.shields.io/badge/mypy-strict-2b6cb0)](https://github.com/MarcoPorcellato/matryca-plumber/blob/main/CONTRIBUTING.md)
+
+[![License](https://img.shields.io/github/license/MarcoPorcellato/matryca-plumber)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#-key-features--differentiators)
+[![Local-first](https://img.shields.io/badge/local--first-100%25%20offline-2ea44f)](#-key-features--differentiators)
+[![MCP](https://img.shields.io/badge/MCP-FastMCP%20stdio-6366f1)](#-what-does-it-actually-do)
+[![Logseq OG](https://img.shields.io/badge/Logseq-OG%20Markdown-0052CC)](https://github.com/logseq/logseq)
+[![Security](https://img.shields.io/badge/security-policy-important)](SECURITY.md)
+[![Contributing](https://img.shields.io/badge/contributing-guide-blue)](CONTRIBUTING.md)
+[![Code of Conduct](https://img.shields.io/badge/code%20of%20conduct-Contributor%20Covenant-4baaaa)](CODE_OF_CONDUCT.md)
+
 **Developed by [Marco Porcellato](https://github.com/MarcoPorcellato) · [Matryca.ai](https://matryca.ai)** — open-source local-first maintenance daemon for Logseq OG. The product name is **Matryca Plumber** (not “Matryca” alone). See [`docs/BRANDING.md`](docs/BRANDING.md).
 
 > **v1.8 — Edge performance on Ironclad.** Agentic Knowledge Management for Logseq OG: **enterprise-grade, local-first background AI** with Sovereign UI, typed CLI, and direct Markdown AST mutation (no Logseq HTTP API). **v1.8** adds no new semantic features — only **Zero-Prefill** prompts (`PagePromptSession`), **adaptive structured output**, bounded RAM, and cooperative bootstrap I/O for **16 GB CPU-only laptops** and vaults up to **~10,000** pages. Optional FastMCP stdio reuses the same `graph_dispatch` contract. Inspired by [Andrej Karpathy's LLM-Wiki vision](https://karpathy.ai/blog). **100% native Logseq AST parity**, OCC, versioned AI authorship stamping.
-
-[![CI](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-550%2B%20passing-brightgreen)](https://github.com/MarcoPorcellato/matryca-plumber/actions/workflows/ci.yml)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 ![Matryca Plumber — Agentic Knowledge Management for Logseq OG](images/matryca-plumber-1-5-10-demo.gif)
 
