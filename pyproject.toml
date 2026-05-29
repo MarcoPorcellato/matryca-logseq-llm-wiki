@@ -22,7 +22,7 @@ dependencies = [
     "fastapi>=0.115.0,<1.0.0",
     "uvicorn>=0.32.0,<1.0.0",
     "httpx>=0.28.0,<1.0.0",
-    "packaging>=24.0,<26.0",
+    "packaging>=24.0,<27.0",
 ]
 
 [project.urls]
