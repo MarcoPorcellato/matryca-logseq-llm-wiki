@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 
 import pytest
-from src.agent.plumber_modules import semantic_cache_router as router
 from src.agent.plumber_llm import BootstrapSummaryResult
+from src.agent.plumber_modules import semantic_cache_router as router
 from src.agent.plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,

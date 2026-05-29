@@ -41,9 +41,9 @@ from .plumber_config import (
     apply_thermal_pause_bootstrap,
     apply_thermal_pause_cognitive,
     load_plumber_lint_config,
+    resolve_cluster_focus_max_chars,
     resolve_llm_api_key,
     resolve_llm_max_completion_tokens,
-    resolve_cluster_focus_max_chars,
     resolve_llm_max_compression_tokens,
     resolve_llm_model_name,
     resolve_validated_llm_base_url,
@@ -63,8 +63,8 @@ from .plumber_modules.marpa_framework import (
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
-    validate_cached_model,
     semantic_cache_key,
+    validate_cached_model,
 )
 from .prompt_constraints import finalize_system_prompt
 from .prompt_layout import build_cache_aligned_prompt
@@ -140,6 +140,7 @@ def _structured_completion_kwargs() -> dict[str, Any]:
 def _compression_completion_kwargs() -> dict[str, Any]:
     """Separate cap for markdown context-compression calls (Ermes history)."""
     return {"max_tokens": resolve_llm_max_compression_tokens()}
+
 
 _CORRECTION_USER_TEMPLATE = (
     "Your previous output failed validation with this error:\n{error}\n"

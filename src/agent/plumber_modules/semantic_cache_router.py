@@ -163,9 +163,8 @@ def cache_evict(graph_root: Path, namespace: str, cache_key: str) -> None:
     with _lock:
         _memory.pop(digest, None)
     path = _cache_root(graph_root) / f"{digest}.json"
-    with contextlib.suppress(OSError):
-        with cross_process_json_flock(path):
-            path.unlink(missing_ok=True)
+    with contextlib.suppress(OSError), cross_process_json_flock(path):
+        path.unlink(missing_ok=True)
 
 
 def validate_cached_model[T: BaseModel](

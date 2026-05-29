@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.5] - 2026-05-29
+
 ### Changed
 
 - **`.env.example`** — Every tunable key documents **Default (code)** vs **Template** values; fixed `MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS` to `100000`; added `MATRYCA_PLUMBER_NICE_LEVEL`, `MATRYCA_PLUMBER_IONICE_IDLE`, LLM/service-manager notes; `MATRYCA_LLM_PROMPT_CACHE_MODE` marked reserved. CI: `tests/test_env_example_coverage.py`.

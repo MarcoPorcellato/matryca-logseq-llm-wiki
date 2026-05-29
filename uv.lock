@@ -957,7 +957,7 @@ wheels = [
 
 [[package]]
 name = "matryca-plumber"
-version = "1.8.4"
+version = "1.8.5"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

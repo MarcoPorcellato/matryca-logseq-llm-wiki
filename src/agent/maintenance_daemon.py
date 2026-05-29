@@ -117,9 +117,9 @@ from .plumber_modules.backlink_backpropagator import BacklinkCorrection, run_bac
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
-    validate_cached_model,
     purge_expired_semantic_cache,
     semantic_cache_key,
+    validate_cached_model,
 )
 from .process_priority import apply_cpu_sandbox, apply_plumber_priority, resolve_cpu_sandbox_config
 from .prompt_layout import build_cache_aligned_prompt
@@ -2411,7 +2411,8 @@ class MaintenanceDaemon:
                 prompt_session=prompt_session,
             )
             llm_called_from_usage = (
-                int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
+                int(usage.get("prompt_tokens", 0) or 0)
+                + int(usage.get("completion_tokens", 0) or 0)
             ) > 0
             if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
                 logger.warning(

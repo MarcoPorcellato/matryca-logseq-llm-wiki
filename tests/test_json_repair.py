@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 
 import pytest
-from src.agent.plumber_llm import GraphInsightsLLMResult
 from src.agent.maintenance_daemon import SemanticIndexResult
+from src.agent.plumber_llm import GraphInsightsLLMResult
 from src.utils.json_repair import (
     extract_json_array,
     extract_json_object,
@@ -98,9 +98,9 @@ def test_repair_strips_degenerate_literal_backslash_n_tail() -> None:
 
 
 def test_fix_gemma_leaked_literal_newline_before_keys() -> None:
-    raw = r'{\n  \"summary\": \"ok\", \"suggested_tags\": []}'
+    raw = r"{\n  \"summary\": \"ok\", \"suggested_tags\": []}"
     fixed = fix_gemma_leaked_literal_newline_before_keys(raw)
-    assert r'\n  \"summary' not in fixed
+    assert r"\n  \"summary" not in fixed
     payload = json.loads(fixed.replace('\\"', '"'))
     assert payload["summary"] == "ok"
 
