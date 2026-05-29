@@ -133,6 +133,7 @@ Disk mutators that perform line surgery (`property_line_edit`, `tag_unify`, `rep
 |------|---------------|--------|
 | **Page properties** | Raw `key:: value` at **line 0 region**, no `- ` bullet; blank line before first bullet | `page_properties.py` |
 | **Block properties** | `id::`, `matryca-plumber::`, … at **+2 spaces** under parent bullet, before children | `mldoc_properties.py`, `property_line_edit.py` |
+| **Identity vs metadata** | `id::` is the block UUID anchor — **not** a mutable `key::` target for property hygiene or regex property tools (`parse_logseq_property_line` excludes normalized key `id`) | `mldoc_properties.py` |
 | **Namespaces** | Semantic `Domain/Topic` → `Domain___Topic.md` + percent-encoding | `page_path.py` |
 | **Authorship** | `made-by:: matryca plumber v{version}` in frontmatter | `stamp_plumber_authored_page()` |
 
@@ -161,6 +162,10 @@ Local LLM inference is **slow** (seconds to minutes). Logseq users keep editing 
 6. **`atomic_write_bytes_if_unchanged(..., baseline_mtime=...)`** — final mtime check immediately before `os.replace`; abort with `write_aborted` if conflict.
 
 Cognitive modules (`apply_semantic_page_result`, `property_hygiene`, `auto_split`, `append_page_alias_line`, …) thread `baseline_mtime` through this gate. After Plumber’s **own** intermediate write in the same request, callers may **`OCCSnapshot.refresh_after_own_write()`** to re-baseline multi-step edits.
+
+**Phase 2 daemon (`_process_llm_cycle_file`):** The maintenance daemon does **not** hold `page_rmw_lock` during cognitive lint or `index_page` LLM inference. It snapshots mtime, reads content, runs modules and the LLM (each cognitive write acquires its own short lock scope), re-checks drift, then commits only inside **`apply_semantic_page_result`** — matching the sequence diagram below. Holding the page lock across multi-minute inference would block Logseq saves and other writers without adding OCC value.
+
+**Semantic index prompts:** `_enumerate_blocks_for_prompt` caps the block UUID catalog at **8000 characters** (aligned with the page body cap in `_build_index_prompt`) so block-rich pages cannot blow the local context window; truncated catalogs include an explicit omission note for the model.
 
 ```mermaid
 sequenceDiagram
@@ -264,7 +269,7 @@ Full behavioral spec: [`docs/openspec/runtime-bootstrap.md`](openspec/runtime-bo
 
 ### Strict AST parity and Line-0 frontmatter preservation
 
-All page-level metadata mutations route through **`page_properties.py`**, which computes the **frontmatter span** at the top of the file and injects raw `key:: value` lines **without** promoting them to bullets. Block-level surgery uses **`property_line_edit.py`** scoped to subtrees anchored at `id::`, intersecting **`compute_page_protected_line_indices`** so fenced code and query blocks are never touched.
+All page-level metadata mutations route through **`page_properties.py`**, which computes the **frontmatter span** at the top of the file and injects raw `key:: value` lines **without** promoting them to bullets. Block-level surgery uses **`property_line_edit.py`** scoped to subtrees anchored at `id::`, intersecting **`compute_page_protected_line_indices`** so fenced code and query blocks are never touched. Property-line matchers (`is_logseq_block_property_line` / `parse_logseq_property_line`) **exclude** `id::` so hygiene and MCP regex tools never treat Logseq UUID lines as editable metadata keys.
 
 The adapter and writer stack delegate tree shape to **`logseq-matryca-parser`**; Matryca Plumber does not maintain a competing full-file Markdown AST.
 
@@ -351,7 +356,8 @@ sequenceDiagram
 | System (stable) | `semantic_lint_prompts.py` | Compiler rules only — **no** per-page alias map |
 | Stable user prefix | `page_prompt_session.py` | One block per file from `prepare_llm_context_payload` + optional alias footer |
 | Task tail | `prompt_layout.py` | `build_cache_aligned_prompt` — content first, task last |
-| Stateless turns | `InstructorLLMClient` | Per-page calls use `stateless=True`; cluster history optional via `MATRYCA_LLM_CLUSTER_HISTORY` |
+| Stateless turns | `InstructorLLMClient` | Per-page calls use `stateless=True` (`index_page`, bootstrap harvest, `generate_graph_insights`, …); cluster history optional via `MATRYCA_LLM_CLUSTER_HISTORY` |
+| Compression hygiene | `context_compressor.py`, `llm_client.py` | Ermes history condensation prose is `sanitize_prose_llm_completion()` before append/persist |
 
 Bootstrap **Phase 1** and **MapReduce** harvest paths use the same layout (fixing the pre-v1.8 bootstrap prompt that placed page text after the task).
 
@@ -457,12 +463,14 @@ Background service: `matryca service install` → LaunchAgent / systemd user uni
 | **1.5.17** | Security depth pass | Shared LLM SSRF, graph path allowlist, MCP gate, split UI rate limits, **453** tests |
 | **1.7.x** | Zero-Touch onboarding | Sovereign UI pre-flight, decoupled UI state, lock-before-LLM |
 | **1.8** | Edge computing & performance | PagePromptSession, adaptive `llm_client`, mmap reads, CPU sandbox, backlink index, BM25 slimming, cooperative harvest, memory teardown |
+| **1.8 round 4** | Pre-release audit | Stateless graph insights, compression persist sanitize, 8k block catalog, Phase 2 lock-on-write-only, `id::` excluded from property matchers |
 
 ---
 
 ## Related reading
 
 - [`PROJECT_DIARY.md`](PROJECT_DIARY.md) — chronological decisions and release notes
+- [`resilience-llm-json-triz.md`](resilience-llm-json-triz.md) — TRIZ / local LLM JSON resilience (Gemma tail, compression hygiene, audit table)
 - [`v1.8-OPTIMIZATION-PLAN.md`](v1.8-OPTIMIZATION-PLAN.md) — v1.8 scope, env vars, verification
 - [`v1.8-SOFTWARE-EDGE-PLAN.md`](v1.8-SOFTWARE-EDGE-PLAN.md) — CPU sandbox, frozen prefix, adaptive LLM, mmap
 - [`openspec/llm-performance.md`](openspec/llm-performance.md) — LLM performance engineering contract

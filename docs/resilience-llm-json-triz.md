@@ -86,7 +86,7 @@ Implementation: `extract_json_object()` / `extract_json_payload_regex()` in [`js
 | **5. Legacy repair** | `fix_double_escaped_quote_runs()`, trailing garbage strip, bracket balance | — | Existing Gemma quote-leak fixes (v1.7+) |
 | **6. Schema gate** | Pydantic `SemanticIndexResult` + safe correction rules | — | No destructive graph writes from malformed proposals |
 | **7. Array roots** | `extract_json_array()` balanced `[` `]` | — | Same tail-trim contract for rare array-shaped payloads |
-| **8. Prose / compression** | `sanitize_prose_llm_completion()` + `MATRYCA_LLM_MAX_COMPRESSION_TOKENS` | `MATRYCA_LLM_PROSE_COMPLETION_MAX_CHARS` | Stops newline walls in Ermes history condensation |
+| **8. Prose / compression** | `sanitize_prose_llm_completion()` + `MATRYCA_LLM_MAX_COMPRESSION_TOKENS` | `MATRYCA_LLM_PROSE_COMPLETION_MAX_CHARS` | Stops newline walls in Ermes history condensation; applied in `_compress_history_via_llm` **and** `condense_messages` before consolidated history is stored |
 | **9. History hygiene** | `sanitize_llm_history_turn()` on `_append_execution_turn` | — | Prevents one bad turn from poisoning the next page |
 
 **Analogy:** `max_tokens` is the **brake**; balanced extraction is the **scalpel**; sanitization is the **filter** on the operating table. Together they protect the host **and** the vault.
@@ -103,7 +103,7 @@ This resilience stack sits **under** the existing probe-driven paths documented 
 | **B** — Instructor / MD_JSON | Same cap; salvage path uses full `repair_llm_json` pipeline |
 | **Exhausted** | `StructuredOutputExhaustedError` — page skipped until mtime changes |
 
-Foreground daemon: `probe_backend()` once at start; per-page `index_page` uses `stateless=True` so Ermes history does not amplify bad completions.
+Foreground daemon: `probe_backend()` once at start; per-page `index_page`, bootstrap harvest, and **`generate_graph_insights`** use `stateless=True` so Ermes history does not amplify bad completions or one-off ontology reports.
 
 ---
 
@@ -112,7 +112,7 @@ Foreground daemon: `probe_backend()` once at start; per-page `index_page` uses `
 | Symptom | Subsystem | TRIZ resolution |
 |---------|-----------|-----------------|
 | JSON tail after indexing | `json_repair` + Path A/B | Separation in space (balanced `{` `}`) + brake (`max_tokens`) |
-| Newline wall in **compression** markdown | `_compress_history_via_llm` | Prior action: `MATRYCA_LLM_MAX_COMPRESSION_TOKENS`; prose sanitizer |
+| Newline wall in **compression** markdown | `_compress_history_via_llm`, `condense_messages` | Token cap + `sanitize_prose_llm_completion` **before** history inject |
 | Degenerate turn **amplified** on next page | `_append_execution_turn` | History hygiene before Ermes stores assistant JSON/markdown |
 | Greedy ingest of array JSON + tail | `extract_json_array` | Same balanced scanner as objects; greedy `.*` regex removed |
 | `\t` / `\"` repetition loops | `collapse_degenerate_literal_*` | Parameter change: treat other escape tokens like `\n` |
@@ -122,6 +122,9 @@ Foreground daemon: `probe_backend()` once at start; per-page `index_page` uses `
 | **Huge cluster context** | `MATRYCA_CLUSTER_FOCUS_MAX_CHARS` | Louvain clusters cannot blow the stable prefix |
 | **Poisoned semantic cache** | `validate_cached_model` + `cache_evict` | Pre-fix degenerate JSON in `.matryca_semantic_cache` is dropped, not replayed |
 | **Oversize cache blobs** | `MATRYCA_SEMANTIC_CACHE_MAX_PAYLOAD_BYTES` | RAM/disk guard on pathological cached payloads |
+| **Block catalog token blow-up** | `_enumerate_blocks_for_prompt` (8k char cap) | Huge pages still index; uncatalogued blocks must not receive `semantic_corrections` |
+| **Lock held during slow LLM** | `_process_llm_cycle_file` | `page_rmw_lock` only in `apply_semantic_page_result` — inference does not block Logseq saves |
+| **`id::` mistaken for hygiene** | `parse_logseq_property_line` | UUID identity lines excluded from property-line matchers |
 
 **Contradiction removed:** “We need long Ermes memory” vs “one hallucination must not dominate the context window.” **Separation in time:** compress with a cap; **self-service:** sanitize before append.
 
@@ -150,6 +153,10 @@ Off by default. Production visibility remains `logs/matryca_plumber_ops.log` and
 | JSON array + `\n` tail | `test_extract_json_array_ignores_degenerate_tail` |
 | Prose newline loop | `test_sanitize_prose_collapses_newline_loop` |
 | Compression `max_tokens` | `tests/test_llm_client_adaptive.py::test_compress_history_uses_max_tokens` |
+| Compression summary sanitize | `tests/test_context_compressor.py::test_condense_messages_sanitizes_compression_summary` |
+| Graph insights stateless | `tests/test_maintenance_daemon.py::test_generate_graph_insights_passes_stateless_flag` |
+| Block catalog cap | `tests/test_maintenance_daemon.py::test_enumerate_blocks_catalog_respects_char_cap` |
+| `id::` not a property key | `tests/test_mldoc_phase7.py::test_id_property_line_excluded_from_hygiene` |
 
 **Targeted pytest (subset — disable coverage gate):**
 

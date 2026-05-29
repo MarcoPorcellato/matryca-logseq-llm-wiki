@@ -256,7 +256,7 @@ Open `TODO` / `LATER` / `WAITING` in `journals/` for the last N days (default 7,
 }
 ```
 
-Surgical `key::` line edits inside the block span anchored at `id::`. **Always** `dry_run: true` first; inspect `match_count`, `previews`, size fields; then `dry_run: false`. Use for persisting synthetic `id::` lines. Optional: `use_regex`, `replace_all`, `case_sensitive`.
+Surgical `key::` line edits inside the block span anchored at `id::`. **Always** `dry_run: true` first; inspect `match_count`, `previews`, size fields; then `dry_run: false`. Use dedicated persist flows for new `id::` lines — matchers **exclude** existing `id::` rows (they are UUID anchors, not editable metadata keys). Optional: `use_regex`, `replace_all`, `case_sensitive`.
 
 ```json
 {

@@ -64,6 +64,8 @@ Humans and the Plumber daemon edit the **same** `.md` files concurrently. Local 
 2. If `file_mtime_drifted()` is true (the user edited in Logseq during inference), **abort the write** — return `False`, log the skip, and preserve the human's changes.
 3. Only when mtime still matches, commit via temp file → `fsync` → `os.replace` under `page_rmw_lock`.
 
+**Do not** hold `page_rmw_lock` across LLM inference. Phase 2 daemon flow (`_process_llm_cycle_file`): snapshot → read → cognitive lint / `index_page` (no page lock) → drift check → `apply_semantic_page_result` (lock only for the atomic write). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#optimistic-concurrency-control-occ).
+
 OCC complements `fcntl.flock` (no torn writes) with **lost-update prevention** (no silent overwrites).
 
 ### Phase 3 — AST parity
@@ -73,7 +75,7 @@ Logseq OG's on-disk contract is strict. Violations cause silent index corruption
 | Topic | Rule |
 |-------|------|
 | **Line-0 frontmatter** | Page properties (`tags::`, `alias::`, `title::`, …) live at the **absolute top** of the file as raw `key:: value` lines **without** bullet dashes (`- `). A blank line separates frontmatter from the first bullet. |
-| **Block properties** | Block-scoped properties (`id::`, `matryca-plumber::`, …) sit **immediately under the parent bullet**, indented **+2 spaces**, **before** child bullets or multiline continuations. Never orphan or delete existing `id::` lines. |
+| **Block properties** | Block-scoped properties (`id::`, `matryca-plumber::`, …) sit **immediately under the parent bullet**, indented **+2 spaces**, **before** child bullets or multiline continuations. Never orphan or delete existing `id::` lines. **`id::` is identity, not metadata** — `parse_logseq_property_line` excludes key `id` so hygiene tools never regex-edit UUID lines. |
 | **Multiline blocks** | Shift+Enter continuations use `indent + 2 spaces` (`bullet_indent_unit()`). Property insertion must respect continuation lines before child bullets (`block_property_insert_index()`). |
 | **Windows `\r\n` stripping** | All scanners normalize with `strip_line_endings()` / `rstrip("\r\n")` before regex matching. Writes emit `\n` via `canonical_line_suffix()` — never reintroduce `\r\n` on output. Mixed line endings must not break fence detection or block-span math. |
 | **Dead zones** | Never mutate lines inside fenced code blocks, HTML comments, or `#+BEGIN_QUERY` … `#+END_QUERY` regions (`global_fence_scanner.py`). |

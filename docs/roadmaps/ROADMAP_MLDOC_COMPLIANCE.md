@@ -4,7 +4,7 @@ Pure-Python structural rules inspired by the official Logseq Markdown/Org compil
 
 ## Done (this phase)
 
-- [x] **`src/graph/mldoc_properties.py`** — `key:: value` line parsing (first `::` only), bullet/`#`-heading exclusions, Unicode casefold keys, comma splitting with **double quotes** and **`[[wikilinks]]`** awareness, quoted spans for downstream guards.
+- [x] **`src/graph/mldoc_properties.py`** — `key:: value` line parsing (first `::` only), bullet/`#`-heading exclusions, Unicode casefold keys, comma splitting with **double quotes** and **`[[wikilinks]]`** awareness, quoted spans for downstream guards; normalized key **`id` excluded** so `id:: <uuid>` is never treated as editable metadata by property hygiene or MCP property-line tools.
 - [x] **`src/graph/mldoc_guards.py`** — Skip naive bullet surgery when the first line or pre-`id::` span suggests **fenced code**, **drawers** (`:NAME:`), or **`{{` macros**.
 - [x] **`property_line_edit.py`** — Property line detection uses `mldoc_properties`; alias CSV uses `split_logseq_property_list_values`.
 - [x] **`tag_unify.py`** — Tag unify matches the scanner: **no `#tag` rewrites inside quoted property values**; line-based apply preserves guards.

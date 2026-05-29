@@ -40,7 +40,9 @@ Every local LLM call that reads page text should follow:
 1. `prepare_llm_context_payload()` produces the reduced body (raw, summary, skeleton, or truncated).
 2. Optional **AliasIndex** footer is appended to the stable block (capped by `MATRYCA_ALIAS_PROMPT_MAX_CHARS`, default 2048) — **not** injected into the system prompt (v1.7 and earlier hurt KV reuse).
 3. Cognitive modules (MARPA, dangling healer, entity consolidation, property hygiene) reuse the **same** `stable_page_block`.
-4. `semantic_index_page` uses `stateless=True` so Ermes rolling history does not grow the prefix between unrelated operations.
+4. `semantic_index_page`, bootstrap harvest, and **`generate_graph_insights`** use `stateless=True` so Ermes rolling history does not grow the prefix between unrelated operations or one-off reports.
+5. When `MATRYCA_PLUMBER_CONTEXT_COMPRESSION=true`, condensation summaries are **`sanitize_prose_llm_completion()`** before they replace dropped history turns (`condense_messages`, `_compress_history_via_llm`).
+6. Semantic index prompts include a block UUID catalog capped at **8000 characters** (`_enumerate_blocks_for_prompt`) so pages with hundreds of `id::` lines do not dominate the user block.
 
 ### Bootstrap & MapReduce
 
@@ -100,6 +102,10 @@ Small models (e.g. **Gemma 4-E4b**) may omit `<eos>` under strict JSON and enter
 
 Full TRIZ framing, failure anatomy, and verification: **[`resilience-llm-json-triz.md`](../resilience-llm-json-triz.md)**.
 
+### Phase 2 OCC and page lock (daemon)
+
+`_process_llm_cycle_file` follows the canonical OCC order in [`ARCHITECTURE.md`](../ARCHITECTURE.md#optimistic-concurrency-control-occ): **`page_rmw_lock` is not held during LLM inference**. Cognitive modules take short per-operation locks; the semantic index commit acquires the page lock only inside **`apply_semantic_page_result`**.
+
 ---
 
 ## Frozen KV prefix
@@ -136,6 +142,7 @@ Daemon checkpoint frequency during Phase 1 is controlled by `MATRYCA_BOOTSTRAP_C
 | Bootstrap yield | `tests/test_bootstrap_yield.py` |
 | Adaptive LLM | `tests/test_llm_client_adaptive.py` |
 | Resilient JSON / Gemma tail | `tests/test_json_repair.py` |
+| Round 4 audit (stateless insights, catalog cap, compression sanitize, `id::`) | `tests/test_maintenance_daemon.py`, `tests/test_context_compressor.py`, `tests/test_mldoc_phase7.py` |
 | CPU sandbox | `tests/test_process_priority.py` |
 | Mmap reads | `tests/test_markdown_io.py` |
 | Slow soak | `tests/slow/test_daemon_memory_soak.py` (`pytest -m slow`) |

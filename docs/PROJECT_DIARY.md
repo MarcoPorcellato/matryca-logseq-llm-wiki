@@ -10,6 +10,34 @@ Entries are chronological (**newest first** within each major release block). Wh
 
 ---
 
+## [2026-05-29] v1.8 pre-release — Round 4 read-only audit (operational hardening)
+
+### Context
+
+After TRIZ rounds 1–3 on local JSON degeneration (Gemma tail of death, compression walls, poisoned semantic cache), a final **read-only** audit flagged five items that could still harm vault integrity or host responsiveness on real graphs. These are **not** new cognitive features — they tighten contracts already documented under OCC and LLM resilience.
+
+### Milestones shipped
+
+1. **Stateless graph insights** — `generate_graph_insights` uses `stateless=True` so panoramic ontology reports do not append to Ermes execution history.
+
+2. **Compression persist hygiene** — `_compress_history_via_llm` and `condense_messages` run `sanitize_prose_llm_completion()` on summaries **before** they are injected into consolidated history.
+
+3. **Semantic index block catalog cap** — `_enumerate_blocks_for_prompt` stops at **8000 characters** (same order of magnitude as the indexed page body cap) with an explicit truncation note so the model does not target uncatalogued UUIDs.
+
+4. **Phase 2 lock scope** — `_process_llm_cycle_file` no longer wraps cognitive lint + `index_page` in `page_rmw_lock`; the lock is acquired only in `apply_semantic_page_result` for the atomic write. Multi-minute LLM work must not block Logseq saves.
+
+5. **`id::` identity protection** — `parse_logseq_property_line` excludes normalized key `id` so property hygiene and MCP property-line tools never treat UUID lines as editable metadata.
+
+### Architectural outcome
+
+OCC documentation in [`ARCHITECTURE.md`](ARCHITECTURE.md) now matches runtime: snapshot → read → infer **without** page lock → verify → lock → commit. Resilience and mldoc docs cross-link the new guards. See [`CHANGELOG.md`](../CHANGELOG.md) `[Unreleased]` and [`resilience-llm-json-triz.md`](resilience-llm-json-triz.md) §5.
+
+### Status
+
+**Shipped in `[Unreleased]`** — pending semver tag with the rest of v1.8.x.
+
+---
+
 ## [2026-05-27] v1.8 — Edge computing & performance (16 GB / 10k pages)
 
 ### Context
