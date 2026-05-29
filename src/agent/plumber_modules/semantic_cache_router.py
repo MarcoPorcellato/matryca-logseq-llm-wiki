@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -13,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from loguru import logger
+from pydantic import BaseModel, ValidationError
 
 from ...graph.json_flock import cross_process_json_flock
 
@@ -27,8 +29,30 @@ _RESERVED_CACHE_JSON = frozenset(
     },
 )
 _DEFAULT_MEMORY_ENTRIES = 512
+_DEFAULT_MAX_PAYLOAD_BYTES = 262_144
 _lock = threading.Lock()
 _memory: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+
+
+def _max_cache_payload_bytes() -> int:
+    raw = os.environ.get("MATRYCA_SEMANTIC_CACHE_MAX_PAYLOAD_BYTES", "").strip()
+    if not raw:
+        return _DEFAULT_MAX_PAYLOAD_BYTES
+    try:
+        return max(4096, min(2_097_152, int(raw)))
+    except ValueError:
+        return _DEFAULT_MAX_PAYLOAD_BYTES
+
+
+def _payload_byte_size(payload: dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(payload, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return _max_cache_payload_bytes() + 1
+
+
+def _payload_within_limit(payload: dict[str, Any]) -> bool:
+    return _payload_byte_size(payload) <= _max_cache_payload_bytes()
 
 
 def _memory_max_entries() -> int:
@@ -94,7 +118,10 @@ def cache_get(graph_root: Path, namespace: str, cache_key: str) -> dict[str, Any
         if mem_hit is not None:
             expires_at, payload = mem_hit
             if now <= expires_at:
-                return payload
+                if _payload_within_limit(payload):
+                    return payload
+                cache_evict(graph_root, namespace, cache_key)
+                return None
             _memory.pop(digest, None)
 
     path = _cache_root(graph_root) / f"{digest}.json"
@@ -117,9 +144,52 @@ def cache_get(graph_root: Path, namespace: str, cache_key: str) -> dict[str, Any
     if not isinstance(raw_payload, dict):
         return None
     payload = raw_payload
+    if not _payload_within_limit(payload):
+        logger.warning(
+            "Semantic cache entry oversize ({} bytes) for namespace={} — evicting",
+            _payload_byte_size(payload),
+            namespace,
+        )
+        cache_evict(graph_root, namespace, cache_key)
+        return None
     with _lock:
         _memory_put(digest, created + node_ttl, payload)
     return payload
+
+
+def cache_evict(graph_root: Path, namespace: str, cache_key: str) -> None:
+    """Remove one cache entry from RAM and disk."""
+    digest = _digest(namespace, cache_key)
+    with _lock:
+        _memory.pop(digest, None)
+    path = _cache_root(graph_root) / f"{digest}.json"
+    with contextlib.suppress(OSError):
+        with cross_process_json_flock(path):
+            path.unlink(missing_ok=True)
+
+
+def validate_cached_model[T: BaseModel](
+    cached: dict[str, Any],
+    model_cls: type[T],
+    *,
+    graph_root: Path,
+    namespace: str,
+    cache_key: str,
+) -> T | None:
+    """Load a cached Pydantic model; evict poisoned or pre-fix degenerate entries."""
+    if not _payload_within_limit(cached):
+        cache_evict(graph_root, namespace, cache_key)
+        return None
+    try:
+        return model_cls.model_validate(cached)
+    except ValidationError as exc:
+        logger.warning(
+            "Semantic cache schema mismatch for {} (evicting): {}",
+            cache_key,
+            exc,
+        )
+        cache_evict(graph_root, namespace, cache_key)
+        return None
 
 
 def cache_put(
@@ -129,8 +199,14 @@ def cache_put(
     payload: dict[str, Any],
     *,
     ttl_seconds: int | None = None,
-) -> CacheNode:
+) -> CacheNode | None:
     """Persist inference payload to disk and in-process memory."""
+    if not _payload_within_limit(payload):
+        logger.warning(
+            "Semantic cache put skipped: payload exceeds {} bytes",
+            _max_cache_payload_bytes(),
+        )
+        return None
     ttl = ttl_seconds if ttl_seconds is not None else _env_ttl()
     now = time.time()
     digest = _digest(namespace, cache_key)
@@ -169,7 +245,15 @@ def get_or_compute_model[T: BaseModel](
     """Return ``(model, cache_hit)`` using the semantic cache when enabled."""
     cached = cache_get(graph_root, namespace, cache_key)
     if cached is not None:
-        return model_cls.model_validate(cached), True
+        loaded = validate_cached_model(
+            cached,
+            model_cls,
+            graph_root=graph_root,
+            namespace=namespace,
+            cache_key=cache_key,
+        )
+        if loaded is not None:
+            return loaded, True
     result = compute()
     cache_put(graph_root, namespace, cache_key, result.model_dump())
     return result, False
@@ -241,8 +325,10 @@ def clear_semantic_cache(graph_root: Path | None = None) -> None:
 
 __all__ = [
     "CacheNode",
+    "cache_evict",
     "cache_get",
     "cache_put",
+    "validate_cached_model",
     "clear_semantic_cache",
     "clear_semantic_cache_memory",
     "get_or_compute_model",

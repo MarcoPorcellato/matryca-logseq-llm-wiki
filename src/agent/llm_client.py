@@ -63,6 +63,7 @@ from .plumber_modules.marpa_framework import (
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
+    validate_cached_model,
     semantic_cache_key,
 )
 from .prompt_constraints import finalize_system_prompt
@@ -983,7 +984,15 @@ class InstructorLLMClient:
             key = semantic_cache_key(page_path, "marpa_classify")
             cached = cache_get(graph_root, "marpa", key)
             if cached is not None:
-                return MarpaClassificationResult.model_validate(cached)
+                loaded = validate_cached_model(
+                    cached,
+                    MarpaClassificationResult,
+                    graph_root=graph_root,
+                    namespace="marpa",
+                    cache_key=key,
+                )
+                if loaded is not None:
+                    return loaded
 
         result, _ = self._completion_with_structured_output(
             prompt=prompt,

@@ -19,8 +19,8 @@ typecheck: ## Run mypy for strict type checking
 test: ## Run the pytest suite
 	uv run pytest -q
 
-test-resilience: ## JSON repair + adaptive LLM tests (no coverage gate)
-	uv run pytest -q tests/test_json_repair.py tests/test_llm_client_adaptive.py --no-cov
+test-resilience: ## LLM JSON resilience + semantic cache tests (no coverage gate)
+	uv run pytest -q tests/test_json_repair.py tests/test_llm_client_adaptive.py tests/test_semantic_cache_router.py --no-cov
 
 perf: ## Run slow performance/memory tests (no coverage gate)
 	uv run pytest -q -m slow tests/slow --no-cov

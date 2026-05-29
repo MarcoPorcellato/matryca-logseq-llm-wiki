@@ -120,6 +120,8 @@ Foreground daemon: `probe_backend()` once at start; per-page `index_page` uses `
 | **MCP agent JSON** | `parse_json_object` → `loads_repaired_json` | Same repair for Cursor/Claude tool payloads |
 | **Path B retry pollution** | `append_correction_turn` collapses error tail | Self-correction prompts stay bounded |
 | **Huge cluster context** | `MATRYCA_CLUSTER_FOCUS_MAX_CHARS` | Louvain clusters cannot blow the stable prefix |
+| **Poisoned semantic cache** | `validate_cached_model` + `cache_evict` | Pre-fix degenerate JSON in `.matryca_semantic_cache` is dropped, not replayed |
+| **Oversize cache blobs** | `MATRYCA_SEMANTIC_CACHE_MAX_PAYLOAD_BYTES` | RAM/disk guard on pathological cached payloads |
 
 **Contradiction removed:** “We need long Ermes memory” vs “one hallucination must not dominate the context window.” **Separation in time:** compress with a cap; **self-service:** sanitize before append.
 
@@ -153,7 +155,7 @@ Off by default. Production visibility remains `logs/matryca_plumber_ops.log` and
 
 ```bash
 uv run pytest tests/test_json_repair.py tests/test_llm_client_adaptive.py -q --no-cov
-# or: make test-resilience
+# or: make test-resilience  (27 tests: json_repair, llm_client, semantic_cache)
 ```
 
 Full suite (CI coverage ≥ 70%): `uv run pytest -q` or `make test`.

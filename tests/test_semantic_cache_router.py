@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 from src.agent.plumber_modules import semantic_cache_router as router
+from src.agent.plumber_llm import BootstrapSummaryResult
 from src.agent.plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
     clear_semantic_cache,
     semantic_cache_key,
+    validate_cached_model,
 )
 
 
@@ -59,3 +61,34 @@ def test_semantic_cache_memory_lru_eviction(
         cache_put(graph_root, "index", key, {"n": index})
     with router._lock:
         assert len(router._memory) <= 2
+
+
+def test_validate_cached_model_evicts_invalid_schema(graph_root: Path) -> None:
+    clear_semantic_cache(graph_root)
+    page = graph_root / "pages" / "Bad.md"
+    page.write_text("- x\n", encoding="utf-8")
+    key = semantic_cache_key(page, "semantic_index")
+    cache_put(graph_root, "index", key, {"summary": 123, "suggested_tags": "not-a-list"})
+    loaded = validate_cached_model(
+        {"summary": 123, "suggested_tags": "not-a-list"},
+        BootstrapSummaryResult,
+        graph_root=graph_root,
+        namespace="index",
+        cache_key=key,
+    )
+    assert loaded is None
+    assert cache_get(graph_root, "index", key) is None
+
+
+def test_cache_get_evicts_oversize_payload(
+    graph_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_semantic_cache(graph_root)
+    monkeypatch.setattr(router, "_max_cache_payload_bytes", lambda: 64)
+    page = graph_root / "pages" / "Huge.md"
+    page.write_text("- huge\n", encoding="utf-8")
+    key = semantic_cache_key(page, "semantic_index")
+    huge = {"summary": "x" * 200}
+    assert cache_put(graph_root, "index", key, huge) is None
+    assert cache_get(graph_root, "index", key) is None

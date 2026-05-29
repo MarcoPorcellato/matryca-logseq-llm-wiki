@@ -117,6 +117,7 @@ from .plumber_modules.backlink_backpropagator import BacklinkCorrection, run_bac
 from .plumber_modules.semantic_cache_router import (
     cache_get,
     cache_put,
+    validate_cached_model,
     purge_expired_semantic_cache,
     semantic_cache_key,
 )
@@ -1527,9 +1528,16 @@ class InstructorLLMClient(_BaseInstructorLLMClient):
                 key = semantic_cache_key(page_path, "semantic_index")
                 cached = cache_get(graph_root, "index", key)
                 if cached is not None:
-                    result = SemanticIndexResult.model_validate(cached)
-                    result = _normalize_index_result_aliases(result, alias_index)
-                    return result, usage
+                    loaded = validate_cached_model(
+                        cached,
+                        SemanticIndexResult,
+                        graph_root=graph_root,
+                        namespace="index",
+                        cache_key=key,
+                    )
+                    if loaded is not None:
+                        result = _normalize_index_result_aliases(loaded, alias_index)
+                        return result, usage
 
             result, completion = self._completion_with_structured_output(
                 prompt=prompt,
