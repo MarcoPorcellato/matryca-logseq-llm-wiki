@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **README** — Expanded professional badge block at the top (PyPI, GitHub Release, CI quality gates, platform, MCP, Logseq OG, security, contributing, code of conduct).
 
+### Fixed
+
+- **CI** — Pin `astral-sh/setup-uv` to immutable `v8.1.0` (major tag `@v8` was removed in setup-uv v8.0.0).
+
 ## [1.8.3] - 2026-05-29
 
 ### Fixed

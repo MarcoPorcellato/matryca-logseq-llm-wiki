@@ -33,7 +33,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install uv and Python 3.12
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
           python-version: "3.12"
