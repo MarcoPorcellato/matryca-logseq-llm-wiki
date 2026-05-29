@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **v1.8 audit (round 4)** — `generate_graph_insights` is stateless so ontology reports do not pollute Ermes history; context-compression summaries are prose-sanitized before persistence; semantic-index block catalogs cap at 8k chars; Phase 2 LLM inference no longer holds `page_rmw_lock` (write-only lock in `apply_semantic_page_result`); `id::` lines are excluded from property-line hygiene so Logseq block UUIDs are never edited as properties.
 - **Gemma JSON degeneration** — Structured LLM completions cap at `MATRYCA_LLM_MAX_COMPLETION_TOKENS` (default 2048); `json_repair` uses balanced-brace extraction (not greedy `{.*}`), strips post-`}` `\n` token loops, and normalizes Gemma `\n  \"key` leakage before indexing Logseq pages.
 - **LLM resilience audit** — Context compression now uses `MATRYCA_LLM_MAX_COMPRESSION_TOKENS`; prose/markdown completions sanitized; Ermes history turns cleaned before append; balanced `[` `]` extraction; collapse of `\t`/`\"` repetition loops; debug NDJSON gated behind `MATRYCA_LLM_DEBUG_JSON`.
 - **LLM resilience (round 2)** — Unbalanced/truncated JSON recovery; MCP `parse_json_object` uses `loads_repaired_json`; Path B correction errors stripped of degeneration; cluster focus capped via `MATRYCA_CLUSTER_FOCUS_MAX_CHARS`.

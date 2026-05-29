@@ -20,6 +20,7 @@ from src.agent.maintenance_daemon import (
     SemanticIndexResult,
     SemanticLintCorrection,
     ThermalProfile,
+    _enumerate_blocks_for_prompt,
     append_semantic_index,
     apply_semantic_corrections_to_lines,
     apply_semantic_page_result,
@@ -1006,6 +1007,48 @@ def test_bootstrap_harvest_uses_stateless_messages_when_compression_enabled(
         {"role": "user", "content": "current page"},
     ]
     assert client._execution_history == []
+
+
+def test_generate_graph_insights_passes_stateless_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1")
+    captured: dict[str, bool] = {}
+
+    def fake_completion(
+        self: InstructorLLMClient,
+        *,
+        prompt: str,
+        response_model: type[object],
+        system_prompt: str,
+        stateless: bool = False,
+        **_kwargs: object,
+    ) -> tuple[GraphInsightsLLMResult, object]:
+        _ = (self, prompt, response_model, system_prompt, _kwargs)
+        captured["stateless"] = stateless
+        return GraphInsightsLLMResult(
+            ontology_report="ok",
+            cleanup_suggestions=[],
+        ), object()
+
+    monkeypatch.setattr(
+        InstructorLLMClient,
+        "_completion_with_structured_output",
+        fake_completion,
+    )
+    client.generate_graph_insights(metrics_json="{}", graph_root=Path("/tmp/graph"))
+    assert captured["stateless"] is True
+
+
+def test_enumerate_blocks_catalog_respects_char_cap() -> None:
+    uid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    lines = ["- Block with a moderately long bullet text " * 3, f"  id:: {uid}"]
+    for i in range(40):
+        lines.extend([f"- Block {i}", f"  id:: {i:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb"])
+    content = "\n".join(lines) + "\n"
+    catalog = _enumerate_blocks_for_prompt(content, max_chars=800)
+    assert len(catalog) <= 800 + 200
+    assert "truncated" in catalog
 
 
 def test_harvest_page_summary_passes_stateless_flag(

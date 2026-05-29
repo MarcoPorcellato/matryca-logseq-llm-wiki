@@ -67,7 +67,7 @@ def parse_logseq_property_line(line: str) -> ParsedPropertyLine | None:
     sep_after, value_raw = sp_m.group(1), sp_m.group(2)
     value_start = idx + 2 + len(sep_after)
     kn = normalize_logseq_property_key(key_raw)
-    if not kn:
+    if not kn or kn == "id":
         return None
     return ParsedPropertyLine(
         indent=indent,

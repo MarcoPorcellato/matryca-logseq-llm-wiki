@@ -33,6 +33,13 @@ def test_bullet_with_double_colon_is_not_property() -> None:
     assert is_logseq_block_property_line("  - Question here :: Answer") is False
 
 
+def test_id_property_line_excluded_from_hygiene() -> None:
+    uid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    line = f"  id:: {uid}"
+    assert parse_logseq_property_line(line) is None
+    assert is_logseq_block_property_line(line) is False
+
+
 def test_split_large_blocks_skips_code_fence(tmp_path: Path) -> None:
     pages = tmp_path / "pages"
     pages.mkdir()

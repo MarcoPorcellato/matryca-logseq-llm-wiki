@@ -10,6 +10,7 @@ from typing import Literal, TypedDict
 
 from loguru import logger
 
+from ..utils.json_repair import sanitize_prose_llm_completion
 from .prompt_constraints import finalize_system_prompt
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]")
@@ -197,7 +198,9 @@ def condense_messages(
     started = time.perf_counter()
     history_text = serialize_history_for_compression(middle)
     try:
-        summary = compress_fn(build_compression_user_prompt(history_text, target_tokens=target))
+        summary = sanitize_prose_llm_completion(
+            compress_fn(build_compression_user_prompt(history_text, target_tokens=target)),
+        )
     except Exception as exc:  # noqa: BLE001 - fall back so daemon keeps running
         latency = time.perf_counter() - started
         warn_msg = (

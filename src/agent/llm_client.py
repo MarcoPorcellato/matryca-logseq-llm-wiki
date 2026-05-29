@@ -743,7 +743,9 @@ class InstructorLLMClient:
                 **_compression_completion_kwargs(),
             ),
         )
-        content = _extract_first_choice_content(response)
+        content = sanitize_prose_llm_completion(
+            _extract_first_choice_content(response, source="context_compression"),
+        )
         self._log_completion_turn(
             completion=response,
             target_file="execution_history",
@@ -1056,6 +1058,7 @@ class InstructorLLMClient:
             prompt=prompt,
             response_model=GraphInsightsLLMResult,
             system_prompt=INSIGHTS_SYSTEM_PROMPT,
+            stateless=True,
             telemetry_target=str(graph_root),
             telemetry_operation="Concept Indexing",
         )

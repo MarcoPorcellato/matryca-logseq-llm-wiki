@@ -53,6 +53,25 @@ def test_condense_messages_skips_when_under_trigger() -> None:
     assert event is None
 
 
+def test_condense_messages_sanitizes_compression_summary() -> None:
+    degenerate = "Summary line.\n" + "\\n" * 200
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "System."},
+        *_build_history(6),
+        {"role": "user", "content": "Latest."},
+    ]
+    compressed, event = condense_messages(
+        messages,
+        trigger=100,
+        target=30_000,
+        compress_fn=lambda _prompt: degenerate,
+    )
+    assert event is not None
+    consolidated = compressed[1]["content"]
+    assert "\\n\\n\\n" not in consolidated
+    assert "Summary line." in consolidated
+
+
 def test_condense_messages_preserves_system_prompt() -> None:
     system_text = "Immutable Matryca Plumber root system prompt."
     messages: list[ChatMessage] = [

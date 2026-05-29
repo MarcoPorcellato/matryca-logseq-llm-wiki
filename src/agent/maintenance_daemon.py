@@ -177,6 +177,7 @@ def _structural_lint_section_present(content: str) -> bool:
 
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 _ID_LINE = re.compile(r"^\s*id::\s*(.+?)\s*$", re.IGNORECASE)
+_BLOCK_CATALOG_MAX_CHARS = 8000
 _MATRYCA_PLUMBER_LINE = re.compile(r"^\s*matryca-plumber::\s*", re.IGNORECASE)
 _WIKILINK = re.compile(r"\[\[([^\]#|]+)(?:\|[^\]]+)?\]\]")
 
@@ -998,10 +999,14 @@ def _stamp_matryca_plumber_property(
     lines.insert(insert_at, f"{indent}matryca-plumber:: true\n")
 
 
-def _enumerate_blocks_for_prompt(content: str) -> str:
+def _enumerate_blocks_for_prompt(
+    content: str,
+    *,
+    max_chars: int = _BLOCK_CATALOG_MAX_CHARS,
+) -> str:
     """Serialize blocks with UUIDs so the LLM can target surgical lint corrections."""
     lines = content.splitlines()
-    blocks: list[str] = []
+    entries: list[str] = []
     for idx, line in enumerate(lines):
         id_match = _ID_LINE.match(line)
         if not id_match:
@@ -1013,12 +1018,32 @@ def _enumerate_blocks_for_prompt(content: str) -> str:
             if bullet_match:
                 bullet_text = bullet_match.group(2)
                 break
-        blocks.append(
+        entries.append(
             f"- block_uuid: {block_uuid}\n  original_text: {bullet_text}",
         )
-    if not blocks:
+    if not entries:
         return "(no blocks with id:: found — omit semantic_corrections)"
-    return "\n".join(blocks)
+    included: list[str] = []
+    total = 0
+    for entry in entries:
+        add_len = len(entry) + (1 if included else 0)
+        if included and total + add_len > max_chars:
+            omitted = len(entries) - len(included)
+            included.append(
+                f"(block catalog truncated at {max_chars} chars; "
+                f"{omitted} block(s) omitted — omit uncatalogued semantic_corrections)",
+            )
+            break
+        if not included and len(entry) > max_chars:
+            included.append(entry[:max_chars])
+            included.append(
+                f"(block catalog truncated at {max_chars} chars; "
+                f"{len(entries) - 1} block(s) omitted — omit uncatalogued semantic_corrections)",
+            )
+            break
+        included.append(entry)
+        total += add_len
+    return "\n".join(included)
 
 
 def _build_index_task_instruction(page_title: str, content: str) -> str:
@@ -2324,106 +2349,105 @@ class MaintenanceDaemon:
         write_aborted = False
         self._begin_phase2_write()
         try:
-            with page_rmw_lock(path):
-                baseline_mtime = occ_snapshot(path)
+            baseline_mtime = occ_snapshot(path) if path.is_file() else None
+            if path.is_file():
                 content = path.read_text(encoding="utf-8", errors="replace")
-                cognitive_outcome: CognitiveLintOutcome | None = None
-                prompt_session: PagePromptSession | None = None
-                if self.bootstrap_complete and lint_config.any_enabled:
-                    cognitive_outcome, prompt_session = run_cognitive_lint_pipeline(
-                        self.graph_root,
-                        path,
-                        title,
-                        content,
-                        llm=self.llm_client,
-                        config=lint_config,
+            cognitive_outcome: CognitiveLintOutcome | None = None
+            prompt_session: PagePromptSession | None = None
+            if self.bootstrap_complete and lint_config.any_enabled:
+                cognitive_outcome, prompt_session = run_cognitive_lint_pipeline(
+                    self.graph_root,
+                    path,
+                    title,
+                    content,
+                    llm=self.llm_client,
+                    config=lint_config,
+                )
+                record_daemon_impact(state, cognitive=cognitive_outcome)
+                if isinstance(self.llm_client, InstructorLLMClient):
+                    self._absorb_token_logger_delta(
+                        self.llm_client.token_logger,
+                        baseline_prompt=prompt_before,
+                        baseline_completion=completion_before,
                     )
-                    record_daemon_impact(state, cognitive=cognitive_outcome)
-                    if isinstance(self.llm_client, InstructorLLMClient):
-                        self._absorb_token_logger_delta(
-                            self.llm_client.token_logger,
-                            baseline_prompt=prompt_before,
-                            baseline_completion=completion_before,
-                        )
-                    self._sync_live_telemetry(
-                        state,
-                        cluster_id=cluster_id,
-                        mark_running=True,
-                    )
-                    self._save_cycle_checkpoint(state, path=path)
+                self._sync_live_telemetry(
+                    state,
+                    cluster_id=cluster_id,
+                    mark_running=True,
+                )
+                self._save_cycle_checkpoint(state, path=path)
+                if path.is_file():
                     content = path.read_text(encoding="utf-8", errors="replace")
                     refreshed_mtime = occ_snapshot(path)
                     if refreshed_mtime is not None:
                         baseline_mtime = refreshed_mtime
-                alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
-                enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
-                enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
-                if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
-                    logger.warning(
-                        "OCC Conflict: User modified {} during inference. Aborting write.",
-                        path,
-                    )
-                    write_aborted = True
-                    return False
-                _key, prior_rec = _lookup_file_state(self.graph_root, state, path)
-                if prompt_session is None and self.graph_root is not None:
-                    prompt_session = build_page_prompt_session(
-                        self.graph_root,
-                        title,
-                        content,
-                        config=lint_config,
-                        stable_system=build_semantic_lint_system_prompt(),
-                        page_path=path,
-                        alias_index=alias_index,
-                    )
-                result, usage = self.llm_client.index_page(
+            alias_index = self._compiled_alias_index() if self.bootstrap_complete else None
+            enable_semantic_routing = self.bootstrap_complete and lint_config.semantic_routing
+            enable_backprop = self.bootstrap_complete and lint_config.backpropagate_links
+            if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
+                logger.warning(
+                    "OCC Conflict: User modified {} during inference. Aborting write.",
+                    path,
+                )
+                write_aborted = True
+                return False
+            if prompt_session is None and self.graph_root is not None:
+                prompt_session = build_page_prompt_session(
+                    self.graph_root,
                     title,
                     content,
+                    config=lint_config,
+                    stable_system=build_semantic_lint_system_prompt(),
                     page_path=path,
-                    graph_root=self.graph_root,
                     alias_index=alias_index,
-                    enable_semantic_routing=enable_semantic_routing,
-                    prompt_session=prompt_session,
                 )
-                llm_called_from_usage = (
-                    int(usage.get("prompt_tokens", 0) or 0)
-                    + int(usage.get("completion_tokens", 0) or 0)
-                ) > 0
-                if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
-                    logger.warning(
-                        "OCC Conflict: User modified {} before apply. Aborting write.",
-                        path,
-                    )
-                    write_aborted = True
-                    return False
-                lint_outcome = apply_semantic_page_result(
-                    self.graph_root,
+            result, usage = self.llm_client.index_page(
+                title,
+                content,
+                page_path=path,
+                graph_root=self.graph_root,
+                alias_index=alias_index,
+                enable_semantic_routing=enable_semantic_routing,
+                prompt_session=prompt_session,
+            )
+            llm_called_from_usage = (
+                int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0)
+            ) > 0
+            if baseline_mtime is not None and file_mtime_drifted(path, baseline_mtime):
+                logger.warning(
+                    "OCC Conflict: User modified {} before apply. Aborting write.",
                     path,
-                    title,
-                    result,
-                    backpropagate=enable_backprop,
-                    alias_index=alias_index,
-                    disable_semantic_corrections=lint_config.disable_semantic_corrections,
-                    baseline_mtime=baseline_mtime,
                 )
-                record_daemon_impact(
-                    state,
-                    lint=lint_outcome,
-                    links_backpropagated=lint_outcome.links_backpropagated,
+                write_aborted = True
+                return False
+            lint_outcome = apply_semantic_page_result(
+                self.graph_root,
+                path,
+                title,
+                result,
+                backpropagate=enable_backprop,
+                alias_index=alias_index,
+                disable_semantic_corrections=lint_config.disable_semantic_corrections,
+                baseline_mtime=baseline_mtime,
+            )
+            record_daemon_impact(
+                state,
+                lint=lint_outcome,
+                links_backpropagated=lint_outcome.links_backpropagated,
+            )
+            if lint_outcome.write_aborted:
+                write_aborted = True
+                llm_called_from_logger = (
+                    self.token_logger.session_prompt_tokens > prompt_before
+                    or self.token_logger.session_completion_tokens > completion_before
                 )
-                if lint_outcome.write_aborted:
-                    write_aborted = True
-                    llm_called_from_logger = (
-                        self.token_logger.session_prompt_tokens > prompt_before
-                        or self.token_logger.session_completion_tokens > completion_before
-                    )
-                    return llm_called_from_usage or llm_called_from_logger
-                state.files[key] = FileState(
-                    mtime=path.stat().st_mtime,
-                    processed_at=datetime.now(tz=UTC).isoformat(),
-                    status="processed",
-                )
-                self._sync_catalog_after_page_write(path, title)
+                return llm_called_from_usage or llm_called_from_logger
+            state.files[key] = FileState(
+                mtime=path.stat().st_mtime,
+                processed_at=datetime.now(tz=UTC).isoformat(),
+                status="processed",
+            )
+            self._sync_catalog_after_page_write(path, title)
         except PageLockUnavailableError as exc:
             self.token_logger.log_structural_lint_warning(
                 target_file=path,
