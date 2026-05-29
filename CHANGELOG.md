@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`.env.example`** — Every tunable key documents **Default (code)** vs **Template** values; fixed `MATRYCA_PLUMBER_COMPRESSION_TRIGGER_TOKENS` to `100000`; added `MATRYCA_PLUMBER_NICE_LEVEL`, `MATRYCA_PLUMBER_IONICE_IDLE`, LLM/service-manager notes; `MATRYCA_LLM_PROMPT_CACHE_MODE` marked reserved. CI: `tests/test_env_example_coverage.py`.
+- **Cursor rule `07-env-example.mdc`** — Agents must update `.env.example` when env vars change; file split into **Operator essentials** vs **Advanced / high impact** sections.
+
 ### Fixed
 
 - **v1.8 audit (round 4)** — `generate_graph_insights` is stateless so ontology reports do not pollute Ermes history; context-compression summaries are prose-sanitized before persistence; semantic-index block catalogs cap at 8k chars; Phase 2 LLM inference no longer holds `page_rmw_lock` (write-only lock in `apply_semantic_page_result`); `id::` lines are excluded from property-line hygiene so Logseq block UUIDs are never edited as properties.

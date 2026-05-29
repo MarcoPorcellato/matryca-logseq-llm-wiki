@@ -19,7 +19,7 @@ This project exists so humans and **autonomous local systems** can collaborate o
 
 Deep reference: [`SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/openspec/llm-performance.md`](docs/openspec/llm-performance.md) (v1.8 edge profile).
 
-**Note:** `MATRYCA_LM_INSTRUCTOR_MODE` / `MATRYCA_LM_INSTRUCTOR_FALLBACK` in `.env.example` are **legacy** (ignored). Structured output uses `probe_backend()` in [`src/agent/llm_client.py`](src/agent/llm_client.py) (Path A strict schema vs Path B self-correction).
+**Configuration:** [`.env.example`](.env.example) is the operator reference, split into **Operator essentials** (day-one / Settings drawer) and **Advanced / high impact** (mutating lint, MCP, security). Each key documents **Default (code)** and **Template** when they differ. Agents must keep `.env.example` in sync when changing env vars — see [`.cursor/rules/07-env-example.mdc`](.cursor/rules/07-env-example.mdc). `MATRYCA_LM_INSTRUCTOR_*` and `MATRYCA_LLM_PROMPT_CACHE_MODE` are legacy or reserved (not read by runtime). CI: `tests/test_env_example_coverage.py`.
 
 ---
 
