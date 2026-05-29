@@ -206,6 +206,7 @@ Retire fragmented Rich TUI; validate on a graph growing **1,426 → 3,862** conn
 
 - **Isolated token logging** — submodule loggers vs shared `TokenLogger` / `_save_cycle_checkpoint`.
 - **JSON repair** — `json_repair.py` for local model grammar leakage.
+- **Resilient structured output (TRIZ)** — [`resilience-llm-json-triz.md`](resilience-llm-json-triz.md): Gemma “tail of death” (`\n` loops), `MATRYCA_LLM_MAX_COMPLETION_TOKENS`, balanced-brace extraction, sanitization pipeline integrated with Path A/B in `llm_client.py`.
 - **Non-atomic daemon state** — `save_daemon_state` tmp + `fsync` + `os.replace`; double-read on load.
 
 ### Status

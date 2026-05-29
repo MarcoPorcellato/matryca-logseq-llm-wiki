@@ -1509,6 +1509,19 @@ class InstructorLLMClient(_BaseInstructorLLMClient):
         started = time.perf_counter()
         usage = {"prompt_tokens": 0, "completion_tokens": 0}
         routing_enabled = enable_semantic_routing and config.semantic_routing
+        from ..utils.agent_debug_log import agent_debug_log
+
+        agent_debug_log(
+            location="maintenance_daemon.py:index_page",
+            message="index_page start",
+            hypothesis_id="H5",
+            data={
+                "page_title": page_title,
+                "content_len": len(content),
+                "prompt_len": len(prompt),
+                "has_session": session is not None,
+            },
+        )
         try:
             if routing_enabled and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
@@ -1555,8 +1568,28 @@ class InstructorLLMClient(_BaseInstructorLLMClient):
             if routing_enabled and page_path is not None and graph_root is not None:
                 key = semantic_cache_key(page_path, "semantic_index")
                 cache_put(graph_root, "index", key, result.model_dump())
+            agent_debug_log(
+                location="maintenance_daemon.py:index_page",
+                message="index_page success",
+                hypothesis_id="H1,H4",
+                data={
+                    "page_title": page_title,
+                    "completion_tokens": usage["completion_tokens"],
+                    "summary_len": len(result.summary),
+                    "corrections_count": len(result.semantic_corrections),
+                },
+            )
             return result, usage
         except Exception as exc:  # noqa: BLE001 - log and re-raise for daemon loop
+            agent_debug_log(
+                location="maintenance_daemon.py:index_page",
+                message="index_page failed",
+                hypothesis_id="H1,H2,H3",
+                data={
+                    "page_title": page_title,
+                    "error_head": str(exc)[:400],
+                },
+            )
             latency = time.perf_counter() - started
             self.token_logger.log_turn(
                 target_file=page_title,

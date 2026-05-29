@@ -19,7 +19,15 @@ from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError
 
 from ..graph.insights_engine import INSIGHTS_SYSTEM_PROMPT
-from ..utils.json_repair import parse_llm_json
+from ..utils.agent_debug_log import agent_debug_log, completion_usage_tokens
+from ..utils.json_repair import (
+    collapse_all_degenerate_llm_runs,
+    max_consecutive_literal_backslash_n,
+    parse_llm_json,
+    sanitize_llm_completion_text,
+    sanitize_llm_history_turn,
+    sanitize_prose_llm_completion,
+)
 from ..utils.token_logger import OperationType, TokenLogger
 from .context_compressor import (
     COMPRESSION_SYSTEM_PROMPT,
@@ -34,6 +42,9 @@ from .plumber_config import (
     apply_thermal_pause_cognitive,
     load_plumber_lint_config,
     resolve_llm_api_key,
+    resolve_llm_max_completion_tokens,
+    resolve_cluster_focus_max_chars,
+    resolve_llm_max_compression_tokens,
     resolve_llm_model_name,
     resolve_validated_llm_base_url,
 )
@@ -119,6 +130,16 @@ def call_openai_with_transport_retries[T](factory: Callable[[], T]) -> T:
 
 MAX_SELF_CORRECTION_RETRIES = 3
 
+
+def _structured_completion_kwargs() -> dict[str, Any]:
+    """Bounded completion size to stop local-model token-loop degeneration."""
+    return {"max_tokens": resolve_llm_max_completion_tokens()}
+
+
+def _compression_completion_kwargs() -> dict[str, Any]:
+    """Separate cap for markdown context-compression calls (Ermes history)."""
+    return {"max_tokens": resolve_llm_max_compression_tokens()}
+
 _CORRECTION_USER_TEMPLATE = (
     "Your previous output failed validation with this error:\n{error}\n"
     "Return corrected JSON only, matching the required schema."
@@ -152,7 +173,7 @@ class StructuredOutputExhaustedError(LLMResponseError):
     """Raised after Path B self-correction retries are exhausted."""
 
 
-def _extract_first_choice_content(response: object) -> str:
+def _extract_first_choice_content(response: object, *, source: str = "unknown") -> str:
     choices = getattr(response, "choices", None)
     if not isinstance(choices, list) or not choices:
         raise LLMResponseError("LLM response missing choices")
@@ -163,7 +184,38 @@ def _extract_first_choice_content(response: object) -> str:
     content = getattr(message, "content", None)
     if content is None or not str(content).strip():
         raise LLMResponseError("LLM response choice has empty content")
-    return str(content).strip()
+    raw = str(content).strip()
+    if "{" in raw:
+        trimmed = sanitize_llm_completion_text(raw)
+        if len(trimmed) < len(raw):
+            logger.warning(
+                "Trimmed {} chars of degenerate LLM JSON tail (source={})",
+                len(raw) - len(trimmed),
+                source,
+            )
+            raw = trimmed
+    else:
+        trimmed = sanitize_prose_llm_completion(raw)
+        if len(trimmed) < len(raw):
+            logger.warning(
+                "Trimmed {} chars of degenerate LLM prose tail (source={})",
+                len(raw) - len(trimmed),
+                source,
+            )
+            raw = trimmed
+    agent_debug_log(
+        location="llm_client.py:_extract_first_choice_content",
+        message="raw completion extracted",
+        hypothesis_id="H1,H4",
+        data={
+            "source": source,
+            "raw_len": len(raw),
+            "max_literal_backslash_n_run": max_consecutive_literal_backslash_n(raw),
+            "usage": completion_usage_tokens(response),
+            "head_sample": raw[:240],
+        },
+    )
+    return raw
 
 
 def _cluster_history_enabled() -> bool:
@@ -184,11 +236,12 @@ def pydantic_to_strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
 
 def append_correction_turn(messages: list[ChatMessage], *, error: str) -> list[ChatMessage]:
     """Append a user turn asking the model to fix validation failures."""
+    safe_error = collapse_all_degenerate_llm_runs(error)[:4000]
     updated = list(messages)
     updated.append(
         {
             "role": "user",
-            "content": _CORRECTION_USER_TEMPLATE.format(error=error[:4000]),
+            "content": _CORRECTION_USER_TEMPLATE.format(error=safe_error),
         },
     )
     return updated
@@ -284,6 +337,18 @@ class AdaptiveStructuredOutputEngine:
         kv_prefix_hash: str | None = None,
     ) -> tuple[T, object]:
         profile = self.probe_backend()
+        agent_debug_log(
+            location="llm_client.py:completion_structured",
+            message="structured completion route",
+            hypothesis_id="H1,H5",
+            data={
+                "grammar_capability": profile.grammar_capability.value,
+                "response_model": response_model.__name__,
+                "stateless": stateless,
+                "use_history": use_history,
+                "message_count": len(messages),
+            },
+        )
         if profile.grammar_capability == GrammarCapability.LOGITS_JSON_SCHEMA:
             return self._path_a_completion(
                 messages=messages,
@@ -331,6 +396,7 @@ class AdaptiveStructuredOutputEngine:
         client = self._client
         schema = pydantic_to_strict_json_schema(response_model)
         api_messages = cast(Any, messages)
+        completion_kwargs = _structured_completion_kwargs()
         response = call_openai_with_transport_retries(
             lambda: client._raw_client.chat.completions.create(
                 model=client.model,
@@ -344,10 +410,11 @@ class AdaptiveStructuredOutputEngine:
                         "strict": True,
                     },
                 },
+                **completion_kwargs,
             ),
         )
-        raw_text = _extract_first_choice_content(response)
-        parsed = response_model.model_validate_json(raw_text)
+        raw_text = _extract_first_choice_content(response, source="path_a")
+        parsed = parse_llm_json(raw_text, response_model)
         if use_history:
             client._append_execution_turn(prompt, parsed.model_dump_json())
         if stateless:
@@ -390,13 +457,25 @@ class AdaptiveStructuredOutputEngine:
         last_error = ""
         working_messages = list(messages)
 
-        for _attempt in range(MAX_SELF_CORRECTION_RETRIES):
+        for attempt in range(MAX_SELF_CORRECTION_RETRIES):
+            agent_debug_log(
+                location="llm_client.py:_path_b_completion",
+                message="path_b attempt",
+                hypothesis_id="H3",
+                data={
+                    "attempt": attempt + 1,
+                    "response_model": response_model.__name__,
+                    "grammar_capability": profile.grammar_capability.value,
+                    "message_count": len(working_messages),
+                },
+            )
             try:
                 parsed, completion = instructor_client.chat.completions.create_with_completion(
                     model=client.model,
                     messages=working_messages,
                     response_model=response_model,
                     max_retries=1,
+                    **_structured_completion_kwargs(),
                 )
                 if use_history:
                     client._append_execution_turn(prompt, parsed.model_dump_json())
@@ -416,13 +495,37 @@ class AdaptiveStructuredOutputEngine:
                 return finalized
             except ValidationError as exc:
                 last_error = str(exc)
+                agent_debug_log(
+                    location="llm_client.py:_path_b_completion",
+                    message="instructor validation failed",
+                    hypothesis_id="H3",
+                    data={"attempt": attempt + 1, "error_head": last_error[:400]},
+                )
                 working_messages = append_correction_turn(working_messages, error=last_error)
             except Exception as exc:  # noqa: BLE001 - try raw JSON salvage
                 last_error = str(exc)
+                agent_debug_log(
+                    location="llm_client.py:_path_b_completion",
+                    message="instructor exception; trying raw JSON salvage",
+                    hypothesis_id="H2,H3",
+                    data={"attempt": attempt + 1, "error_head": last_error[:400]},
+                )
                 try:
                     raw_text, completion = client._raw_json_completion(
                         working_messages,
                         thermal_profile=thermal_profile,
+                    )
+                    agent_debug_log(
+                        location="llm_client.py:_path_b_completion",
+                        message="raw salvage before parse_llm_json",
+                        hypothesis_id="H2",
+                        data={
+                            "raw_len": len(raw_text),
+                            "max_literal_backslash_n_run": max_consecutive_literal_backslash_n(
+                                raw_text,
+                            ),
+                            "usage": completion_usage_tokens(completion),
+                        },
                     )
                     parsed = parse_llm_json(raw_text, response_model)
                     if use_history:
@@ -526,10 +629,19 @@ class InstructorLLMClient:
 
     def inject_cluster_focus_context(self, neighborhood_text: str) -> None:
         self.reset_execution_history()
+        cap = resolve_cluster_focus_max_chars()
+        body = neighborhood_text
+        if len(body) > cap:
+            logger.warning(
+                "Cluster focus neighborhood truncated from {} to {} chars",
+                len(body),
+                cap,
+            )
+            body = body[:cap].rstrip() + "\n\n...[truncation: cluster focus cap]"
         focus_prompt = (
             "[CLUSTER FOCUS: NEIGHBORHOOD MAP]\n"
             "Below are the summaries of all nodes in this isolated semantic cluster:\n\n"
-            f"{neighborhood_text}"
+            f"{body}"
         )
         self._execution_history.append({"role": "user", "content": focus_prompt})
         if _cluster_history_enabled():
@@ -553,8 +665,12 @@ class InstructorLLMClient:
             self._execution_history = self._execution_history[-MAX_EXECUTION_HISTORY_MESSAGES:]
 
     def _append_execution_turn(self, prompt: str, response: str) -> None:
-        self._execution_history.append({"role": "user", "content": prompt})
-        self._execution_history.append({"role": "assistant", "content": response})
+        self._execution_history.append(
+            {"role": "user", "content": sanitize_llm_history_turn(prompt)},
+        )
+        self._execution_history.append(
+            {"role": "assistant", "content": sanitize_llm_history_turn(response)},
+        )
         self._trim_execution_history()
 
     def _completion_messages(
@@ -623,6 +739,7 @@ class InstructorLLMClient:
                     {"role": "user", "content": compression_prompt},
                 ],
                 temperature=0.1,
+                **_compression_completion_kwargs(),
             ),
         )
         content = _extract_first_choice_content(response)
@@ -653,23 +770,27 @@ class InstructorLLMClient:
         _ = thermal_profile
         api_messages = cast(Any, messages)
         try:
+            completion_kwargs = _structured_completion_kwargs()
             response = call_openai_with_transport_retries(
                 lambda: self._raw_client.chat.completions.create(
                     model=self.model,
                     messages=api_messages,
                     temperature=0.1,
                     response_format={"type": "json_object"},
+                    **completion_kwargs,
                 ),
             )
         except Exception:  # noqa: BLE001
+            completion_kwargs = _structured_completion_kwargs()
             response = call_openai_with_transport_retries(
                 lambda: self._raw_client.chat.completions.create(
                     model=self.model,
                     messages=api_messages,
                     temperature=0.1,
+                    **completion_kwargs,
                 ),
             )
-        content = _extract_first_choice_content(response)
+        content = _extract_first_choice_content(response, source="raw_json_completion")
         return content, response
 
     def _finalize_structured_completion[T: BaseModel](

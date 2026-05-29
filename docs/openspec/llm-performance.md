@@ -82,11 +82,23 @@ After successful Phase 1 bootstrap, the daemon calls `release_phase1_memory()` (
 
 | Path | When | Behavior |
 |------|------|----------|
-| **A** | Probe finds `json_schema` strict support | Single completion via OpenAI `response_format`; no Python JSON repair |
+| **A** | Probe finds `json_schema` strict support | Single completion via OpenAI `response_format`; `parse_llm_json` after sanitization |
 | **B** | Legacy / probe miss | Up to 3 self-correction turns with `ValidationError` feedback; `parse_llm_json` once per attempt |
 | **Exhausted** | Path B fails | `StructuredOutputExhaustedError` → page `status=error` (skip until mtime change or restart) |
 
 Module: [`llm_client.py`](../../src/agent/llm_client.py). Foreground daemon calls `probe_backend()` once at start.
+
+### Resilient JSON (TRIZ — local model degeneration)
+
+Small models (e.g. **Gemma 4-E4b**) may omit `<eos>` under strict JSON and enter a **literal `\n` repetition loop**, wasting CPU/RAM without improving the graph. Matryca Plumber applies **defense in depth**:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Brake | `MATRYCA_LLM_MAX_COMPLETION_TOKENS` (default 2048) on all structured completions |
+| Scalpel | Brace-balanced extraction — **not** greedy `{.*}` regex |
+| Filter | `sanitize_llm_completion_text()` + Gemma key/run repair in [`json_repair.py`](../../src/utils/json_repair.py) |
+
+Full TRIZ framing, failure anatomy, and verification: **[`resilience-llm-json-triz.md`](../resilience-llm-json-triz.md)**.
 
 ---
 
@@ -123,6 +135,7 @@ Daemon checkpoint frequency during Phase 1 is controlled by `MATRYCA_BOOTSTRAP_C
 | Backlink index | `tests/test_backlink_index.py` |
 | Bootstrap yield | `tests/test_bootstrap_yield.py` |
 | Adaptive LLM | `tests/test_llm_client_adaptive.py` |
+| Resilient JSON / Gemma tail | `tests/test_json_repair.py` |
 | CPU sandbox | `tests/test_process_priority.py` |
 | Mmap reads | `tests/test_markdown_io.py` |
 | Slow soak | `tests/slow/test_daemon_memory_soak.py` (`pytest -m slow`) |

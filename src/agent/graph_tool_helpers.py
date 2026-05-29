@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from ..graph.markdown_blocks import locate_block_by_uuid
 from ..graph.path_sandbox import graph_safe_page_path
+from ..utils.json_repair import loads_repaired_json
 from ..utils.regex_policy import validate_regex_pattern
 
 MAX_REGEX_SCAN_BYTES = 5_000_000
@@ -56,7 +57,7 @@ def parse_json_object(payload: str, *, field_name: str = "payload") -> dict[str,
     if not raw:
         msg = f"`{field_name}` must be a non-empty JSON object"
         raise ValueError(msg)
-    data = json.loads(raw)
+    data = loads_repaired_json(raw) if raw.startswith("{") else json.loads(raw)
     if not isinstance(data, dict):
         msg = f"`{field_name}` must decode to a JSON object"
         raise TypeError(msg)
@@ -68,7 +69,7 @@ def parse_optional_json_query(query: str) -> dict[str, Any]:
     if not raw:
         return {}
     if raw.startswith("{"):
-        data = json.loads(raw)
+        data = loads_repaired_json(raw)
         if not isinstance(data, dict):
             msg = "`query` JSON must be an object when it starts with `{`"
             raise TypeError(msg)

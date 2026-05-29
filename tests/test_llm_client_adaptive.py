@@ -15,7 +15,16 @@ from src.agent.llm_client import (
     StructuredOutputExhaustedError,
     append_correction_turn,
 )
+from src.agent.plumber_config import DEFAULT_LLM_MAX_COMPRESSION_TOKENS
 from src.agent.plumber_llm import GraphInsightsLLMResult
+
+
+def test_append_correction_turn_strips_degenerate_error_tail() -> None:
+    messages: list[ChatMessage] = [{"role": "system", "content": "sys"}]
+    error = "validation failed" + ("\\n" * 80)
+    updated = append_correction_turn(messages, error=error)
+    assert "\\n\\n\\n" not in updated[-1]["content"]
+    assert "validation failed" in updated[-1]["content"]
 
 
 def test_append_correction_turn_adds_user_message() -> None:
@@ -173,3 +182,16 @@ def test_path_b_exhausted_raises(monkeypatch: pytest.MonkeyPatch) -> None:
             log_tokens=False,
             thermal_profile="cognitive",
         )
+
+
+def test_compress_history_uses_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = InstructorLLMClient(base_url="http://localhost:1234/v1")
+    response = MagicMock()
+    response.choices = [MagicMock(message=MagicMock(content="## Consolidated Epistemic State\n"))]
+    response.usage = None
+    create_mock = MagicMock(return_value=response)
+    monkeypatch.setattr(client._raw_client.chat.completions, "create", create_mock)
+    out = client._compress_history_via_llm("compress this history")
+    assert "Consolidated" in out
+    kwargs = create_mock.call_args.kwargs
+    assert kwargs.get("max_tokens") == DEFAULT_LLM_MAX_COMPRESSION_TOKENS

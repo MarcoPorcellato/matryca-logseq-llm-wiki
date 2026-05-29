@@ -50,6 +50,7 @@ from ..graph.unlinked_mentions import resolve_unlinked_mentions as scan_unlinked
 from ..graph.wiki_lint import format_wiki_lint_report, lint_wiki_prefixed_pages
 from ..rag.local_query import format_keyword_query_markdown
 from ..rag.matryca_hooks import get_page_spatial_context
+from ..utils.json_repair import loads_repaired_json
 from .alias_state import resolve_pipe_target, resolve_target
 from .git_snapshot import snapshot_git_working_tree
 from .graph_tool_helpers import (
@@ -804,7 +805,7 @@ async def dispatch_refactor(
             return {"ok": False, "error": "For reparent, `target_uuid` must be the page title."}
         groups_raw = refactor_opts.get("groups")
         if groups_raw is None and payload.strip().startswith("["):
-            groups_raw = json.loads(payload)
+            groups_raw = loads_repaired_json(payload)
         if not isinstance(groups_raw, list):
             return {
                 "ok": False,

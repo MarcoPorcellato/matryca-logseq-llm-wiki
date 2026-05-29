@@ -15,6 +15,11 @@ from urllib.parse import urlparse
 DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_LLM_MODEL_NAME = "local-model"
 DEFAULT_LLM_API_KEY = "dummy-key"
+DEFAULT_LLM_MAX_COMPLETION_TOKENS = 2048
+DEFAULT_LLM_MAX_COMPRESSION_TOKENS = 1536
+_MIN_LLM_MAX_COMPLETION_TOKENS = 256
+_MAX_LLM_MAX_COMPLETION_TOKENS = 8192
+_MAX_LLM_MAX_COMPRESSION_TOKENS = 4096
 
 # Backward-compatible aliases for legacy imports and persisted state.
 DEFAULT_LM_BASE_URL = DEFAULT_LLM_BASE_URL
@@ -76,6 +81,30 @@ def _env_str(key: str, default: str) -> str:
     if raw:
         return raw
     return default
+
+
+def resolve_llm_max_completion_tokens() -> int:
+    """Upper bound for structured JSON completions (prevents runaway local-model loops)."""
+    value = _env_int("MATRYCA_LLM_MAX_COMPLETION_TOKENS", DEFAULT_LLM_MAX_COMPLETION_TOKENS)
+    return max(_MIN_LLM_MAX_COMPLETION_TOKENS, min(_MAX_LLM_MAX_COMPLETION_TOKENS, value))
+
+
+def resolve_llm_max_compression_tokens() -> int:
+    """Upper bound for Ermes context-compression completions (markdown, not JSON)."""
+    value = _env_int("MATRYCA_LLM_MAX_COMPRESSION_TOKENS", DEFAULT_LLM_MAX_COMPRESSION_TOKENS)
+    return max(_MIN_LLM_MAX_COMPLETION_TOKENS, min(_MAX_LLM_MAX_COMPRESSION_TOKENS, value))
+
+
+def resolve_llm_prose_completion_max_chars() -> int:
+    """Hard character cap after prose sanitization (history pollution guard)."""
+    value = _env_int("MATRYCA_LLM_PROSE_COMPLETION_MAX_CHARS", 12_000)
+    return max(2_000, min(32_000, value))
+
+
+def resolve_cluster_focus_max_chars() -> int:
+    """Cap Ermes cluster neighborhood injection (large Louvain clusters)."""
+    value = _env_int("MATRYCA_CLUSTER_FOCUS_MAX_CHARS", 8000)
+    return max(1_000, min(24_000, value))
 
 
 def resolve_llm_model_name(*, override: str | None = None) -> str:
@@ -459,6 +488,10 @@ __all__ = [
     "resolve_llm_api_key",
     "resolve_llm_base_url",
     "resolve_validated_llm_base_url",
+    "resolve_llm_max_completion_tokens",
+    "resolve_llm_max_compression_tokens",
+    "resolve_cluster_focus_max_chars",
+    "resolve_llm_prose_completion_max_chars",
     "resolve_llm_model_name",
     "resolve_lm_base_url",
     "resolve_lm_model",

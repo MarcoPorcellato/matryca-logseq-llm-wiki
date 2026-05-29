@@ -152,6 +152,7 @@ Matryca Plumber provisions missing runtime files automatically where possible (r
 * 🔐 **Optimistic Concurrency Control:** It checks `st_mtime` before any AI inference. If you typed in Logseq while the AI was "thinking", Matryca Plumber aborts its write. **No silent data loss.**
 * 🪟 **Windows, macOS & Linux Support:** Runs safely in the background everywhere using a robust cross-platform lock (`.matryca_plumber_daemon.lock`).
 * ⚡ **Context Acceleration Shield:** Shrinks megabyte-class pages to Phase 1 summaries or semantic skeletons before they reach the local LLM — essential on CPU-only hardware.
+* 🛡️ **TRIZ-governed LLM resilience:** Caps completion tokens, extracts JSON with balanced braces (not greedy regex), and sanitizes Gemma-style degeneration tails before any graph write — see [`docs/resilience-llm-json-triz.md`](docs/resilience-llm-json-triz.md).
 * 🖥️ **Edge computing profile (v1.8):** KV-cache-aligned prompts (`PagePromptSession`), bounded RAM (BM25 postings-lite, semantic cache LRU, post-bootstrap teardown), and cooperative bootstrap I/O — tuned for **16 GB laptops** and vaults up to **~10,000** pages. See [docs/v1.8-OPTIMIZATION-PLAN.md](docs/v1.8-OPTIMIZATION-PLAN.md).
 
 ---

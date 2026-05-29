@@ -1,4 +1,4 @@
-.PHONY: help install format lint typecheck test check clean
+.PHONY: help install format lint typecheck test test-resilience check clean
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -18,6 +18,9 @@ typecheck: ## Run mypy for strict type checking
 
 test: ## Run the pytest suite
 	uv run pytest -q
+
+test-resilience: ## JSON repair + adaptive LLM tests (no coverage gate)
+	uv run pytest -q tests/test_json_repair.py tests/test_llm_client_adaptive.py --no-cov
 
 perf: ## Run slow performance/memory tests (no coverage gate)
 	uv run pytest -q -m slow tests/slow --no-cov

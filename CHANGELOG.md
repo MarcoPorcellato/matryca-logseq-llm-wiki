@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gemma JSON degeneration** — Structured LLM completions cap at `MATRYCA_LLM_MAX_COMPLETION_TOKENS` (default 2048); `json_repair` uses balanced-brace extraction (not greedy `{.*}`), strips post-`}` `\n` token loops, and normalizes Gemma `\n  \"key` leakage before indexing Logseq pages.
+- **LLM resilience audit** — Context compression now uses `MATRYCA_LLM_MAX_COMPRESSION_TOKENS`; prose/markdown completions sanitized; Ermes history turns cleaned before append; balanced `[` `]` extraction; collapse of `\t`/`\"` repetition loops; debug NDJSON gated behind `MATRYCA_LLM_DEBUG_JSON`.
+- **LLM resilience (round 2)** — Unbalanced/truncated JSON recovery; MCP `parse_json_object` uses `loads_repaired_json`; Path B correction errors stripped of degeneration; cluster focus capped via `MATRYCA_CLUSTER_FOCUS_MAX_CHARS`.
+
+### Added
+
+- **Docs** — [`docs/resilience-llm-json-triz.md`](docs/resilience-llm-json-triz.md): TRIZ / resilience-engineering narrative for local LLM JSON (Gemma tail of death, defense-in-depth layers, verification).
+
 ## [1.8.4] - 2026-05-29
 
 ### Changed
